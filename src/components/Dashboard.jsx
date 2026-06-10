@@ -6,52 +6,68 @@ import SearchBar from './SearchBar'
 import TranscriptCard from './TranscriptCard'
 import DetailPanel from './DetailPanel'
 import FooterBar from './FooterBar'
+import SettingsPanel from './SettingsPanel'
 import Icon from './Icons'
 
-const invoke = window.__TAURI__?.invoke || (async () => ({}))
-
-// Sample data for development (removed when Tauri backend is connected)
-const SAMPLE_DATA = [
-  { id: 1, timestamp: new Date().toISOString(), text: "The quarterly report shows a significant increase in revenue across all segments. The technology division saw a 23% year-over-year growth while the consulting arm maintained steady margins.", duration_seconds: 45, word_count: 32 },
-  { id: 2, timestamp: new Date(Date.now() - 3600000).toISOString(), text: "Please schedule the meeting for next Thursday at 3 PM with the engineering team. We need to discuss the API migration timeline and the deployment strategy for Q3.", duration_seconds: 23, word_count: 28 },
-  { id: 3, timestamp: new Date(Date.now() - 86400000).toISOString(), text: "I've been reviewing the architecture document and I think we should reconsider the approach to caching. The current Redis implementation has some edge cases around session invalidation that could cause issues at scale.", duration_seconds: 67, word_count: 38 },
-  { id: 4, timestamp: new Date(Date.now() - 172800000).toISOString(), text: "Looking at the NVIDIA earnings call transcript, they're guiding for 28 billion next quarter which is above consensus. The data center segment is the real story here with 47% sequential growth.", duration_seconds: 34, word_count: 32 },
-  { id: 5, timestamp: new Date(Date.now() - 259200000).toISOString(), text: "The macro environment suggests we should be cautious on duration exposure. The yield curve is steepening again and the Fed's dot plot indicates two more hikes this cycle.", duration_seconds: 28, word_count: 29 },
-]
+const invoke = window.__TAURI__?.invoke || (async (...args) => {
+  console.log('invoke (dev):', ...args)
+  return null
+})
+const listen = window.__TAURI__?.event?.listen || (() => () => {})
 
 export default function Dashboard() {
-  const [transcripts, setTranscripts] = useState(SAMPLE_DATA)
-  const [stats, setStats] = useState({ total: 5, words: 159, duration: 197 })
+  const [transcripts, setTranscripts] = useState([])
+  const [stats, setStats] = useState({ total: 0, words: 0, duration: 0 })
   const [selectedId, setSelectedId] = useState(null)
   const [flashId, setFlashId] = useState(null)
   const [query, setQuery] = useState('')
-  const [status, setStatus] = useState('ready')
+  const [status, setStatus] = useState('ready') // ready | recording | processing
   const [elapsed, setElapsed] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   const [toast, setToast] = useState(null)
+  const [error, setError] = useState(null)
   const timerRef = useRef(null)
+  const levelRef = useRef(null)
 
-  // Load transcripts from backend
-  useEffect(() => {
-    async function load() {
-      try {
-        const result = await invoke('get_transcripts', { page: 0, pageSize: 50 })
-        if (result.transcripts?.length) {
-          setTranscripts(result.transcripts)
-        }
-        const s = await invoke('get_stats')
-        if (s.total !== undefined) setStats(s)
-      } catch {
-        // Dev mode — use sample data
-      }
-    }
-    load()
+  // ── Load data ──────────────────────────────────────────────────────
+  const loadTranscripts = useCallback(async () => {
+    try {
+      const result = await invoke('get_transcripts', { page: 0, pageSize: 100 })
+      if (result?.transcripts) setTranscripts(result.transcripts)
+    } catch {}
   }, [])
 
-  // Recording timer
+  const loadStats = useCallback(async () => {
+    try {
+      const s = await invoke('get_stats')
+      if (s?.total !== undefined) setStats(s)
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    loadTranscripts()
+    loadStats()
+  }, [loadTranscripts, loadStats])
+
+  // ── Tauri event listeners (hotkeys from backend) ───────────────────
+  useEffect(() => {
+    const unlisten1 = listen('dictate-toggle', () => handleToggle())
+    const unlisten2 = listen('dictate-cancel', () => handleCancel())
+    return () => {
+      if (typeof unlisten1 === 'function') unlisten1()
+      else if (unlisten1?.then) unlisten1.then(fn => fn?.())
+      if (typeof unlisten2 === 'function') unlisten2()
+      else if (unlisten2?.then) unlisten2.then(fn => fn?.())
+    }
+  }, [status]) // re-register when status changes
+
+  // ── Recording timer ────────────────────────────────────────────────
   useEffect(() => {
     if (status === 'recording') {
-      timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
+      const start = Date.now()
+      timerRef.current = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - start) / 1000))
+      }, 250)
     } else {
       clearInterval(timerRef.current)
       setElapsed(0)
@@ -59,60 +75,135 @@ export default function Dashboard() {
     return () => clearInterval(timerRef.current)
   }, [status])
 
-  // Search filter
-  const filtered = query
-    ? transcripts.filter(t => t.text.toLowerCase().includes(query.toLowerCase()))
-    : transcripts
+  // ── Dictation state machine ────────────────────────────────────────
+  const handleToggle = useCallback(async () => {
+    if (status === 'ready') {
+      // Start recording
+      setError(null)
+      try {
+        await invoke('start_recording')
+        setStatus('recording')
+      } catch (e) {
+        setError('Microphone error — check your audio device')
+        console.error('Recording error:', e)
+      }
+    } else if (status === 'recording') {
+      // Stop recording → transcribe
+      setStatus('processing')
+      try {
+        const recording = await invoke('stop_recording')
+        if (!recording?.has_speech) {
+          setError('No speech detected — try again')
+          setStatus('ready')
+          return
+        }
+        if (!recording?.wav_path) {
+          setError('Recording failed')
+          setStatus('ready')
+          return
+        }
+        // Transcribe
+        const result = await invoke('transcribe', { wavPath: recording.wav_path })
+        if (result?.empty) {
+          setError('Transcription returned empty — audio may be too short')
+        } else if (result?.id) {
+          // Success — reload and flash the new entry
+          await loadTranscripts()
+          await loadStats()
+          setFlashId(result.id)
+          setSelectedId(result.id)
+          setTimeout(() => setFlashId(null), 1500)
 
-  const selected = transcripts.find(t => t.id === selectedId)
+          // Auto-paste
+          try {
+            const clipPlugin = window.__TAURI__?.clipboardManager
+            if (clipPlugin) {
+              await clipPlugin.writeText(result.text)
+            }
+          } catch {}
+        }
+      } catch (e) {
+        setError('Transcription failed — ' + (e?.message || e || 'unknown error'))
+        console.error('Transcription error:', e)
+      }
+      setStatus('ready')
+    }
+  }, [status, loadTranscripts, loadStats])
 
+  const handleCancel = useCallback(async () => {
+    if (status === 'recording') {
+      try { await invoke('stop_recording') } catch {}
+      setStatus('ready')
+    }
+  }, [status])
+
+  // ── Search filter ──────────────────────────────────────────────────
+  const [searchResults, setSearchResults] = useState(null)
+
+  useEffect(() => {
+    if (!query) {
+      setSearchResults(null)
+      return
+    }
+    const timeout = setTimeout(async () => {
+      try {
+        const results = await invoke('search_transcripts', { query })
+        setSearchResults(results)
+      } catch {
+        // Fallback: client-side filter
+        setSearchResults(
+          transcripts.filter(t => t.text.toLowerCase().includes(query.toLowerCase()))
+        )
+      }
+    }, 200)
+    return () => clearTimeout(timeout)
+  }, [query, transcripts])
+
+  const displayList = searchResults ?? transcripts
+  const selected = transcripts.find(t => t.id === selectedId) ||
+                   displayList.find(t => t.id === selectedId)
+
+  // ── Actions ────────────────────────────────────────────────────────
   const fireToast = useCallback((msg) => {
     setToast(msg)
     setTimeout(() => setToast(null), 1800)
   }, [])
 
-  const handleCopy = useCallback(() => {
-    if (selected) {
-      navigator.clipboard.writeText(selected.text).catch(() => {})
-      fireToast('Copied to clipboard')
-    }
+  const handleCopy = useCallback(async () => {
+    if (!selected) return
+    try {
+      await navigator.clipboard.writeText(selected.text)
+    } catch {}
+    fireToast('Copied to clipboard')
   }, [selected, fireToast])
 
   const handleDelete = useCallback(async () => {
     if (!selected) return
-    try {
-      await invoke('delete_transcript', { id: selected.id })
-    } catch { /* dev mode */ }
+    try { await invoke('delete_transcript', { id: selected.id }) } catch {}
     setTranscripts(prev => prev.filter(t => t.id !== selected.id))
     setSelectedId(null)
+    await loadStats()
     fireToast('Transcript deleted')
-  }, [selected, fireToast])
+  }, [selected, fireToast, loadStats])
 
-  const handleExport = useCallback(() => {
-    fireToast('Export coming soon')
+  const handleExport = useCallback(async () => {
+    // TODO: file dialog via Tauri
+    fireToast('Export: use Ctrl+Shift+E (coming soon)')
   }, [fireToast])
 
-  // Toggle dictation
-  const handleToggle = useCallback(() => {
-    if (status === 'ready') {
-      setStatus('recording')
-    } else if (status === 'recording') {
-      setStatus('processing')
-      setTimeout(() => {
-        setStatus('ready')
-        // In production, this would be the actual transcription result
-      }, 2000)
+  // ── Window controls ────────────────────────────────────────────────
+  const win = () => window.__TAURI__?.window?.getCurrentWindow?.()
+  const handleMinimize = () => win()?.minimize?.()
+  const handleMaximize = () => win()?.toggleMaximize?.()
+  const handleClose = () => win()?.hide?.()
+
+  // ── Clear error after timeout ──────────────────────────────────────
+  useEffect(() => {
+    if (error) {
+      const t = setTimeout(() => setError(null), 6000)
+      return () => clearTimeout(t)
     }
-  }, [status])
-
-  const handleCancel = useCallback(() => {
-    if (status === 'recording') setStatus('ready')
-  }, [status])
-
-  // Window controls (Tauri)
-  const handleMinimize = () => window.__TAURI__?.window?.getCurrentWindow?.()?.minimize?.()
-  const handleMaximize = () => window.__TAURI__?.window?.getCurrentWindow?.()?.toggleMaximize?.()
-  const handleClose = () => window.__TAURI__?.window?.getCurrentWindow?.()?.hide?.()
+  }, [error])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-primary)' }}>
@@ -125,31 +216,40 @@ export default function Dashboard() {
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 16px', gap: 12, overflow: 'hidden' }}>
-        {/* Quick Stats */}
         <QuickStats total={stats.total} words={stats.words} duration={stats.duration} />
 
-        {/* Status Panel */}
         <StatusPanel status={status} elapsed={elapsed} onToggle={handleToggle} onCancel={handleCancel} />
 
-        {/* Search */}
+        {/* Error banner */}
+        {error && (
+          <div style={{
+            padding: '8px 12px', background: 'color-mix(in srgb, var(--accent-red) 8%, var(--bg-card))',
+            border: '1px solid color-mix(in srgb, var(--accent-red) 20%, transparent)',
+            borderRadius: 'var(--echo-radius)', fontSize: 12, color: 'var(--accent-red)',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <Icon name="x" size={13} color="var(--accent-red)" />
+            {error}
+          </div>
+        )}
+
         <SearchBar
           query={query} onChange={setQuery}
-          count={query ? filtered.length : undefined}
+          count={query ? displayList.length : undefined}
           total={transcripts.length}
           onExport={handleExport}
         />
 
-        {/* Split: List + Detail */}
+        {/* Split layout: List + Detail */}
         <div style={{ flex: 1, display: 'flex', gap: 12, overflow: 'hidden', minHeight: 0 }}>
-          {/* Transcript list */}
           <div style={{
             flex: 1.05, display: 'flex', flexDirection: 'column', gap: 'var(--echo-list-gap)',
             overflow: 'auto', paddingRight: 4,
           }}>
-            {filtered.length === 0 ? (
+            {displayList.length === 0 ? (
               <EmptyState query={query} />
             ) : (
-              filtered.map(t => (
+              displayList.map(t => (
                 <TranscriptCard
                   key={t.id}
                   transcript={t}
@@ -160,19 +260,15 @@ export default function Dashboard() {
               ))
             )}
           </div>
-
-          {/* Detail panel */}
           <div style={{ flex: 0.95, minWidth: 0 }}>
-            <DetailPanel
-              transcript={selected}
-              onCopy={handleCopy}
-              onDelete={handleDelete}
-            />
+            <DetailPanel transcript={selected} onCopy={handleCopy} onDelete={handleDelete} />
           </div>
         </div>
       </div>
 
       <FooterBar />
+
+      <SettingsPanel open={showSettings} onClose={() => setShowSettings(false)} />
 
       {/* Toast */}
       {toast && (
@@ -182,7 +278,7 @@ export default function Dashboard() {
           padding: '6px 16px', borderRadius: 20, fontSize: 12, fontWeight: 500,
           display: 'flex', alignItems: 'center', gap: 6,
           animation: 'echo-rise 0.2s ease-out both',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 200,
         }}>
           <Icon name="check" size={13} color="var(--accent-green)" />
           {toast}
@@ -199,9 +295,7 @@ function EmptyState({ query }) {
         <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
           No transcriptions match "<strong>{query}</strong>"
         </div>
-        <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>
-          Try a different search term.
-        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>Try a different search term.</div>
       </div>
     )
   }
@@ -212,7 +306,8 @@ function EmptyState({ query }) {
         Nothing captured yet
       </div>
       <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-        Press <strong>Ctrl+Shift+Space</strong> to start your first dictation.
+        Press <strong>Ctrl + Shift + Space</strong> to start your first dictation.
+        <br />Your transcriptions will appear here automatically.
       </div>
     </div>
   )

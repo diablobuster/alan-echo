@@ -5,28 +5,42 @@ This file is what's LEFT — the items only a human can do, in order.
 
 ## A. Morning tasks (do these before announcing anything)
 
-1. **Stripe live-mode setup (~5 min):**
-   - The site creates the product inline at checkout (no dashboard product needed).
-   - Create the live giveaway code: `cd stock-analyzer; vercel env pull .env.vercel.local`
-     then `$env:STRIPE_SECRET_KEY="<live key>"; npx tsx scripts/echo-giveaway.ts ECHO-FRIENDS 25`
-     (or create a 100%-off coupon + promo code `ECHO-FRIENDS` in the Stripe dashboard).
+1. **Stripe live-mode setup (~10 min):**
+   - **Enable the new webhook events (REQUIRED — the refund/dispute/delayed-payment
+     handlers shipped 2026-06-10 never fire without this):** Stripe dashboard →
+     Developers → Webhooks → the alanglobalintelligence.com endpoint → add events:
+     `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
+     `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`.
+     (The live STRIPE_SECRET_KEY is marked Sensitive in Vercel and can't be pulled,
+     so this must be done in the dashboard.)
+   - Create the live giveaway code with the LIVE key from the Stripe dashboard:
+     `cd stock-analyzer; $env:STRIPE_SECRET_KEY="<live sk_live_ key>"; npx tsx scripts/echo-giveaway.ts ECHO-FRIENDS 25`
+     The script now also creates the persistent "ALAN Echo" Stripe Product and prints
+     TWO env vars to set in Vercel (Production) — `ECHO_STRIPE_PRODUCT_ID` (locks
+     coupons to Echo via applies_to) and `ECHO_GIVEAWAY_PROMO_IDS` (authorizes the
+     codes with the $0-session guard). Set both, then redeploy. For one-per-friend
+     unguessable codes instead of a shared word: `npx tsx scripts/echo-giveaway.ts --codes 25`.
    - Stripe dashboard → Settings → Tax: confirm an origin (head-office) address is set in
      LIVE mode. If it's missing, checkout still works — the route falls back to an untaxed
      sale and logs `[echo-checkout] automatic tax unavailable` — but set it properly.
-   - Confirm the live webhook endpoint includes `checkout.session.completed`
-     (it already does — same endpoint the tier subscriptions use).
+   - `checkout.session.completed` is already enabled (same endpoint the tier
+     subscriptions use).
 2. **Buy one real copy yourself** (live card, then refund it from the Stripe dashboard):
    proves payment → key on success page → email delivery → refund flow end-to-end.
-3. **Azure Artifact Signing enrollment (START TODAY — identity validation takes 1 day to
-   2 weeks):** portal.azure.com → create "Artifact Signing" (formerly Trusted Signing)
-   resource → Basic tier ($9.99/mo) → Identity Validation (government ID; individuals in
-   US/Canada eligible since Jan 2026 GA — no 3-year-history rule anymore). Note: the
-   certificate CN will be your validated legal name unless you enroll an LLC.
-   When approved: `cargo install trusted-signing-cli`, create an Entra app registration,
-   grant it "Trusted Signing Certificate Profile Signer", then set in tauri.conf.json:
-   `bundle.windows.signCommand = "trusted-signing-cli -e https://wus2.codesigning.azure.net -a <Account> -c <Profile> -d ALAN-Echo %1"`
-   with AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET in env. Rebuild, re-upload
-   the installer to the GitHub release, and SmartScreen warnings stop.
+3. **Unsigned-installer posture (DECIDED 2026-06-10: no code signing — owner declined
+   Azure enrollment).** SmartScreen's "Windows protected your PC" prompt is permanent;
+   every surface that hands out the installer must set the expectation honestly.
+   Mitigations in place / to do:
+   - SHA-256 checksums published in the GitHub release notes (done 2026-06-10):
+     installer `3ba5081b…3297c1c`, GPU pack `f29d1903…743609`.
+   - Upload the installer to VirusTotal once and keep the report link handy for
+     support replies (~2 min, free).
+   - If a customer reports Microsoft Defender quarantining the installer, submit a
+     false-positive report at microsoft.com/wdsi/filesubmission (fast turnaround) —
+     unsigned exes that register hotkeys + synthesize keystrokes are heuristic-flag
+     candidates.
+   - SmartScreen reputation builds with download volume even without signing; the
+     warning may fade on its own over weeks.
 4. **Support email:** make sure `support@alanglobalintelligence.com` exists and is
    monitored — it's printed on /echo, the EULA, the refund policy, and the license email.
 5. **Counsel re-review (when convenient):** the refund-policy Echo carve-out (30-day
@@ -43,8 +57,8 @@ cloud Windows VM (Azure/Paperspace), or a friend's machine.
    (refund later) → confirm the success page shows the key.
 2. Confirm the license email arrives (check spam! — first sends to a new address are the
    deliverability test).
-3. Download the installer (129.3 MB). Note the SmartScreen behavior — until code signing
-   lands, expect "Windows protected your PC" → More info → Run anyway.
+3. Download the installer (129.3 MB). Expect SmartScreen's "Windows protected your PC" →
+   More info → Run anyway (permanent — the installer is unsigned by decision).
 4. Install (should require NO admin prompt) → launch → onboarding → pick mic →
    test dictation. THIS exercises the bundled CPU base.en model — the make-or-break step.
    Expect ~1s transcription on a modern laptop; usable on old dual-cores.
@@ -57,13 +71,15 @@ cloud Windows VM (Azure/Paperspace), or a friend's machine.
 10. /echo/recover with the purchase email → key re-arrives.
 11. Refund the test purchase in Stripe; verify funds reverse.
 
-Record anything that breaks; the likely failure modes are SmartScreen friction (fixed by
-signing) and email-to-spam (check Resend domain DKIM/SPF — site email is mature, should
-be fine).
+Record anything that breaks; the likely failure modes are SmartScreen friction (permanent —
+mitigated by honest instructions + checksums) and email-to-spam (check Resend domain
+DKIM/SPF — site email is mature, should be fine).
 
 ## C. Known gaps / deliberate deferrals
 
-- **Installer is unsigned** until Azure validation completes (item A3).
+- **Installer is unsigned permanently** (owner decision, 2026-06-10). Mitigations:
+  published SHA-256 checksums, honest SmartScreen instructions on the success page,
+  license email, and /echo FAQ (item A3).
 - **GPU acceleration**: the CUDA engine is NOT in the installer (698 MB). It's uploaded as
   `ALAN-Echo-GPU-Pack-1.0.0.zip` on the GitHub release for power users (extract into
   `%APPDATA%\ALAN Echo\models\`). An in-app "download GPU pack" flow is the top 1.x item.

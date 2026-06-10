@@ -245,6 +245,135 @@ print(key)
 
 ---
 
+## CRITICAL: Transcription Speed Optimization
+
+This is the #1 priority. If transcription is slow, users will abandon the product. Every decision must optimize for minimum latency on ALL hardware.
+
+### The Problem
+Whisper.cpp CLI reloads the 1.5GB model from disk on every single transcription. First call: ~14s (5s load + 9s encode on CPU). Even on GPU after model is cached: the CLI still re-initializes every call. This is unacceptable.
+
+### The Solution: whisper-server (Persistent Mode)
+`whisper-server.exe` is ALREADY DOWNLOADED at `%APPDATA%/ALAN Echo/models/whisper-server.exe`. It loads the model ONCE and serves HTTP transcription requests. This eliminates model reload entirely.
+
+**Implementation:**
+1. On app launch, spawn `whisper-server.exe` as a child process:
+   ```
+   whisper-server.exe -m ggml-medium.bin --port 8178 --host 127.0.0.1
+   ```
+2. Replace the CLI call in `whisper.rs` with an HTTP POST to `http://127.0.0.1:8178/inference`
+3. Send the WAV file as multipart form data
+4. Parse the JSON response for the transcription text
+5. On app quit, kill the whisper-server child process
+6. If whisper-server crashes, auto-restart it
+
+**Expected latency after this change:**
+- GPU (RTX 4060): ~1-2s for 30s of speech (every time, including first)
+- CPU (modern 8-core): ~5-8s for 30s of speech
+- CPU (4-core laptop): ~10-15s for 30s of speech
+
+### Speed Optimization Ladder (implement ALL of these)
+
+**Tier 1 — Model selection by hardware (auto-detect at startup):**
+| Hardware | Model | Expected Speed (30s clip) |
+|----------|-------|--------------------------|
+| NVIDIA GPU ≥6GB VRAM | large-v3 (Ultra) | ~2-3s |
+| NVIDIA GPU ≥4GB VRAM | medium (Enhanced) | ~1-2s |
+| NVIDIA GPU <4GB VRAM | small (Standard) | ~0.5-1s |
+| CPU only, 8+ cores | medium (Enhanced) | ~5-8s |
+| CPU only, 4 cores | small (Standard) | ~3-5s |
+| CPU only, 2 cores | base | ~2-3s |
+
+Auto-detect: run `nvidia-smi` at startup. If it returns GPU info, read VRAM. If no GPU, count CPU cores. Select the fastest model that fits.
+
+**Tier 2 — whisper.cpp threading optimization:**
+- Pass `--threads N` where N = physical CPU cores (not logical/hyperthreaded)
+- On CPU-only: use `--processors 1` (single-pass is faster for short clips)
+- On GPU: use `--flash-attn` flag for faster attention computation
+
+**Tier 3 — Audio optimization:**
+- Record at 16kHz natively if the mic supports it (skip resampling)
+- Use VAD (Voice Activity Detection) to trim silence before/after speech — shorter audio = faster transcription
+- whisper-server supports `--vad-threshold` flag
+
+**Tier 4 — Model quantization:**
+- Use quantized models (ggml-medium-q5_0.bin is ~60% the size, ~90% the accuracy, 40% faster)
+- Download quantized variants from HuggingFace and offer as default
+- URL: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin` (~600MB vs 1.5GB)
+
+**Tier 5 — Streaming transcription (future):**
+- whisper.cpp supports `--stream` mode where it transcribes in real-time as audio comes in
+- This would show partial results while the user is still speaking
+- Complex but would make the app feel instant
+
+### Cross-Platform Speed Notes
+- **Windows with GPU:** Use CUDA build (already set up)
+- **Windows without GPU:** Use CPU build with OpenBLAS (`whisper-blas-bin-x64.zip` — already available in whisper.cpp releases, ~2x faster than vanilla CPU)
+- **macOS (Apple Silicon):** Use CoreML/Metal build of whisper.cpp — M1/M2/M3 chips are extremely fast for ML inference, often matching NVIDIA GPUs
+- **macOS (Intel):** Use Accelerate framework build — slower but workable
+- **Linux:** Use CUDA build if NVIDIA GPU, otherwise OpenBLAS CPU build
+
+### What NOT to do
+- Do NOT use the Python `faster-whisper` library (requires PyTorch = 2GB+ overhead)
+- Do NOT download models on first launch (bundle them or download during install)
+- Do NOT run whisper on the main/UI thread (already fixed — uses spawn_blocking)
+- Do NOT reload the model per transcription (use whisper-server)
+
+---
+
+## CRITICAL: Auto-Paste Must Work
+
+Currently transcribed text is copied to the clipboard but NOT pasted into the focused application. The user has to manually Ctrl+V. This defeats the core purpose of the product.
+
+### The Problem
+The Dashboard does `navigator.clipboard.writeText(result.text)` which copies to clipboard, but never sends a Ctrl+V keypress to the previously focused window. Also, when the ALAN Echo window is focused (after clicking Stop), the "previously focused app" has lost focus.
+
+### The Solution
+Auto-paste must happen at the Rust level, NOT the frontend level:
+
+1. **Before recording starts:** Save the handle of the currently focused window (using `GetForegroundWindow()` Win32 API)
+2. **After transcription completes:** 
+   a. Copy text to clipboard (`SetClipboardData` or the Tauri clipboard plugin)
+   b. Set focus back to the saved window handle (`SetForegroundWindow`)
+   c. Simulate Ctrl+V keypress (`SendInput` Win32 API)
+   d. After a short delay (200ms), restore the original clipboard contents
+
+**Rust implementation sketch:**
+```rust
+// In main.rs or a new paste.rs module:
+use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_KEYBOARD, KEYEVENTF_KEYUP, VK_CONTROL, VK_V};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+fn save_focused_window() -> HWND {
+    unsafe { GetForegroundWindow() }
+}
+
+fn paste_to_window(hwnd: HWND, text: &str) {
+    // 1. Copy text to clipboard
+    // 2. SetForegroundWindow(hwnd)  
+    // 3. Sleep 100ms
+    // 4. SendInput: Ctrl down, V down, V up, Ctrl up
+    // 5. Sleep 200ms
+    // 6. Restore original clipboard
+}
+```
+
+Add the `windows` crate to Cargo.toml:
+```toml
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_Foundation"] }
+```
+
+### Flow
+1. User presses Ctrl+Shift+Space → `save_focused_window()` records the active app
+2. User speaks, presses Ctrl+Shift+Space again → recording stops
+3. Whisper transcribes → text cleanup runs → saved to DB
+4. `paste_to_window(saved_hwnd, cleaned_text)` runs automatically
+5. Text appears in the user's original app as if they typed it
+
+This is exactly how the original Python version worked (via pyautogui).
+
+---
+
 ## Instructions for the AI
 
 **Your job:** Audit every file, test every feature, fix every bug. Loop until nothing is broken.

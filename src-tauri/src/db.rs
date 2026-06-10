@@ -186,9 +186,26 @@ impl TranscriptDB {
         std::fs::create_dir_all(&backup_dir).ok();
         let ts = Local::now().format("%Y%m%d_%H%M%S");
         let backup_path = backup_dir.join(format!("transcripts_{}.db", ts));
-        let backup_conn = Connection::open(&backup_path)?;
-        self.conn.backup(rusqlite::DatabaseName::Main, &backup_conn, rusqlite::DatabaseName::Main, None)?;
+        // Simple file copy for backup (SQLite WAL mode is safe to copy after checkpoint)
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        std::fs::copy(&self.path, &backup_path)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         Ok(backup_path.to_string_lossy().to_string())
+    }
+
+    pub fn maybe_daily_backup(&self) {
+        let backup_dir = self.path.parent().unwrap().join("backups");
+        let today = Local::now().format("%Y%m%d").to_string();
+        if backup_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+                for entry in entries.flatten() {
+                    if entry.file_name().to_string_lossy().contains(&today) {
+                        return; // Already backed up today
+                    }
+                }
+            }
+        }
+        let _ = self.backup();
     }
 
     pub fn export(&self, path: &str, format: &str) -> Result<bool> {

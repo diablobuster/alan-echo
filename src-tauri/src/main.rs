@@ -7,7 +7,7 @@ mod settings;
 mod text_cleanup;
 mod whisper;
 
-use audio::{DeviceInfo, RecordingResult, Recorder};
+use audio::{DeviceInfo, RecordingResult, RecorderHandle};
 use db::TranscriptDB;
 use license::LicenseManager;
 use settings::Settings;
@@ -21,13 +21,14 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager, State,
 };
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 pub struct AppState {
     pub db: Mutex<TranscriptDB>,
     pub settings: Mutex<Settings>,
     pub license: Mutex<LicenseManager>,
     pub cleanup: Mutex<TextCleanupEngine>,
-    pub recorder: Mutex<Recorder>,
+    pub recorder: RecorderHandle,
     pub whisper: Mutex<Option<WhisperEngine>>,
     pub data_dir: std::path::PathBuf,
 }
@@ -109,43 +110,39 @@ fn list_audio_devices() -> Result<Vec<DeviceInfo>, String> {
 #[tauri::command]
 fn start_recording(state: State<Arc<AppState>>) -> Result<(), String> {
     let device = state.settings.lock().get_str("microphone_device");
-    state.recorder.lock().start(device.as_deref())
+    state.recorder.start(device.as_deref())
 }
 
 #[tauri::command]
 fn stop_recording(state: State<Arc<AppState>>) -> Result<RecordingResult, String> {
-    state.recorder.lock().stop()
+    state.recorder.stop()
 }
 
 #[tauri::command]
 fn is_recording(state: State<Arc<AppState>>) -> Result<bool, String> {
-    Ok(state.recorder.lock().is_recording())
+    Ok(state.recorder.is_recording())
 }
 
 #[tauri::command]
 fn get_audio_level(state: State<Arc<AppState>>) -> Result<f32, String> {
-    Ok(state.recorder.lock().current_level())
+    Ok(state.recorder.current_level())
 }
 
 // ── Transcription commands ───────────────────────────────────────────
 
 #[tauri::command]
-async fn transcribe(state: State<'_, Arc<AppState>>, wav_path: String) -> Result<serde_json::Value, String> {
+fn transcribe(state: State<Arc<AppState>>, wav_path: String) -> Result<serde_json::Value, String> {
     let whisper_guard = state.whisper.lock();
     let engine = whisper_guard.as_ref().ok_or("Whisper engine not initialized")?;
     let result = engine.transcribe(&wav_path)?;
 
-    // Apply text cleanup
-    let cleanup = state.cleanup.lock();
-    let cleaned = cleanup.clean(&result.text);
+    let cleaned = state.cleanup.lock().clean(&result.text);
 
     if cleaned.is_empty() {
         return Ok(serde_json::json!({ "text": "", "raw_text": result.text, "empty": true }));
     }
 
-    // Save to database
-    let db = state.db.lock();
-    let id = db.save(&cleaned, Some(&result.text), result.duration_seconds).map_err(|e| e.to_string())?;
+    let id = state.db.lock().save(&cleaned, Some(&result.text), result.duration_seconds).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
         "id": id,
@@ -199,7 +196,7 @@ fn main() {
         settings: Mutex::new(settings),
         license: Mutex::new(LicenseManager::new(license_key, machine_id)),
         cleanup: Mutex::new(TextCleanupEngine::new(&cleanup_level)),
-        recorder: Mutex::new(Recorder::new()),
+        recorder: RecorderHandle::new(),
         whisper: Mutex::new(whisper_engine),
         data_dir: data_dir.clone(),
     });

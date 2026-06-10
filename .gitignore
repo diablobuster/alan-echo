@@ -4,3 +4,6 @@ target/
 *.log
 .DS_Store
 Thumbs.db
+
+# Installer payload staged by scripts/prepare-resources.ps1 (148 MB model)
+src-tauri/resources/models/

@@ -1,8 +1,10 @@
-//! ALAN Echo — Hardware-bound license key validation.
+//! ALAN Echo — license key validation.
 //!
-//! Keys are HMAC-SHA256 signed AND bound to the machine's hardware ID on activation.
-//! A key activated on Machine A will not work on Machine B.
-//! This prevents key sharing without requiring a license server.
+//! Keys are HMAC-SHA256 checksummed and validate fully offline. A key works on
+//! any machine: reinstalls, new laptops, and hardware changes never lock a
+//! customer out (there is no activation server, so a hardware-bound key could
+//! never be reset remotely). Sharing is deterred by the server-side issuance
+//! record on alanglobalintelligence.com, not by machine binding.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -12,57 +14,22 @@ type HmacSha256 = Hmac<Sha256>;
 
 const PREFIX: &str = "ECHO";
 const SECRET: &[u8] = b"ALAN_ECHO_v1_GLOBAL_INTELLIGENCE_2026";
-const BIND_SECRET: &[u8] = b"ALAN_ECHO_HWID_BIND_2026";
 const CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-
-/// Get a stable machine identifier (hardware-bound).
-/// Uses motherboard serial + CPU ID + disk serial for uniqueness.
-pub fn get_machine_id() -> String {
-    match machine_uid::get() {
-        Ok(id) => {
-            // Hash the raw machine ID so it's a consistent length
-            let mut mac = HmacSha256::new_from_slice(BIND_SECRET).unwrap();
-            mac.update(id.as_bytes());
-            let result = mac.finalize();
-            hex::encode(&result.into_bytes()[..16])
-        }
-        Err(_) => {
-            // Fallback: use computer name + username
-            let name = std::env::var("COMPUTERNAME").unwrap_or_default();
-            let user = std::env::var("USERNAME").unwrap_or_default();
-            let mut mac = HmacSha256::new_from_slice(BIND_SECRET).unwrap();
-            mac.update(format!("{}-{}", name, user).as_bytes());
-            let result = mac.finalize();
-            hex::encode(&result.into_bytes()[..16])
-        }
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LicenseManager {
     key: Option<String>,
-    machine_id: String,
-    bound_machine: Option<String>,
 }
 
 impl LicenseManager {
-    pub fn new(key: Option<String>, machine_id: String, bound_machine: Option<String>) -> Self {
-        Self {
-            key,
-            machine_id,
-            bound_machine,
-        }
+    pub fn new(key: Option<String>) -> Self {
+        Self { key }
     }
 
-    /// The machine binding produced at activation — persist this alongside the key.
-    pub fn bound_machine(&self) -> Option<&str> {
-        self.bound_machine.as_deref()
-    }
-
-    /// Check if the current key is valid for this machine.
+    /// Check if the current key is valid.
     pub fn is_licensed(&self) -> bool {
         match &self.key {
-            Some(k) => self.validate_key(k) && self.check_machine_binding(k),
+            Some(k) => self.validate_key(k),
             None => false,
         }
     }
@@ -89,16 +56,7 @@ impl LicenseManager {
         constant_time_eq(parts[3].as_bytes(), expected.as_bytes())
     }
 
-    /// Check if the key is bound to this machine.
-    fn check_machine_binding(&self, key: &str) -> bool {
-        let binding = compute_machine_binding(key, &self.machine_id);
-        match &self.bound_machine {
-            Some(bound) => constant_time_eq(bound.as_bytes(), binding.as_bytes()),
-            None => true, // Not yet bound — will bind on activation
-        }
-    }
-
-    /// Activate a key: validate format, bind to this machine.
+    /// Activate a key: validate format and checksum, then store it.
     pub fn activate(&mut self, key: &str) -> (bool, String) {
         let key = key.trim().to_uppercase().replace(' ', "");
 
@@ -106,17 +64,12 @@ impl LicenseManager {
             return (false, "Invalid license key — check for typos and try again".into());
         }
 
-        // Bind to this machine
-        let binding = compute_machine_binding(&key, &self.machine_id);
         self.key = Some(key);
-        self.bound_machine = Some(binding);
-
         (true, "License activated successfully".into())
     }
 
     pub fn deactivate(&mut self) {
         self.key = None;
-        self.bound_machine = None;
     }
 
     /// Masked key for display.
@@ -142,15 +95,6 @@ fn compute_check(payload: &str) -> String {
         check.push(CHARSET[(b as usize) % CHARSET.len()] as char);
     }
     check
-}
-
-fn compute_machine_binding(key: &str, machine_id: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(BIND_SECRET).unwrap();
-    mac.update(key.as_bytes());
-    mac.update(b"|");
-    mac.update(machine_id.as_bytes());
-    let result = mac.finalize();
-    hex::encode(&result.into_bytes()[..16])
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -198,7 +142,7 @@ mod tests {
 
     #[test]
     fn python_generated_key_validates() {
-        let lm = LicenseManager::new(None, "test-machine".into(), None);
+        let lm = LicenseManager::new(None);
         assert!(lm.validate_key("ECHO-AAAAA-BBBBB-CCCCC-FEMJB"));
         assert!(lm.validate_key("echo-aaaaa-bbbbb-ccccc-femjb")); // case-insensitive
         assert!(!lm.validate_key("ECHO-AAAAA-BBBBB-CCCCC-FEMJA")); // bad checksum
@@ -207,33 +151,25 @@ mod tests {
     }
 
     #[test]
-    fn activation_binds_to_machine() {
-        let mut lm = LicenseManager::new(None, "machine-a".into(), None);
+    fn key_works_after_activation_and_on_restore() {
+        let mut lm = LicenseManager::new(None);
         let (ok, _) = lm.activate("ECHO-AAAAA-BBBBB-CCCCC-FEMJB");
         assert!(ok);
         assert!(lm.is_licensed());
-        let binding = lm.bound_machine().expect("binding set").to_string();
 
-        // Same key + binding on a different machine must fail.
-        let lm_b = LicenseManager::new(
-            Some("ECHO-AAAAA-BBBBB-CCCCC-FEMJB".into()),
-            "machine-b".into(),
-            Some(binding.clone()),
-        );
-        assert!(!lm_b.is_licensed());
+        // A manager rebuilt from persisted settings (reinstall, new machine —
+        // there is deliberately no hardware binding) stays licensed.
+        let restored = LicenseManager::new(Some("ECHO-AAAAA-BBBBB-CCCCC-FEMJB".into()));
+        assert!(restored.is_licensed());
 
-        // Same machine restores fine.
-        let lm_a = LicenseManager::new(
-            Some("ECHO-AAAAA-BBBBB-CCCCC-FEMJB".into()),
-            "machine-a".into(),
-            Some(binding),
-        );
-        assert!(lm_a.is_licensed());
+        // A tampered persisted key does not validate.
+        let tampered = LicenseManager::new(Some("ECHO-AAAAA-BBBBB-CCCCC-FEMJA".into()));
+        assert!(!tampered.is_licensed());
     }
 
     #[test]
     fn generated_keys_validate() {
-        let lm = LicenseManager::new(None, "m".into(), None);
+        let lm = LicenseManager::new(None);
         for _ in 0..50 {
             let key = generate_key();
             assert!(lm.validate_key(&key), "generated key failed: {}", key);

@@ -27,12 +27,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' http://localhost:*; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' asset: https://asset.localhost http://localhost:* data: blob:"
+      "csp": "default-src 'self' http://localhost:*; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' asset: https://asset.localhost http://localhost:* data: blob:"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": {
+      "resources/models": "models"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

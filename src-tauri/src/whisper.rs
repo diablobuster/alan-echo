@@ -374,14 +374,12 @@ impl WhisperEngine {
         dirs
     }
 
-    /// True if a model file for `name` (any quantized variant) exists on disk.
+    /// True if a model file for `name` (any quantized or .en variant) exists on disk.
     pub fn model_available(&self, name: &str) -> bool {
         let dirs = self.model_dirs();
-        ["q5_0", "q5_1", "q8_0"]
+        model_file_candidates(name)
             .iter()
-            .map(|q| format!("ggml-{}-{}.bin", name, q))
-            .chain(std::iter::once(format!("ggml-{}.bin", name)))
-            .any(|v| dirs.iter().any(|d| d.join(&v).exists()))
+            .any(|v| dirs.iter().any(|d| d.join(v).exists()))
     }
 
     /// Honor the user's model preference; fall back to the best model that
@@ -412,13 +410,7 @@ impl WhisperEngine {
         let dirs = self.model_dirs();
 
         for name in &order {
-            // Quantized variants first: smaller and faster at ~equal accuracy.
-            for variant in [
-                format!("ggml-{}-q5_0.bin", name),
-                format!("ggml-{}-q5_1.bin", name),
-                format!("ggml-{}-q8_0.bin", name),
-                format!("ggml-{}.bin", name),
-            ] {
+            for variant in model_file_candidates(name) {
                 for dir in &dirs {
                     let p = dir.join(&variant);
                     if p.exists() {
@@ -527,6 +519,21 @@ fn detect_hardware() -> Hardware {
     Hardware { gpu_name, vram_mb, physical_cores }
 }
 
+/// Filename candidates for a model name, in preference order. English-only
+/// (.en) variants outrank multilingual at equal size — the app always dictates
+/// with `-l en` and the retail installer bundles ggml-base.en.bin. Quantized
+/// variants outrank f16 (smaller, ~equal accuracy). Nonexistent combinations
+/// (e.g. large-v3.en) are harmless — they simply never match a file.
+fn model_file_candidates(name: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(8);
+    for stem in [format!("{}.en", name), name.to_string()] {
+        for quant in ["-q5_0", "-q5_1", "-q8_0", ""] {
+            out.push(format!("ggml-{}{}.bin", stem, quant));
+        }
+    }
+    out
+}
+
 fn model_label(file: &str) -> String {
     if file.contains("large") {
         "Ultra".to_string()
@@ -543,7 +550,8 @@ fn model_label(file: &str) -> String {
     }
 }
 
-/// "ggml-medium-q5_0.bin" → "medium"; "ggml-large-v3.bin" → "large-v3".
+/// "ggml-medium-q5_0.bin" → "medium"; "ggml-base.en.bin" → "base".
+/// Canonical names never carry the .en suffix — resolution re-adds it.
 fn model_name_from_file(file: &str) -> Option<String> {
     let stem = file.strip_prefix("ggml-")?.strip_suffix(".bin")?;
     let stem = stem
@@ -551,6 +559,7 @@ fn model_name_from_file(file: &str) -> Option<String> {
         .or_else(|| stem.strip_suffix("-q5_1"))
         .or_else(|| stem.strip_suffix("-q8_0"))
         .unwrap_or(stem);
+    let stem = stem.strip_suffix(".en").unwrap_or(stem);
     Some(stem.to_string())
 }
 

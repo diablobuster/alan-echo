@@ -4,7 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { applyTheme } from '../theme'
 
 const CLEANUP_SAMPLE = "um so basically i think we should you know move the the meeting to friday"
-const MODEL_LABELS = { small: 'Standard', medium: 'Enhanced', 'large-v3': 'Ultra' }
+const MODEL_LABELS = { base: 'Basic', small: 'Standard', medium: 'Enhanced', 'large-v3': 'Ultra' }
+const LABEL_TO_MODEL = { Basic: 'base', Standard: 'small', Enhanced: 'medium', Ultra: 'large-v3' }
 
 export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [settings, setSettings] = useState({
@@ -17,6 +18,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [engine, setEngine] = useState(null)
   const [preview, setPreview] = useState(null)
   const [modelError, setModelError] = useState(null)
+  const [models, setModels] = useState([])
   const pollRef = useRef(null)
 
   const loadEngineInfo = async () => {
@@ -48,6 +50,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
         if (s.microphone_device) setSelectedDevice(s.microphone_device)
         const devs = await invoke('list_audio_devices')
         setDevices(devs || [])
+        try { setModels(await invoke('list_models') || []) } catch {}
         const info = await loadEngineInfo()
         // Resume polling if the panel reopens while a model is still loading.
         if (info && !info.ready && !info.status?.startsWith('failed')) startEnginePoll()
@@ -65,8 +68,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   }
 
   const changeModel = async (label) => {
-    const map = { Standard: 'small', Enhanced: 'medium', Ultra: 'large-v3' }
-    const name = map[label] || 'medium'
+    const name = LABEL_TO_MODEL[label] || 'base'
     setModelError(null)
     try {
       // Direct invoke (not updateSetting) — the backend rejects models that
@@ -100,7 +102,11 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
   const activeModelLabel = engine?.model_label
     || MODEL_LABELS[settings.whisper_model]
-    || 'Enhanced'
+    || 'Basic'
+
+  // Grey out models that aren't on disk (retail installs bundle base.en only).
+  // Until list_models loads, disable nothing — never block the active model.
+  const disabledModels = models.filter(m => !m.available).map(m => m.label)
 
   return (
     <>
@@ -139,9 +145,10 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
           <SettingsRow label="Speech model" hint="Higher quality = more accurate, slower">
             <Seg
-              options={['Standard', 'Enhanced', 'Ultra']}
+              options={['Basic', 'Standard', 'Enhanced', 'Ultra']}
               value={activeModelLabel}
               onChange={changeModel}
+              disabled={disabledModels}
             />
           </SettingsRow>
           {modelError && (
@@ -314,24 +321,34 @@ function SettingsRow({ label, hint, children }) {
   )
 }
 
-function Seg({ options, value, onChange }) {
+function Seg({ options, value, onChange, disabled = [] }) {
   return (
     <div style={{
       display: 'flex', background: 'var(--bg-secondary)',
       borderRadius: 'var(--echo-radius-sm)', padding: 2, gap: 1,
     }}>
-      {options.map(opt => (
-        <button key={opt} onClick={() => onChange(opt)} style={{
-          padding: '3px 10px', fontSize: 10, fontFamily: 'var(--font-mono)',
-          border: 'none', borderRadius: 'var(--echo-radius-sm)',
-          cursor: 'pointer', fontWeight: opt === value ? 600 : 400,
-          background: opt === value ? 'var(--bg-card)' : 'transparent',
-          color: opt === value ? 'var(--text-primary)' : 'var(--text-muted)',
-          boxShadow: opt === value ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
-        }}>
-          {opt}
-        </button>
-      ))}
+      {options.map(opt => {
+        const isDisabled = disabled.includes(opt) && opt !== value
+        return (
+          <button
+            key={opt}
+            onClick={() => { if (!isDisabled) onChange(opt) }}
+            title={isDisabled ? 'Not installed' : undefined}
+            style={{
+              padding: '3px 10px', fontSize: 10, fontFamily: 'var(--font-mono)',
+              border: 'none', borderRadius: 'var(--echo-radius-sm)',
+              cursor: isDisabled ? 'not-allowed' : 'pointer',
+              fontWeight: opt === value ? 600 : 400,
+              background: opt === value ? 'var(--bg-card)' : 'transparent',
+              color: opt === value ? 'var(--text-primary)' : 'var(--text-muted)',
+              opacity: isDisabled ? 0.35 : 1,
+              boxShadow: opt === value ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+            }}
+          >
+            {opt}
+          </button>
+        )
+      })}
     </div>
   )
 }

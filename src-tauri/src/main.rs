@@ -122,9 +122,6 @@ fn validate_license(state: State<Arc<AppState>>, key: String) -> Result<serde_js
     if valid {
         let mut s = state.settings.lock();
         s.set("license_key", serde_json::Value::String(key.trim().to_uppercase().replace(' ', "")));
-        if let Some(binding) = lm.bound_machine() {
-            s.set("license_binding", serde_json::Value::String(binding.to_string()));
-        }
         let _ = s.save();
     }
     Ok(serde_json::json!({ "valid": valid, "message": msg }))
@@ -394,6 +391,23 @@ fn get_engine_info(state: State<Arc<AppState>>) -> Result<whisper::EngineInfo, S
 }
 
 #[tauri::command]
+fn list_models(state: State<Arc<AppState>>) -> Result<serde_json::Value, String> {
+    // The retail installer bundles only base.en; bigger models arrive as
+    // optional downloads. The picker greys out what isn't on disk.
+    let models = [("base", "Basic"), ("small", "Standard"), ("medium", "Enhanced"), ("large-v3", "Ultra")]
+        .iter()
+        .map(|(name, label)| {
+            serde_json::json!({
+                "name": name,
+                "label": label,
+                "available": state.whisper.model_available(name),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::Value::Array(models))
+}
+
+#[tauri::command]
 fn get_hotkey_info(state: State<Arc<AppState>>) -> Result<serde_json::Value, String> {
     Ok(state.hotkeys.lock().clone())
 }
@@ -463,10 +477,8 @@ fn main() {
         Settings::new(settings_path.clone())
     });
     let license_key = settings.get_str("license_key");
-    let license_binding = settings.get_str("license_binding");
     let cleanup_level = settings.get_str("text_cleanup_level").unwrap_or_else(|| "standard".into());
     let model_pref = settings.get_str("whisper_model");
-    let machine_id = license::get_machine_id();
 
     // Spawn whisper-server immediately so the model is warm by the time the
     // user dictates. Loading happens on a background thread.
@@ -476,7 +488,7 @@ fn main() {
     let app_state = Arc::new(AppState {
         db: Mutex::new(TranscriptDB::open(&db_path).expect("Failed to open database")),
         settings: Mutex::new(settings),
-        license: Mutex::new(LicenseManager::new(license_key, machine_id, license_binding)),
+        license: Mutex::new(LicenseManager::new(license_key)),
         cleanup: Mutex::new(TextCleanupEngine::new(&cleanup_level)),
         recorder: RecorderHandle::new(),
         whisper: Arc::clone(&whisper_engine),
@@ -664,6 +676,7 @@ fn main() {
             transcribe,
             check_whisper_ready,
             get_engine_info,
+            list_models,
             get_hotkey_info,
             clean_text,
             test_microphone,

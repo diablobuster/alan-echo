@@ -123,7 +123,7 @@ export default function LicenseGate({ onActivated }) {
         <div style={{ marginTop: 16, textAlign: 'center' }}>
           <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
             Don't have a key?{' '}
-            <a href="https://alan.com/echo" target="_blank" rel="noopener" style={{
+            <a href="https://alanglobalintelligence.com/echo" target="_blank" rel="noopener" style={{
               color: 'var(--echo-accent)', textDecoration: 'none',
             }}>
               Buy ALAN Echo

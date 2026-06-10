@@ -195,18 +195,6 @@ export default function Dashboard() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 16px', gap: 12, overflow: 'hidden' }}>
         <QuickStats total={stats.total} words={stats.words} duration={stats.duration} />
 
-        {/* Mic diagnostic — remove after debugging */}
-        <button onClick={async () => {
-          try {
-            const r = await invoke('test_microphone')
-            alert(JSON.stringify(r, null, 2))
-          } catch(e) { alert('Test failed: ' + e) }
-        }} style={{
-          padding: '4px 10px', fontSize: 10, background: 'var(--bg-tertiary)',
-          border: '1px solid var(--border-primary)', borderRadius: 4, cursor: 'pointer',
-          fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
-        }}>Test Microphone (2s diagnostic)</button>
-
         <StatusPanel status={status} elapsed={elapsed} onToggle={handleToggle} onCancel={handleCancel} />
 
         {error && (

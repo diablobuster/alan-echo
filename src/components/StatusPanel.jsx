@@ -54,7 +54,7 @@ export default function StatusPanel({ status, elapsed = 0, cap = 300, onToggle, 
           <StatusDot status="processing" />
           <span style={{ fontWeight: 500, color: 'var(--accent-yellow)' }}>Transcribing...</span>
           <span className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)', marginLeft: 'auto' }}>
-            WHISPER large-v3
+            ALAN Speech Engine
           </span>
         </div>
         <div style={{ height: 3, background: 'var(--bg-tertiary)', borderRadius: 2, overflow: 'hidden' }}>

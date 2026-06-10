@@ -52,7 +52,7 @@ static RE_HALLUCINATIONS: Lazy<Vec<Regex>> = Lazy::new(|| vec![
     Regex::new(r"\(.*?\)").unwrap(),
 ]);
 
-static RE_WORD_REPEAT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(\w+)(\s+\1)+\b").unwrap());
+// No backreference regex — word repetition handled programmatically in remove_word_repetitions()
 static RE_MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 static RE_DOUBLE_PERIOD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").unwrap());
 static RE_SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([.,!?;:])").unwrap());
@@ -174,7 +174,15 @@ impl TextCleanupEngine {
     }
 
     fn remove_word_repetitions(&self, text: &str) -> String {
-        RE_WORD_REPEAT.replace_all(text, "$1").to_string()
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.is_empty() { return text.to_string(); }
+        let mut result: Vec<&str> = vec![words[0]];
+        for w in &words[1..] {
+            if !result.last().map(|prev| prev.eq_ignore_ascii_case(w)).unwrap_or(false) {
+                result.push(w);
+            }
+        }
+        result.join(" ")
     }
 
     fn fix_punctuation(&self, text: &str) -> String {

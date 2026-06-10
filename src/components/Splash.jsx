@@ -48,7 +48,7 @@ export default function Splash({ progress = 64 }) {
         Initializing speech engine...
       </div>
       <div className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>
-        large-v3
+        Enhanced model
       </div>
 
       {/* Footer */}

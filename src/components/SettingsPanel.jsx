@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Icon from './Icons'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -69,11 +69,14 @@ export default function SettingsPanel({ open, onClose }) {
           {/* Engine section */}
           <div className="echo-eyebrow" style={{ marginBottom: 12 }}>Engine</div>
 
-          <SettingsRow label="Speech model" hint="Accuracy vs speed tradeoff">
+          <SettingsRow label="Speech model" hint="Higher quality = more accurate, slower">
             <Seg
-              options={['small', 'medium', 'large-v3']}
-              value={settings.whisper_model || 'large-v3'}
-              onChange={v => updateSetting('whisper_model', v)}
+              options={['Standard', 'Enhanced', 'Ultra']}
+              value={({'small':'Standard','medium':'Enhanced','large-v3':'Ultra'})[settings.whisper_model] || 'Enhanced'}
+              onChange={v => {
+                const map = {'Standard':'small','Enhanced':'medium','Ultra':'large-v3'}
+                updateSetting('whisper_model', map[v] || 'medium')
+              }}
             />
           </SettingsRow>
 
@@ -113,6 +116,8 @@ export default function SettingsPanel({ open, onClose }) {
               ))}
             </select>
           </SettingsRow>
+
+          <MicTest />
 
           {/* Behavior section */}
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Behavior</div>
@@ -218,6 +223,92 @@ function HotkeyRow({ label, keys }) {
     }}>
       <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{label}</span>
       <span className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>{keys}</span>
+    </div>
+  )
+}
+
+function MicTest() {
+  const [state, setState] = useState('idle') // idle | recording | playing
+  const [mediaRecorder, setMediaRecorder] = useState(null)
+  const [audioUrl, setAudioUrl] = useState(null)
+  const audioRef = useRef(null)
+
+  const startTest = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const chunks = []
+      const recorder = new MediaRecorder(stream)
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+      recorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop())
+        const blob = new Blob(chunks, { type: 'audio/webm' })
+        const url = URL.createObjectURL(blob)
+        setAudioUrl(url)
+        setState('playing')
+        // Auto-play
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.play().catch(() => {})
+          }
+        }, 100)
+      }
+      recorder.start()
+      setMediaRecorder(recorder)
+      setState('recording')
+    } catch (e) {
+      console.error('Mic test failed:', e)
+    }
+  }
+
+  const stopTest = () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop()
+    }
+  }
+
+  const reset = () => {
+    if (audioUrl) URL.revokeObjectURL(audioUrl)
+    setAudioUrl(null)
+    setState('idle')
+  }
+
+  return (
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>Test microphone</div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>Record and play back to verify</div>
+        </div>
+        {state === 'idle' && (
+          <button type="button" onClick={startTest} style={{
+            padding: '4px 14px', fontSize: 11, background: 'var(--accent-green)', color: '#fff',
+            border: 'none', borderRadius: 'var(--echo-radius-sm)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontWeight: 500,
+          }}>Record</button>
+        )}
+        {state === 'recording' && (
+          <button type="button" onClick={stopTest} style={{
+            padding: '4px 14px', fontSize: 11, background: 'var(--accent-red)', color: '#fff',
+            border: 'none', borderRadius: 'var(--echo-radius-sm)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontWeight: 500,
+            animation: 'echo-pulse 1.8s ease-in-out infinite',
+          }}>Stop</button>
+        )}
+        {state === 'playing' && (
+          <button type="button" onClick={reset} style={{
+            padding: '4px 14px', fontSize: 11, background: 'var(--bg-card)', color: 'var(--text-secondary)',
+            border: '1px solid var(--border-primary)', borderRadius: 'var(--echo-radius-sm)', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+          }}>Reset</button>
+        )}
+      </div>
+      {state === 'recording' && (
+        <div className="echo-mono" style={{ fontSize: 10, color: 'var(--accent-red)' }}>
+          Recording... speak now
+        </div>
+      )}
+      {audioUrl && (
+        <audio ref={audioRef} src={audioUrl} controls onEnded={reset} style={{
+          width: '100%', height: 28, marginTop: 4,
+        }} />
+      )}
     </div>
   )
 }

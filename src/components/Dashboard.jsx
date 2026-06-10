@@ -56,7 +56,7 @@ export default function Dashboard() {
       const gain = ctx.createGain()
       osc.connect(gain)
       gain.connect(ctx.destination)
-      gain.gain.value = 0.15
+      gain.gain.value = 0.05
       if (type === 'start') {
         osc.frequency.value = 800
         osc.start(); osc.stop(ctx.currentTime + 0.12)

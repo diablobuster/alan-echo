@@ -101,10 +101,13 @@ fn find_whisper_binary(data_dir: &Path) -> Result<PathBuf, String> {
         }
     }
 
-    // Check data directory
-    for name in &["whisper-cli.exe", "whisper.exe"] {
-        let p = data_dir.join(name);
-        if p.exists() { return Ok(p); }
+    // Check data directory and its subdirectories
+    for subdir in &["", "models", "bin"] {
+        let dir = if subdir.is_empty() { data_dir.to_path_buf() } else { data_dir.join(subdir) };
+        for name in &["whisper-cli.exe", "whisper.exe", "main.exe"] {
+            let p = dir.join(name);
+            if p.exists() { return Ok(p); }
+        }
     }
 
     // Check PATH

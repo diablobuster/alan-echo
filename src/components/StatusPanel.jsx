@@ -36,7 +36,7 @@ export default function StatusPanel({ status, elapsed = 0, cap = 300, onToggle, 
           <div style={{ display: 'flex', gap: 6 }}>
             <Btn kind="ghost" size="sm" onClick={onCancel}>Cancel</Btn>
             <Btn kind="primary" size="sm" onClick={onToggle} style={{ background: 'var(--echo-rec)' }}>
-              <Icon name="mic" size={13} color="#fff" /> Stop
+              <Icon name="x" size={13} color="#fff" /> Stop
             </Btn>
           </div>
         </div>
@@ -99,7 +99,7 @@ function Btn({ kind = 'primary', size = 'md', onClick, children, style = {} }) {
     ghost:   { background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border-primary)' },
     danger:  { background: 'transparent', color: 'var(--accent-red)', border: '1px solid color-mix(in srgb, var(--accent-red) 30%, transparent)' },
   }
-  return <button onClick={onClick} style={{ ...base, ...kinds[kind], ...style }}>{children}</button>
+  return <button type="button" onClick={onClick} style={{ ...base, ...kinds[kind], ...style }}>{children}</button>
 }
 
 export { Btn }

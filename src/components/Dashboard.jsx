@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import TitleBar from './TitleBar'
 import QuickStats from './QuickStats'
 import StatusPanel from './StatusPanel'
@@ -9,39 +11,34 @@ import FooterBar from './FooterBar'
 import SettingsPanel from './SettingsPanel'
 import Icon from './Icons'
 
-const invoke = window.__TAURI__?.invoke || (async (...args) => {
-  console.log('invoke (dev):', ...args)
-  return null
-})
-const listen = window.__TAURI__?.event?.listen || (() => () => {})
-
 export default function Dashboard() {
   const [transcripts, setTranscripts] = useState([])
   const [stats, setStats] = useState({ total: 0, words: 0, duration: 0 })
   const [selectedId, setSelectedId] = useState(null)
   const [flashId, setFlashId] = useState(null)
   const [query, setQuery] = useState('')
-  const [status, setStatus] = useState('ready') // ready | recording | processing
+  const [status, setStatus] = useState('ready')
   const [elapsed, setElapsed] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   const [toast, setToast] = useState(null)
   const [error, setError] = useState(null)
   const timerRef = useRef(null)
-  const levelRef = useRef(null)
+  const statusRef = useRef(status)
+  statusRef.current = status
 
   // ── Load data ──────────────────────────────────────────────────────
   const loadTranscripts = useCallback(async () => {
     try {
       const result = await invoke('get_transcripts', { page: 0, pageSize: 100 })
       if (result?.transcripts) setTranscripts(result.transcripts)
-    } catch {}
+    } catch (e) { console.error('Failed to load transcripts:', e) }
   }, [])
 
   const loadStats = useCallback(async () => {
     try {
       const s = await invoke('get_stats')
       if (s?.total !== undefined) setStats(s)
-    } catch {}
+    } catch (e) { console.error('Failed to load stats:', e) }
   }, [])
 
   useEffect(() => {
@@ -51,15 +48,19 @@ export default function Dashboard() {
 
   // ── Tauri event listeners (hotkeys from backend) ───────────────────
   useEffect(() => {
-    const unlisten1 = listen('dictate-toggle', () => handleToggle())
-    const unlisten2 = listen('dictate-cancel', () => handleCancel())
+    let cancelled = false
+    const unsub1 = listen('dictate-toggle', () => { if (!cancelled) handleToggleRef.current() })
+    const unsub2 = listen('dictate-cancel', () => { if (!cancelled) handleCancelRef.current() })
     return () => {
-      if (typeof unlisten1 === 'function') unlisten1()
-      else if (unlisten1?.then) unlisten1.then(fn => fn?.())
-      if (typeof unlisten2 === 'function') unlisten2()
-      else if (unlisten2?.then) unlisten2.then(fn => fn?.())
+      cancelled = true
+      unsub1.then(fn => fn())
+      unsub2.then(fn => fn())
     }
-  }, [status]) // re-register when status changes
+  }, [])
+
+  // Use refs for handlers so event listeners always call latest version
+  const handleToggleRef = useRef(null)
+  const handleCancelRef = useRef(null)
 
   // ── Recording timer ────────────────────────────────────────────────
   useEffect(() => {
@@ -68,27 +69,28 @@ export default function Dashboard() {
       timerRef.current = setInterval(() => {
         setElapsed(Math.floor((Date.now() - start) / 1000))
       }, 250)
-    } else {
+    } else if (status === 'ready') {
       clearInterval(timerRef.current)
       setElapsed(0)
+    } else {
+      clearInterval(timerRef.current)
     }
     return () => clearInterval(timerRef.current)
   }, [status])
 
   // ── Dictation state machine ────────────────────────────────────────
   const handleToggle = useCallback(async () => {
-    if (status === 'ready') {
-      // Start recording
+    const s = statusRef.current
+    if (s === 'ready') {
       setError(null)
       try {
         await invoke('start_recording')
         setStatus('recording')
       } catch (e) {
-        setError('Microphone error — check your audio device')
+        setError('Microphone error — ' + (e || 'check your audio device'))
         console.error('Recording error:', e)
       }
-    } else if (status === 'recording') {
-      // Stop recording → transcribe
+    } else if (s === 'recording') {
       setStatus('processing')
       try {
         const recording = await invoke('stop_recording')
@@ -102,66 +104,54 @@ export default function Dashboard() {
           setStatus('ready')
           return
         }
-        // Transcribe
         const result = await invoke('transcribe', { wavPath: recording.wav_path })
         if (result?.empty) {
           setError('Transcription returned empty — audio may be too short')
         } else if (result?.id) {
-          // Success — reload and flash the new entry
           await loadTranscripts()
           await loadStats()
           setFlashId(result.id)
           setSelectedId(result.id)
           setTimeout(() => setFlashId(null), 1500)
-
-          // Auto-paste
-          try {
-            const clipPlugin = window.__TAURI__?.clipboardManager
-            if (clipPlugin) {
-              await clipPlugin.writeText(result.text)
-            }
-          } catch {}
+          // Auto-paste via clipboard
+          try { await navigator.clipboard.writeText(result.text) } catch {}
         }
       } catch (e) {
-        setError('Transcription failed — ' + (e?.message || e || 'unknown error'))
+        setError('Transcription failed — ' + (e || 'unknown error'))
         console.error('Transcription error:', e)
       }
       setStatus('ready')
     }
-  }, [status, loadTranscripts, loadStats])
+  }, [loadTranscripts, loadStats])
 
   const handleCancel = useCallback(async () => {
-    if (status === 'recording') {
+    if (statusRef.current === 'recording') {
       try { await invoke('stop_recording') } catch {}
       setStatus('ready')
     }
-  }, [status])
+  }, [])
 
-  // ── Search filter ──────────────────────────────────────────────────
+  // Keep refs updated
+  handleToggleRef.current = handleToggle
+  handleCancelRef.current = handleCancel
+
+  // ── Search ─────────────────────────────────────────────────────────
   const [searchResults, setSearchResults] = useState(null)
-
   useEffect(() => {
-    if (!query) {
-      setSearchResults(null)
-      return
-    }
+    if (!query) { setSearchResults(null); return }
     const timeout = setTimeout(async () => {
       try {
         const results = await invoke('search_transcripts', { query })
         setSearchResults(results)
       } catch {
-        // Fallback: client-side filter
-        setSearchResults(
-          transcripts.filter(t => t.text.toLowerCase().includes(query.toLowerCase()))
-        )
+        setSearchResults(transcripts.filter(t => t.text.toLowerCase().includes(query.toLowerCase())))
       }
     }, 200)
     return () => clearTimeout(timeout)
   }, [query, transcripts])
 
   const displayList = searchResults ?? transcripts
-  const selected = transcripts.find(t => t.id === selectedId) ||
-                   displayList.find(t => t.id === selectedId)
+  const selected = transcripts.find(t => t.id === selectedId) || displayList.find(t => t.id === selectedId)
 
   // ── Actions ────────────────────────────────────────────────────────
   const fireToast = useCallback((msg) => {
@@ -171,56 +161,54 @@ export default function Dashboard() {
 
   const handleCopy = useCallback(async () => {
     if (!selected) return
-    try {
-      await navigator.clipboard.writeText(selected.text)
-    } catch {}
+    try { await navigator.clipboard.writeText(selected.text) } catch {}
     fireToast('Copied to clipboard')
   }, [selected, fireToast])
 
   const handleDelete = useCallback(async () => {
     if (!selected) return
-    try { await invoke('delete_transcript', { id: selected.id }) } catch {}
+    try { await invoke('delete_transcript', { id: selected.id }) } catch (e) { console.error('Delete failed:', e) }
     setTranscripts(prev => prev.filter(t => t.id !== selected.id))
     setSelectedId(null)
     await loadStats()
     fireToast('Transcript deleted')
   }, [selected, fireToast, loadStats])
 
-  const handleExport = useCallback(async () => {
-    // TODO: file dialog via Tauri
-    fireToast('Export: use Ctrl+Shift+E (coming soon)')
+  const handleExport = useCallback(() => {
+    fireToast('Export: coming soon')
   }, [fireToast])
 
   // ── Window controls ────────────────────────────────────────────────
-  const win = () => window.__TAURI__?.window?.getCurrentWindow?.()
-  const handleMinimize = () => win()?.minimize?.()
-  const handleMaximize = () => win()?.toggleMaximize?.()
-  const handleClose = () => win()?.hide?.()
+  const handleMinimize = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().minimize() }
+  const handleMaximize = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().toggleMaximize() }
+  const handleClose = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().hide() }
 
   // ── Clear error after timeout ──────────────────────────────────────
   useEffect(() => {
-    if (error) {
-      const t = setTimeout(() => setError(null), 6000)
-      return () => clearTimeout(t)
-    }
+    if (error) { const t = setTimeout(() => setError(null), 6000); return () => clearTimeout(t) }
   }, [error])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-primary)' }}>
-      <TitleBar
-        status={status}
-        onSettings={() => setShowSettings(!showSettings)}
-        onMinimize={handleMinimize}
-        onMaximize={handleMaximize}
-        onClose={handleClose}
-      />
+      <TitleBar status={status} onSettings={() => setShowSettings(!showSettings)} onMinimize={handleMinimize} onMaximize={handleMaximize} onClose={handleClose} />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 16px', gap: 12, overflow: 'hidden' }}>
         <QuickStats total={stats.total} words={stats.words} duration={stats.duration} />
 
+        {/* Mic diagnostic — remove after debugging */}
+        <button onClick={async () => {
+          try {
+            const r = await invoke('test_microphone')
+            alert(JSON.stringify(r, null, 2))
+          } catch(e) { alert('Test failed: ' + e) }
+        }} style={{
+          padding: '4px 10px', fontSize: 10, background: 'var(--bg-tertiary)',
+          border: '1px solid var(--border-primary)', borderRadius: 4, cursor: 'pointer',
+          fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+        }}>Test Microphone (2s diagnostic)</button>
+
         <StatusPanel status={status} elapsed={elapsed} onToggle={handleToggle} onCancel={handleCancel} />
 
-        {/* Error banner */}
         {error && (
           <div style={{
             padding: '8px 12px', background: 'color-mix(in srgb, var(--accent-red) 8%, var(--bg-card))',
@@ -228,37 +216,17 @@ export default function Dashboard() {
             borderRadius: 'var(--echo-radius)', fontSize: 12, color: 'var(--accent-red)',
             display: 'flex', alignItems: 'center', gap: 6,
           }}>
-            <Icon name="x" size={13} color="var(--accent-red)" />
-            {error}
+            <Icon name="x" size={13} color="var(--accent-red)" /> {error}
           </div>
         )}
 
-        <SearchBar
-          query={query} onChange={setQuery}
-          count={query ? displayList.length : undefined}
-          total={transcripts.length}
-          onExport={handleExport}
-        />
+        <SearchBar query={query} onChange={setQuery} count={query ? displayList.length : undefined} total={transcripts.length} onExport={handleExport} />
 
-        {/* Split layout: List + Detail */}
         <div style={{ flex: 1, display: 'flex', gap: 12, overflow: 'hidden', minHeight: 0 }}>
-          <div style={{
-            flex: 1.05, display: 'flex', flexDirection: 'column', gap: 'var(--echo-list-gap)',
-            overflow: 'auto', paddingRight: 4,
-          }}>
-            {displayList.length === 0 ? (
-              <EmptyState query={query} />
-            ) : (
-              displayList.map(t => (
-                <TranscriptCard
-                  key={t.id}
-                  transcript={t}
-                  selected={t.id === selectedId}
-                  isNew={t.id === flashId}
-                  onClick={() => setSelectedId(t.id)}
-                />
-              ))
-            )}
+          <div style={{ flex: 1.05, display: 'flex', flexDirection: 'column', gap: 'var(--echo-list-gap)', overflow: 'auto', paddingRight: 4 }}>
+            {displayList.length === 0 ? <EmptyState query={query} /> : displayList.map(t => (
+              <TranscriptCard key={t.id} transcript={t} selected={t.id === selectedId} isNew={t.id === flashId} onClick={() => setSelectedId(t.id)} />
+            ))}
           </div>
           <div style={{ flex: 0.95, minWidth: 0 }}>
             <DetailPanel transcript={selected} onCopy={handleCopy} onDelete={handleDelete} />
@@ -267,21 +235,17 @@ export default function Dashboard() {
       </div>
 
       <FooterBar />
-
       <SettingsPanel open={showSettings} onClose={() => setShowSettings(false)} />
 
-      {/* Toast */}
       {toast && (
         <div style={{
           position: 'fixed', bottom: 52, left: '50%', transform: 'translateX(-50%)',
           background: 'var(--text-primary)', color: 'var(--bg-primary)',
           padding: '6px 16px', borderRadius: 20, fontSize: 12, fontWeight: 500,
           display: 'flex', alignItems: 'center', gap: 6,
-          animation: 'echo-rise 0.2s ease-out both',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 200,
+          animation: 'echo-rise 0.2s ease-out both', boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 200,
         }}>
-          <Icon name="check" size={13} color="var(--accent-green)" />
-          {toast}
+          <Icon name="check" size={13} color="var(--accent-green)" /> {toast}
         </div>
       )}
     </div>
@@ -292,9 +256,7 @@ function EmptyState({ query }) {
   if (query) {
     return (
       <div style={{ padding: 40, textAlign: 'center' }}>
-        <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
-          No transcriptions match "<strong>{query}</strong>"
-        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>No transcriptions match "<strong>{query}</strong>"</div>
         <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>Try a different search term.</div>
       </div>
     )
@@ -302,9 +264,7 @@ function EmptyState({ query }) {
   return (
     <div style={{ padding: 40, textAlign: 'center' }}>
       <Icon name="mic" size={32} color="var(--text-faint)" style={{ opacity: 0.5, marginBottom: 12 }} />
-      <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 6 }}>
-        Nothing captured yet
-      </div>
+      <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 6 }}>Nothing captured yet</div>
       <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
         Press <strong>Ctrl + Shift + Space</strong> to start your first dictation.
         <br />Your transcriptions will appear here automatically.

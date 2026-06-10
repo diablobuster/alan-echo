@@ -66,8 +66,9 @@ pub struct RecorderHandle {
     cmd_tx: mpsc::Sender<RecCmd>,
 }
 
-// RecorderHandle is Send + Sync because it only holds a channel sender
-unsafe impl Send for RecorderHandle {}
+// mpsc::Sender is Send. We need Sync for Tauri State — wrap in Mutex at call site if needed.
+// Actually mpsc::Sender is Send but NOT Sync. We use unsafe Sync here because
+// all methods create a new channel per call and never share the sender across threads simultaneously.
 unsafe impl Sync for RecorderHandle {}
 
 impl RecorderHandle {
@@ -162,27 +163,85 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
                 *has_speech.lock() = false;
                 *rms_level.lock() = 0.0;
 
-                let smp = Arc::clone(&samples);
-                let hs = Arc::clone(&has_speech);
-                let rl = Arc::clone(&rms_level);
-                let threshold = 0.005f32;
+                let threshold = 0.001f32;
+                let sample_format = config.sample_format();
+                let stream_config: cpal::StreamConfig = config.into();
 
-                let built = device.build_input_stream(
-                    &config.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        let mono: Vec<f32> = if channels > 1 {
-                            data.chunks(channels).map(|c| c.iter().sum::<f32>() / channels as f32).collect()
-                        } else {
-                            data.to_vec()
-                        };
-                        let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len().max(1) as f32).sqrt();
-                        *rl.lock() = rms;
-                        if rms > threshold { *hs.lock() = true; }
-                        smp.lock().extend_from_slice(&mono);
-                    },
-                    |err| log::error!("Audio error: {}", err),
-                    None,
-                );
+                log::info!("Audio device: channels={}, rate={}, format={:?}", channels, device_rate, sample_format);
+
+                let built = match sample_format {
+                    cpal::SampleFormat::F32 => {
+                        let smp = Arc::clone(&samples);
+                        let hs = Arc::clone(&has_speech);
+                        let rl = Arc::clone(&rms_level);
+                        device.build_input_stream(
+                            &stream_config,
+                            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                                let mono: Vec<f32> = if channels > 1 {
+                                    data.chunks(channels).map(|c| c.iter().sum::<f32>() / channels as f32).collect()
+                                } else {
+                                    data.to_vec()
+                                };
+                                let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len().max(1) as f32).sqrt();
+                                *rl.lock() = rms;
+                                if rms > threshold { *hs.lock() = true; }
+                                smp.lock().extend_from_slice(&mono);
+                            },
+                            |err| log::error!("Audio error (f32): {}", err),
+                            None,
+                        )
+                    }
+                    cpal::SampleFormat::I16 => {
+                        let smp = Arc::clone(&samples);
+                        let hs = Arc::clone(&has_speech);
+                        let rl = Arc::clone(&rms_level);
+                        device.build_input_stream(
+                            &stream_config,
+                            move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                                let mono: Vec<f32> = if channels > 1 {
+                                    data.chunks(channels).map(|c| {
+                                        c.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / channels as f32
+                                    }).collect()
+                                } else {
+                                    data.iter().map(|&s| s as f32 / 32768.0).collect()
+                                };
+                                let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len().max(1) as f32).sqrt();
+                                *rl.lock() = rms;
+                                if rms > threshold { *hs.lock() = true; }
+                                smp.lock().extend_from_slice(&mono);
+                            },
+                            |err| log::error!("Audio error (i16): {}", err),
+                            None,
+                        )
+                    }
+                    cpal::SampleFormat::U16 => {
+                        let smp = Arc::clone(&samples);
+                        let hs = Arc::clone(&has_speech);
+                        let rl = Arc::clone(&rms_level);
+                        device.build_input_stream(
+                            &stream_config,
+                            move |data: &[u16], _: &cpal::InputCallbackInfo| {
+                                let mono: Vec<f32> = if channels > 1 {
+                                    data.chunks(channels).map(|c| {
+                                        c.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).sum::<f32>() / channels as f32
+                                    }).collect()
+                                } else {
+                                    data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()
+                                };
+                                let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len().max(1) as f32).sqrt();
+                                *rl.lock() = rms;
+                                if rms > threshold { *hs.lock() = true; }
+                                smp.lock().extend_from_slice(&mono);
+                            },
+                            |err| log::error!("Audio error (u16): {}", err),
+                            None,
+                        )
+                    }
+                    _ => {
+                        let _ = tx_result.send(Err(format!("Unsupported audio format: {:?}", sample_format)));
+                        continue;
+                    }
+                };
 
                 match built {
                     Ok(s) => {
@@ -228,7 +287,7 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("ALAN Echo");
                 std::fs::create_dir_all(&data_dir).ok();
-                let wav_path = data_dir.join("recording.wav");
+                let wav_path = data_dir.join(format!("recording_{}.wav", uuid::Uuid::new_v4()));
 
                 let spec = WavSpec {
                     channels: 1, sample_rate: TARGET_SAMPLE_RATE,
@@ -237,15 +296,24 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
 
                 match WavWriter::create(&wav_path, spec) {
                     Ok(mut writer) => {
+                        let mut write_err = None;
                         for &s in &resampled {
-                            let _ = writer.write_sample((s * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                            if let Err(e) = writer.write_sample((s * 32767.0).clamp(-32768.0, 32767.0) as i16) {
+                                write_err = Some(e);
+                                break;
+                            }
                         }
-                        let _ = writer.finalize();
-                        let _ = tx_result.send(Ok(RecordingResult {
-                            wav_path: Some(wav_path.to_string_lossy().to_string()),
-                            duration_seconds: duration,
-                            has_speech: speech,
-                        }));
+                        if let Some(e) = write_err {
+                            let _ = tx_result.send(Err(format!("WAV write error: {}", e)));
+                        } else if let Err(e) = writer.finalize() {
+                            let _ = tx_result.send(Err(format!("WAV finalize error: {}", e)));
+                        } else {
+                            let _ = tx_result.send(Ok(RecordingResult {
+                                wav_path: Some(wav_path.to_string_lossy().to_string()),
+                                duration_seconds: duration,
+                                has_speech: speech,
+                            }));
+                        }
                     }
                     Err(e) => { let _ = tx_result.send(Err(e.to_string())); }
                 }
@@ -256,7 +324,7 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
             }
 
             RecCmd::Level { tx_result } => {
-                let level = (*rms_level.lock() * 5.0).min(1.0);
+                let level = if recording { (*rms_level.lock() * 5.0).min(1.0) } else { 0.0 };
                 let _ = tx_result.send(level);
             }
         }

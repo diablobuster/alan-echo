@@ -92,7 +92,7 @@ impl TranscriptDB {
     pub fn save(&self, text: &str, raw_text: Option<&str>, duration: f64) -> Result<i64> {
         let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
         let wc = text.split_whitespace().count() as i32;
-        let cc = text.len() as i32;
+        let cc = text.chars().count() as i32;
         self.conn.execute(
             "INSERT INTO transcripts (timestamp, text, raw_text, duration_seconds, character_count, word_count) VALUES (?1,?2,?3,?4,?5,?6)",
             params![ts, text, raw_text.unwrap_or(text), duration, cc, wc],
@@ -124,23 +124,24 @@ impl TranscriptDB {
         if query.trim().is_empty() {
             return self.get_page(0, limit).map(|(t, _)| t);
         }
-        // Try FTS5 first, fall back to LIKE
-        let result = self.conn.prepare(
-            "SELECT t.id, t.timestamp, t.text, t.raw_text, t.duration_seconds, t.character_count, t.word_count
-             FROM transcripts_fts fts JOIN transcripts t ON t.id = fts.rowid
-             WHERE transcripts_fts MATCH ?1 ORDER BY rank LIMIT ?2"
-        );
-        match result {
-            Ok(mut stmt) => {
-                let rows = stmt.query_map(params![query, limit], |row| {
-                    Ok(Transcript {
-                        id: row.get(0)?, timestamp: row.get(1)?, text: row.get(2)?,
-                        raw_text: row.get(3)?, duration_seconds: row.get(4)?,
-                        character_count: row.get(5)?, word_count: row.get(6)?,
-                    })
-                })?.filter_map(|r| r.ok()).collect();
-                Ok(rows)
-            }
+        // Try FTS5 first (wrap entire attempt so query errors also fall back)
+        let fts_result: Result<Vec<Transcript>> = (|| {
+            let mut stmt = self.conn.prepare(
+                "SELECT t.id, t.timestamp, t.text, t.raw_text, t.duration_seconds, t.character_count, t.word_count
+                 FROM transcripts_fts fts JOIN transcripts t ON t.id = fts.rowid
+                 WHERE transcripts_fts MATCH ?1 ORDER BY rank LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![query, limit], |row| {
+                Ok(Transcript {
+                    id: row.get(0)?, timestamp: row.get(1)?, text: row.get(2)?,
+                    raw_text: row.get(3)?, duration_seconds: row.get(4)?,
+                    character_count: row.get(5)?, word_count: row.get(6)?,
+                })
+            })?.filter_map(|r| r.ok()).collect();
+            Ok(rows)
+        })();
+        match fts_result {
+            Ok(rows) => Ok(rows),
             Err(_) => {
                 let mut stmt = self.conn.prepare(
                     "SELECT id, timestamp, text, raw_text, duration_seconds, character_count, word_count FROM transcripts WHERE text LIKE ?1 ORDER BY timestamp DESC LIMIT ?2"
@@ -173,7 +174,7 @@ impl TranscriptDB {
 
     pub fn update_text(&self, id: i64, text: &str) -> Result<bool> {
         let wc = text.split_whitespace().count() as i32;
-        let cc = text.len() as i32;
+        let cc = text.chars().count() as i32;
         let affected = self.conn.execute(
             "UPDATE transcripts SET text=?1, word_count=?2, character_count=?3 WHERE id=?4",
             params![text, wc, cc, id],
@@ -182,7 +183,7 @@ impl TranscriptDB {
     }
 
     pub fn backup(&self) -> Result<String> {
-        let backup_dir = self.path.parent().unwrap().join("backups");
+        let backup_dir = self.path.parent().unwrap_or(std::path::Path::new(".")).join("backups");
         std::fs::create_dir_all(&backup_dir).ok();
         let ts = Local::now().format("%Y%m%d_%H%M%S");
         let backup_path = backup_dir.join(format!("transcripts_{}.db", ts));
@@ -194,7 +195,7 @@ impl TranscriptDB {
     }
 
     pub fn maybe_daily_backup(&self) {
-        let backup_dir = self.path.parent().unwrap().join("backups");
+        let backup_dir = self.path.parent().unwrap_or(std::path::Path::new(".")).join("backups");
         let today = Local::now().format("%Y%m%d").to_string();
         if backup_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&backup_dir) {
@@ -214,7 +215,8 @@ impl TranscriptDB {
 
         match format {
             "json" => {
-                let json = serde_json::to_string_pretty(&reversed).unwrap_or_default();
+                let json = serde_json::to_string_pretty(&reversed)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                 std::fs::write(path, json).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             }
             "csv" => {
@@ -222,8 +224,8 @@ impl TranscriptDB {
                 for t in &reversed {
                     out.push_str(&format!(
                         "\"{}\",\"{}\",{},{}\n",
-                        &t.timestamp[..19].replace('T', " "),
-                        t.text.replace('"', "\"\""),
+                        t.timestamp.get(..19).unwrap_or(&t.timestamp).replace('T', " "),
+                        t.text.replace('"', "\"\"").replace('\n', " ").replace('\r', ""),
                         t.duration_seconds.unwrap_or(0.0),
                         t.word_count.unwrap_or(0),
                     ));
@@ -235,7 +237,7 @@ impl TranscriptDB {
                 for t in &reversed {
                     out.push_str(&format!(
                         "### {} ({:.0}s, {} words)\n\n{}\n\n---\n\n",
-                        &t.timestamp[..19].replace('T', " "),
+                        t.timestamp.get(..19).unwrap_or(&t.timestamp).replace('T', " "),
                         t.duration_seconds.unwrap_or(0.0),
                         t.word_count.unwrap_or(0),
                         t.text,
@@ -247,7 +249,7 @@ impl TranscriptDB {
                 // txt default
                 let mut out = String::new();
                 for t in &reversed {
-                    out.push_str(&format!("[{}]\n{}\n\n", &t.timestamp[..19].replace('T', " "), t.text));
+                    out.push_str(&format!("[{}]\n{}\n\n", t.timestamp.get(..19).unwrap_or(&t.timestamp).replace('T', " "), t.text));
                 }
                 std::fs::write(path, out).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             }

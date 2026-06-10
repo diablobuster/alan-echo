@@ -160,6 +160,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Generate a valid license key (for sales backend / CLI tool).
+/// Only available in debug builds — stripped from release binary.
+#[cfg(debug_assertions)]
 pub fn generate_key() -> String {
     use rand::Rng;
     let mut rng = rand::rng();

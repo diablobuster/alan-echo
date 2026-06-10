@@ -1,55 +1,55 @@
 import './tokens.css'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createRoot } from 'react-dom/client'
 import Splash from './components/Splash'
 import Dashboard from './components/Dashboard'
 import LicenseGate from './components/LicenseGate'
-
-const invoke = window.__TAURI__?.invoke || (async () => null)
+import { invoke } from '@tauri-apps/api/core'
 
 function App() {
-  const [phase, setPhase] = useState('checking') // checking → license | splash → ready
+  const [phase, setPhase] = useState('checking')
   const [progress, setProgress] = useState(0)
+  const mounted = useRef(true)
 
   useEffect(() => {
+    mounted.current = true
     async function init() {
-      // Check license
       let licensed = false
       try {
         licensed = await invoke('check_license')
-      } catch {
-        licensed = true // Dev mode
+      } catch (e) {
+        console.warn('License check failed, assuming dev mode:', e)
+        licensed = true
       }
-
+      if (!mounted.current) return
       if (!licensed) {
         setPhase('license')
         return
       }
-
-      // Licensed — show splash and load engine
       setPhase('splash')
       loadEngine()
     }
     init()
+    return () => { mounted.current = false }
   }, [])
 
   async function loadEngine() {
-    // Animate progress bar
     const interval = setInterval(() => {
-      setProgress(p => {
-        if (p >= 92) return 92
-        return p + Math.random() * 6
-      })
+      if (!mounted.current) { clearInterval(interval); return }
+      setProgress(p => p >= 92 ? 92 : p + Math.random() * 6)
     }, 250)
 
-    // Check if whisper is ready (model might need loading)
     try {
-      await invoke('check_whisper_ready')
-    } catch {}
+      const ready = await invoke('check_whisper_ready')
+      if (!ready) console.warn('Whisper engine not ready — transcription may fail')
+    } catch (e) {
+      console.warn('Whisper check failed:', e)
+    }
 
     clearInterval(interval)
+    if (!mounted.current) return
     setProgress(100)
-    setTimeout(() => setPhase('ready'), 500)
+    setTimeout(() => { if (mounted.current) setPhase('ready') }, 500)
   }
 
   function handleLicenseActivated() {
@@ -57,18 +57,9 @@ function App() {
     loadEngine()
   }
 
-  if (phase === 'checking') {
-    return <Splash progress={0} />
-  }
-
-  if (phase === 'license') {
-    return <LicenseGate onActivated={handleLicenseActivated} />
-  }
-
-  if (phase === 'splash') {
-    return <Splash progress={Math.min(progress, 100)} />
-  }
-
+  if (phase === 'checking') return <Splash progress={0} />
+  if (phase === 'license') return <LicenseGate onActivated={handleLicenseActivated} />
+  if (phase === 'splash') return <Splash progress={Math.min(progress, 100)} />
   return <Dashboard />
 }
 

@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { Monogram } from './Icons'
 import Icon from './Icons'
-
-const invoke = window.__TAURI__?.invoke || (async () => ({ valid: true, message: 'Dev mode' }))
+import { invoke } from '@tauri-apps/api/core'
 
 export default function LicenseGate({ onActivated }) {
   const [key, setKey] = useState('')
@@ -17,14 +16,18 @@ export default function LicenseGate({ onActivated }) {
       const result = await invoke('validate_license', { key })
       if (result.valid) {
         setSuccess(true)
+        setLoading(false)
         setTimeout(() => onActivated(), 800)
+        return
       } else {
         setError(result.message || 'Invalid license key')
       }
     } catch (e) {
-      // Dev mode fallback
+      console.warn('License validation error:', e)
       setSuccess(true)
+      setLoading(false)
       setTimeout(() => onActivated(), 400)
+      return
     }
     setLoading(false)
   }

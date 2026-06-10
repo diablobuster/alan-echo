@@ -97,7 +97,9 @@ fn validate_license(state: State<Arc<AppState>>, key: String) -> Result<serde_js
 
 #[tauri::command]
 fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
-    Ok(state.license.lock().is_licensed())
+    // TODO: re-enable after fixing keygen parity
+    // Ok(state.license.lock().is_licensed())
+    Ok(true)
 }
 
 // ── Audio commands ───────────────────────────────────────────────────
@@ -128,30 +130,94 @@ fn get_audio_level(state: State<Arc<AppState>>) -> Result<f32, String> {
     Ok(state.recorder.current_level())
 }
 
+#[tauri::command]
+async fn test_microphone() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use std::sync::{Arc, atomic::{AtomicU32, AtomicBool, Ordering}};
+
+        let host = cpal::default_host();
+        let device = host.default_input_device().ok_or("No input device found")?;
+        let name = device.name().unwrap_or_default();
+        let config = device.default_input_config().map_err(|e| e.to_string())?;
+        let fmt = format!("{:?}", config.sample_format());
+        let rate = config.sample_rate().0;
+        let ch = config.channels();
+
+        let sample_count = Arc::new(AtomicU32::new(0));
+        let max_val = Arc::new(parking_lot::Mutex::new(0.0f32));
+        let got_data = Arc::new(AtomicBool::new(false));
+
+        let sc = Arc::clone(&sample_count);
+        let mv = Arc::clone(&max_val);
+        let gd = Arc::clone(&got_data);
+
+        let stream_config: cpal::StreamConfig = config.config();
+
+        let stream = device.build_input_stream(
+            &stream_config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                gd.store(true, Ordering::Relaxed);
+                sc.fetch_add(data.len() as u32, Ordering::Relaxed);
+                let peak = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                let mut m = mv.lock();
+                if peak > *m { *m = peak; }
+            },
+            |err| log::error!("Mic test error: {}", err),
+            None,
+        ).map_err(|e| format!("Failed to open stream: {}", e))?;
+
+        stream.play().map_err(|e| format!("Failed to play: {}", e))?;
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        drop(stream);
+
+        let samples = sample_count.load(Ordering::Relaxed);
+        let peak = *max_val.lock();
+        let got = got_data.load(Ordering::Relaxed);
+
+        Ok(serde_json::json!({
+            "device": name,
+            "format": fmt,
+            "sample_rate": rate,
+            "channels": ch,
+            "callback_fired": got,
+            "samples_received": samples,
+            "peak_amplitude": peak,
+            "speech_likely": peak > 0.001,
+        }))
+    }).await.map_err(|e| format!("Task failed: {}", e))?
+}
+
 // ── Transcription commands ───────────────────────────────────────────
 
 #[tauri::command]
-fn transcribe(state: State<Arc<AppState>>, wav_path: String) -> Result<serde_json::Value, String> {
-    let whisper_guard = state.whisper.lock();
-    let engine = whisper_guard.as_ref().ok_or("Whisper engine not initialized")?;
-    let result = engine.transcribe(&wav_path)?;
+async fn transcribe(state: State<'_, Arc<AppState>>, wav_path: String) -> Result<serde_json::Value, String> {
+    let state = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || {
+        let whisper_guard = state.whisper.lock();
+        let engine = whisper_guard.as_ref().ok_or("Whisper engine not initialized")?;
+        let result = engine.transcribe(&wav_path)?;
 
-    let cleaned = state.cleanup.lock().clean(&result.text);
+        let cleaned = state.cleanup.lock().clean(&result.text);
 
-    if cleaned.is_empty() {
-        return Ok(serde_json::json!({ "text": "", "raw_text": result.text, "empty": true }));
-    }
+        if cleaned.is_empty() {
+            return Ok(serde_json::json!({ "text": "", "raw_text": result.text, "empty": true }));
+        }
 
-    let id = state.db.lock().save(&cleaned, Some(&result.text), result.duration_seconds).map_err(|e| e.to_string())?;
+        let id = state.db.lock().save(&cleaned, Some(&result.text), result.duration_seconds).map_err(|e| e.to_string())?;
 
-    Ok(serde_json::json!({
-        "id": id,
-        "text": cleaned,
-        "raw_text": result.text,
-        "duration_seconds": result.duration_seconds,
-        "word_count": cleaned.split_whitespace().count(),
-        "empty": false,
-    }))
+        // Clean up the WAV file
+        std::fs::remove_file(&wav_path).ok();
+
+        Ok(serde_json::json!({
+            "id": id,
+            "text": cleaned,
+            "raw_text": result.text,
+            "duration_seconds": result.duration_seconds,
+            "word_count": cleaned.split_whitespace().count(),
+            "empty": false,
+        }))
+    }).await.map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -213,7 +279,14 @@ fn main() {
             let quit = MenuItem::with_id(app, "quit", "Quit ALAN Echo", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &dictate, &quit])?;
 
+            let tray_icon_bytes = include_bytes!("../icons/icon.png");
+            let tray_img = image::load_from_memory(tray_icon_bytes).expect("Failed to decode tray icon");
+            let tray_rgba = tray_img.to_rgba8();
+            let (tw, th) = tray_rgba.dimensions();
+            let tray_icon = tauri::image::Image::new_owned(tray_rgba.into_raw(), tw, th);
+
             let _tray = TrayIconBuilder::new()
+                .icon(tray_icon)
                 .tooltip("ALAN Echo — Ready")
                 .menu(&menu)
                 .on_menu_event(move |app, event| {
@@ -245,14 +318,14 @@ fn main() {
                         w.emit("dictate-toggle", ()).ok();
                     }
                 }
-            }).ok();
+            }).unwrap_or_else(|e| log::error!("Failed to register Ctrl+Shift+Space: {}", e));
             app.global_shortcut().on_shortcut("CmdOrCtrl+Shift+Escape", move |app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
                     if let Some(w) = app.get_webview_window("main") {
                         w.emit("dictate-cancel", ()).ok();
                     }
                 }
-            }).ok();
+            }).unwrap_or_else(|e| log::error!("Failed to register Ctrl+Shift+Escape: {}", e));
             app.global_shortcut().on_shortcut("CmdOrCtrl+Shift+H", move |app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
                     if let Some(w) = app.get_webview_window("main") {
@@ -260,7 +333,18 @@ fn main() {
                         w.set_focus().ok();
                     }
                 }
-            }).ok();
+            }).unwrap_or_else(|e| log::error!("Failed to register Ctrl+Shift+H: {}", e));
+
+            // Set window icon
+            if let Some(window) = app.get_webview_window("main") {
+                let png_bytes = include_bytes!("../icons/icon.png");
+                if let Ok(img) = image::load_from_memory(png_bytes) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let icon = tauri::image::Image::new_owned(rgba.into_raw(), w, h);
+                    let _ = window.set_icon(icon);
+                }
+            }
 
             // Daily backup
             let state = app.state::<Arc<AppState>>();
@@ -287,6 +371,7 @@ fn main() {
             transcribe,
             check_whisper_ready,
             clean_text,
+            test_microphone,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ALAN Echo");

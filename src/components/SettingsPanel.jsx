@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import Icon from './Icons'
-
-const invoke = window.__TAURI__?.invoke || (async () => ({}))
+import { invoke } from '@tauri-apps/api/core'
 
 export default function SettingsPanel({ open, onClose }) {
   const [settings, setSettings] = useState({
@@ -19,11 +18,12 @@ export default function SettingsPanel({ open, onClose }) {
       try {
         const s = await invoke('get_settings')
         setSettings(prev => ({ ...prev, ...s }))
+        if (s.microphone_device) setSelectedDevice(s.microphone_device)
         const devs = await invoke('list_audio_devices')
         setDevices(devs || [])
         const ready = await invoke('check_whisper_ready')
         setWhisperReady(ready)
-      } catch {}
+      } catch (e) { console.error('Settings error:', e) }
     }
     load()
   }, [open])

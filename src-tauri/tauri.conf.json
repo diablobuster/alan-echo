@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickel-0/tauri/v2/tooling/cli/schema.json",
+  "productName": "ALAN Echo",
+  "version": "1.0.0",
+  "identifier": "com.alan.echo",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "ALAN Echo",
+        "width": 860,
+        "height": 680,
+        "minWidth": 640,
+        "minHeight": 500,
+        "center": true,
+        "decorations": false,
+        "transparent": false
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": false,
+      "tooltip": "ALAN Echo — Ready"
+    },
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' asset: https://asset.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "global-shortcut": {
+      "shortcuts": []
+    }
+  }
+}

@@ -1,0 +1,110 @@
+/* ALAN Echo — Design tokens from Claude Design handoff (light mode) */
+
+:root {
+  /* Surfaces — warm paper, never pure white */
+  --bg-primary: #f7f5f0;
+  --bg-secondary: #efece5;
+  --bg-tertiary: #e5e1d8;
+  --bg-hover: #ebe7dd;
+  --bg-card: #ffffff;
+  --bg-input: #ffffff;
+
+  /* Borders */
+  --border-primary: #d8d3c7;
+  --border-secondary: #c4beae;
+
+  /* Text */
+  --text-primary: #1c1a17;
+  --text-secondary: #3d3934;
+  --text-muted: #6b665c;
+  --text-faint: #9c968a;
+
+  /* Accents */
+  --accent-green: #0e8044;
+  --accent-red: #c2262b;
+  --accent-blue: #1e6bd6;
+  --accent-yellow: #9c6b08;
+
+  /* Brand */
+  --brass: #c8973f;
+  --brass-text: #8a6418;
+
+  /* Typography */
+  --font-display: "Instrument Serif", Georgia, serif;
+  --font-sans: "Geist", "Inter", -apple-system, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+
+  /* Tweakable */
+  --echo-accent: #1e6bd6;
+  --echo-rec: #c2262b;
+  --echo-radius: 4px;
+  --echo-radius-sm: 3px;
+  --echo-cardpy: 11px;
+  --echo-list-gap: 8px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-primary);
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Utility classes */
+.echo-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.echo-serif { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; line-height: 1.04; }
+.echo-eyebrow {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--text-muted);
+  display: inline-flex; align-items: center; gap: 8px; line-height: 1;
+}
+.echo-eyebrow::before {
+  content: ""; width: 18px; height: 1px; background: currentColor; opacity: 0.6;
+}
+
+/* Animations */
+@keyframes echo-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(194, 38, 43, 0.45); }
+  50% { box-shadow: 0 0 0 5px rgba(194, 38, 43, 0); }
+}
+@keyframes echo-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes echo-bar {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(260%); }
+}
+@keyframes echo-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes echo-flash {
+  0% { background: color-mix(in srgb, var(--echo-accent) 16%, #fff); }
+  100% { background: var(--bg-card); }
+}
+
+.echo-rise { animation: echo-rise 0.26s ease-out both; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-secondary); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; }
+}

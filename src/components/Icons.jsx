@@ -33,8 +33,15 @@ export default function Icon({ name, size = 16, stroke = 1.6, color = 'currentCo
   )
 }
 
+import brassIcon from '/assets/alan-icon-brass.png?url'
+import inkIcon from '/assets/alan-icon-ink.png?url'
+import navyIcon from '/assets/alan-icon-navy.png?url'
+import brassDarkIcon from '/assets/alan-icon-brassdark.png?url'
+
+const LOGO_MAP = { brass: brassIcon, ink: inkIcon, navy: navyIcon, brassdark: brassDarkIcon }
+
 export function Monogram({ size = 26, tone = 'ink' }) {
-  const src = `/assets/alan-icon-${tone}.png`
+  const src = LOGO_MAP[tone] || LOGO_MAP.ink
   return (
     <img src={src} alt="ALAN" draggable={false}
       style={{ height: size, width: size * 1.2, objectFit: 'contain', flexShrink: 0 }} />

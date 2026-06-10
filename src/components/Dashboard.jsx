@@ -46,15 +46,43 @@ export default function Dashboard() {
     loadStats()
   }, [loadTranscripts, loadStats])
 
+  // ── Audio beeps ─────────────────────────────────────────────────────
+  const audioCtx = useRef(null)
+  const playBeep = useCallback((type) => {
+    try {
+      if (!audioCtx.current) audioCtx.current = new AudioContext()
+      const ctx = audioCtx.current
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      gain.gain.value = 0.15
+      if (type === 'start') {
+        osc.frequency.value = 800
+        osc.start(); osc.stop(ctx.currentTime + 0.12)
+      } else {
+        osc.frequency.value = 600
+        osc.start(); osc.stop(ctx.currentTime + 0.08)
+        const osc2 = ctx.createOscillator()
+        const gain2 = ctx.createGain()
+        osc2.connect(gain2); gain2.connect(ctx.destination)
+        gain2.gain.value = 0.15; osc2.frequency.value = 400
+        osc2.start(ctx.currentTime + 0.1); osc2.stop(ctx.currentTime + 0.18)
+      }
+    } catch {}
+  }, [])
+
   // ── Tauri event listeners (hotkeys from backend) ───────────────────
   useEffect(() => {
     let cancelled = false
     const unsub1 = listen('dictate-toggle', () => { if (!cancelled) handleToggleRef.current() })
     const unsub2 = listen('dictate-cancel', () => { if (!cancelled) handleCancelRef.current() })
+    const unsub3 = listen('play-beep', (event) => { if (!cancelled) playBeep(event.payload) })
     return () => {
       cancelled = true
       unsub1.then(fn => fn())
       unsub2.then(fn => fn())
+      unsub3.then(fn => fn())
     }
   }, [])
 
@@ -85,12 +113,14 @@ export default function Dashboard() {
       setError(null)
       try {
         await invoke('start_recording')
+        playBeep('start')
         setStatus('recording')
       } catch (e) {
         setError('Microphone error — ' + (e || 'check your audio device'))
         console.error('Recording error:', e)
       }
     } else if (s === 'recording') {
+      playBeep('stop')
       setStatus('processing')
       try {
         const recording = await invoke('stop_recording')

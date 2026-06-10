@@ -229,45 +229,37 @@ function HotkeyRow({ label, keys }) {
 
 function MicTest() {
   const [state, setState] = useState('idle') // idle | recording | playing
-  const [mediaRecorder, setMediaRecorder] = useState(null)
   const [audioUrl, setAudioUrl] = useState(null)
   const audioRef = useRef(null)
 
   const startTest = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const chunks = []
-      const recorder = new MediaRecorder(stream)
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
-      recorder.onstop = () => {
-        stream.getTracks().forEach(t => t.stop())
-        const blob = new Blob(chunks, { type: 'audio/webm' })
-        const url = URL.createObjectURL(blob)
-        setAudioUrl(url)
-        setState('playing')
-        // Auto-play
-        setTimeout(() => {
-          if (audioRef.current) {
-            audioRef.current.play().catch(() => {})
-          }
-        }, 100)
-      }
-      recorder.start()
-      setMediaRecorder(recorder)
+      await invoke('start_recording')
       setState('recording')
     } catch (e) {
       console.error('Mic test failed:', e)
     }
   }
 
-  const stopTest = () => {
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-      mediaRecorder.stop()
+  const stopTest = async () => {
+    try {
+      const result = await invoke('stop_recording')
+      if (result?.wav_path) {
+        const b64 = await invoke('read_wav_base64', { wavPath: result.wav_path })
+        const url = `data:audio/wav;base64,${b64}`
+        setAudioUrl(url)
+        setState('playing')
+        setTimeout(() => { if (audioRef.current) audioRef.current.play().catch(() => {}) }, 100)
+      } else {
+        setState('idle')
+      }
+    } catch (e) {
+      console.error('Stop failed:', e)
+      setState('idle')
     }
   }
 
   const reset = () => {
-    if (audioUrl) URL.revokeObjectURL(audioUrl)
     setAudioUrl(null)
     setState('idle')
   }

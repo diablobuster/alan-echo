@@ -110,14 +110,26 @@ fn list_audio_devices() -> Result<Vec<DeviceInfo>, String> {
 }
 
 #[tauri::command]
-fn start_recording(state: State<Arc<AppState>>) -> Result<(), String> {
+fn start_recording(state: State<Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
     let device = state.settings.lock().get_str("microphone_device");
-    state.recorder.start(device.as_deref())
+    let result = state.recorder.start(device.as_deref());
+    if result.is_ok() {
+        if let Some(w) = app.get_webview_window("main") {
+            w.emit("play-beep", "start").ok();
+        }
+    }
+    result
 }
 
 #[tauri::command]
-fn stop_recording(state: State<Arc<AppState>>) -> Result<RecordingResult, String> {
-    state.recorder.stop()
+fn stop_recording(state: State<Arc<AppState>>, app: tauri::AppHandle) -> Result<RecordingResult, String> {
+    let result = state.recorder.stop();
+    if result.is_ok() {
+        if let Some(w) = app.get_webview_window("main") {
+            w.emit("play-beep", "stop").ok();
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -223,6 +235,15 @@ async fn transcribe(state: State<'_, Arc<AppState>>, wav_path: String) -> Result
 #[tauri::command]
 fn check_whisper_ready(state: State<Arc<AppState>>) -> Result<bool, String> {
     Ok(state.whisper.lock().as_ref().map(|w| w.is_ready()).unwrap_or(false))
+}
+
+#[tauri::command]
+async fn read_wav_base64(wav_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(&wav_path).map_err(|e| format!("Failed to read WAV: {}", e))?;
+        use base64::Engine;
+        Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+    }).await.map_err(|e| format!("Task failed: {}", e))?
 }
 
 // ── Text cleanup ─────────────────────────────────────────────────────
@@ -372,6 +393,7 @@ fn main() {
             check_whisper_ready,
             clean_text,
             test_microphone,
+            read_wav_base64,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ALAN Echo");

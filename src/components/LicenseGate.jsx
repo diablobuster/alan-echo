@@ -3,24 +3,53 @@ import { Monogram } from './Icons'
 import Icon from './Icons'
 import { invoke } from '@tauri-apps/api/core'
 
+// Open external pages in the user's real default browser — a plain
+// target=_blank would open a chromeless WebView2 popup with no address bar,
+// which is exactly where a buyer about to type card details bails out.
+const openExternal = (url) => (e) => {
+  e.preventDefault()
+  invoke('plugin:shell|open', { path: url }).catch(() => {
+    // Shell plugin unavailable — fall back to the popup rather than a dead link.
+    window.open(url, '_blank', 'noopener')
+  })
+}
+
+// Echo keys never contain these glyphs (CHARSET drops ambiguous ones) — a
+// hand-typed key holding them is a transcription slip, not a bad key.
+const CONFUSABLES = /[01ILO]/
+
 export default function LicenseGate({ onActivated }) {
   const [key, setKey] = useState('')
   const [error, setError] = useState('')
+  const [hint, setHint] = useState('')
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
+  const [persistWarning, setPersistWarning] = useState(false)
 
   const handleActivate = async () => {
     setError('')
+    setHint('')
     setLoading(true)
     try {
       const result = await invoke('validate_license', { key })
       if (result.valid) {
         setSuccess(true)
         setLoading(false)
-        setTimeout(() => onActivated(), 800)
+        if (result.persisted === false) {
+          // Activated for this session, but the key couldn't be written to
+          // disk — warn instead of silently re-gating on next launch.
+          setPersistWarning(true)
+          setTimeout(() => onActivated(), 3500)
+        } else {
+          setTimeout(() => onActivated(), 800)
+        }
         return
       } else {
         setError(result.message || 'Invalid license key')
+        const body = key.startsWith('ECHO-') ? key.slice(5) : key
+        if (CONFUSABLES.test(body)) {
+          setHint('Tip: Echo keys never contain 0, 1, I, L, or O — check those characters.')
+        }
       }
     } catch (e) {
       // An IPC failure is NOT a valid activation.
@@ -38,14 +67,24 @@ export default function LicenseGate({ onActivated }) {
       // Still typing (or deleting back through) the prefix — leave it alone.
       val = raw
     } else {
-      // Locate the key anywhere in the pasted text ("Key: ECHO-…" etc.)
-      const idx = raw.indexOf('ECHO')
-      const body = idx !== -1 ? raw.slice(idx + 4) : raw
-      const groups = (body.match(/.{1,5}/g) || []).slice(0, 4)
-      val = ['ECHO', ...groups].join('-')
+      // Locate the key anywhere in the pasted text ("Key: ECHO-…" etc.).
+      // Prefer a full ECHO + 20-charset-character match (the LAST one, so
+      // prose containing "ALAN Echo" before the key can't shadow it); fall
+      // back to chunking after the last bare "ECHO" for partial pastes.
+      const full = [...raw.matchAll(/ECHO([A-HJ-NP-Z2-9]{20})/g)].pop()
+      if (full) {
+        const groups = full[1].match(/.{5}/g) || []
+        val = ['ECHO', ...groups].join('-')
+      } else {
+        const idx = raw.lastIndexOf('ECHO')
+        const body = idx !== -1 ? raw.slice(idx + 4) : raw
+        const groups = (body.match(/.{1,5}/g) || []).slice(0, 4)
+        val = ['ECHO', ...groups].join('-')
+      }
     }
     setKey(val)
     setError('')
+    setHint('')
   }
 
   const handleKeyDown = (e) => {
@@ -100,6 +139,11 @@ export default function LicenseGate({ onActivated }) {
             {error}
           </div>
         )}
+        {hint && (
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
+            {hint}
+          </div>
+        )}
 
         {/* Success */}
         {success && (
@@ -109,6 +153,16 @@ export default function LicenseGate({ onActivated }) {
           }}>
             <Icon name="check" size={12} color="var(--accent-green)" />
             License activated — launching...
+          </div>
+        )}
+        {persistWarning && (
+          <div style={{
+            marginTop: 6, fontSize: 11, color: 'var(--accent-yellow)',
+            textAlign: 'center', lineHeight: 1.5,
+          }}>
+            Heads up: the key couldn&apos;t be saved to disk (is the drive full,
+            or antivirus blocking AppData?). It works for this session, but you
+            may need to enter it again next launch.
           </div>
         )}
 
@@ -129,14 +183,28 @@ export default function LicenseGate({ onActivated }) {
           {loading ? 'Validating...' : success ? 'Activated' : 'Activate License'}
         </button>
 
-        {/* Buy link */}
+        {/* Buy + recover links */}
         <div style={{ marginTop: 16, textAlign: 'center' }}>
           <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
             Don't have a key?{' '}
-            <a href="https://alanglobalintelligence.com/echo" target="_blank" rel="noopener" style={{
-              color: 'var(--echo-accent)', textDecoration: 'none',
-            }}>
+            <a
+              href="https://alanglobalintelligence.com/echo"
+              onClick={openExternal('https://alanglobalintelligence.com/echo')}
+              style={{ color: 'var(--echo-accent)', textDecoration: 'none' }}
+            >
               Buy ALAN Echo
+            </a>
+          </span>
+        </div>
+        <div style={{ marginTop: 6, textAlign: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+            Lost your key?{' '}
+            <a
+              href="https://alanglobalintelligence.com/echo/recover"
+              onClick={openExternal('https://alanglobalintelligence.com/echo/recover')}
+              style={{ color: 'var(--echo-accent)', textDecoration: 'none' }}
+            >
+              Recover it
             </a>
           </span>
         </div>
@@ -145,7 +213,7 @@ export default function LicenseGate({ onActivated }) {
       {/* Footer */}
       <div style={{ position: 'absolute', bottom: 24, textAlign: 'center' }}>
         <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-          ALAN Global Intelligence &middot; Echo v1.0
+          ALAN Global Intelligence &middot; Echo v1.1
         </span>
       </div>
     </div>

@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 type HmacSha256 = Hmac<Sha256>;
 
 const PREFIX: &str = "ECHO";
-const SECRET: &[u8] = b"ALAN_ECHO_v1_GLOBAL_INTELLIGENCE_2026";
+/// Accepted HMAC secrets, newest first. The v1 secret is PERMANENT for all of
+/// 1.x — rotating it would brick every sold key (see docs/V1.1-REBUILD-BATCH.md
+/// runbook). If a v2 secret is ever needed, APPEND it here so old keys keep
+/// validating; minting (server-side) switches to the newest entry.
+const SECRETS: &[&[u8]] = &[b"ALAN_ECHO_v1_GLOBAL_INTELLIGENCE_2026"];
 const CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,8 +56,10 @@ impl LicenseManager {
             }
         }
         let payload = format!("{}-{}-{}", parts[0], parts[1], parts[2]);
-        let expected = compute_check(&payload);
-        constant_time_eq(parts[3].as_bytes(), expected.as_bytes())
+        SECRETS.iter().any(|secret| {
+            let expected = compute_check_with(secret, &payload);
+            constant_time_eq(parts[3].as_bytes(), expected.as_bytes())
+        })
     }
 
     /// Activate a key: validate format and checksum, then store it.
@@ -85,8 +91,15 @@ impl LicenseManager {
     }
 }
 
+/// Checksum against the newest (minting) secret — used by tests and the
+/// debug-only generator.
+#[cfg(any(test, debug_assertions))]
 fn compute_check(payload: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(SECRET).unwrap();
+    compute_check_with(SECRETS[0], payload)
+}
+
+fn compute_check_with(secret: &[u8], payload: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret).unwrap();
     mac.update(payload.as_bytes());
     let result = mac.finalize();
     let bytes = result.into_bytes();

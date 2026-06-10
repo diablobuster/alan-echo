@@ -80,10 +80,12 @@ DKIM/SPF — site email is mature, should be fine).
 - **Installer is unsigned permanently** (owner decision, 2026-06-10). Mitigations:
   published SHA-256 checksums, honest SmartScreen instructions on the success page,
   license email, and /echo FAQ (item A3).
-- **GPU acceleration**: the CUDA engine is NOT in the installer (698 MB). It's uploaded as
-  `ALAN-Echo-GPU-Pack-1.0.0.zip` on the GitHub release for power users (extract into
-  `%APPDATA%\ALAN Echo\models\`). An in-app "download GPU pack" flow is the top 1.x item.
-  The /echo page words this honestly ("free GPU acceleration pack planned").
+- **GPU acceleration**: SOLVED in v1.1.0 — Settings → GPU acceleration → Enable
+  downloads + installs the CUDA pack in-app (one click, E2E-tested against prod);
+  "Test my GPU" saves a hardware verdict and explains the consequences. Manual zip
+  install still supported for v1.0 users. Next: a Vulkan pack for AMD/Intel
+  (docs/GPU-PACKS.md has the build plan — no app changes needed, the engine
+  already probes vulkan_release/).
 - **No auto-updater**: updates = new installer download. tauri-plugin-updater is the
   second 1.x item.
 - **Hosting**: installer + GPU pack live on the public GitHub repo

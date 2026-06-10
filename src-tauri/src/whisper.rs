@@ -39,10 +39,16 @@ pub struct TranscriptionResult {
 pub struct EngineInfo {
     pub gpu_name: Option<String>,
     pub vram_mb: Option<u64>,
+    /// An NVIDIA GPU is PRESENT (nvidia-smi answered). Says nothing about
+    /// which engine build is actually running — see `engine_kind`.
     pub cuda: bool,
     pub cpu_cores: usize,
     pub model_file: Option<String>,
     pub model_label: Option<String>,
+    /// "cuda" | "vulkan" | "cpu" — derived from the binary actually spawned,
+    /// so the UI can tell "GPU present but CPU engine running" from "GPU
+    /// acceleration active".
+    pub engine_kind: Option<String>,
     pub ready: bool,
     pub status: String,
 }
@@ -63,6 +69,7 @@ struct Inner {
     /// Bumped on every (re)start so stale init threads abandon themselves.
     generation: u64,
     model_file: Option<String>,
+    engine_kind: Option<String>,
 }
 
 struct Hardware {
@@ -92,6 +99,7 @@ impl WhisperEngine {
                 status: Status::Idle,
                 generation: 0,
                 model_file: None,
+                engine_kind: None,
             })),
             hw,
             data_dir: data_dir.to_path_buf(),
@@ -142,6 +150,7 @@ impl WhisperEngine {
             inner.port = port;
             inner.status = Status::Starting;
             inner.model_file = model.file_name().map(|n| n.to_string_lossy().to_string());
+            inner.engine_kind = Some(binary_kind(&binary));
         }
 
         log::info!("Starting whisper-server: {} (model {}) on port {}", binary.display(), model.display(), port);
@@ -265,6 +274,7 @@ impl WhisperEngine {
             cpu_cores: self.hw.physical_cores,
             model_file: inner.model_file.clone(),
             model_label: inner.model_file.as_deref().map(model_label),
+            engine_kind: inner.engine_kind.clone(),
             ready,
             status,
         }
@@ -333,17 +343,22 @@ impl WhisperEngine {
         }
     }
 
-    /// Pick the CUDA build when a GPU is present, otherwise the CPU build.
-    /// Each build lives in its own directory with matching DLLs.
+    /// Pick the best engine build present: CUDA when an NVIDIA GPU is around,
+    /// then Vulkan (covers AMD/Intel — pack shipped separately; the directory
+    /// simply doesn't exist until installed), then CPU. Each build lives in
+    /// its own directory with matching DLLs.
     fn find_server_binary(&self) -> Result<PathBuf, String> {
         let models = self.data_dir.join("models");
         let mut candidates: Vec<PathBuf> = Vec::new();
 
+        let vulkan = models.join("vulkan_release").join("Release").join("whisper-server.exe");
         if self.hw.gpu_name.is_some() {
             candidates.push(models.join("cuda_release").join("Release").join("whisper-server.exe"));
+            candidates.push(vulkan.clone());
             candidates.push(models.join("whisper-server.exe"));
             candidates.push(models.join("Release").join("whisper-server.exe"));
         } else {
+            candidates.push(vulkan.clone());
             candidates.push(models.join("Release").join("whisper-server.exe"));
             candidates.push(models.join("whisper-server-cpu.exe"));
             candidates.push(models.join("whisper-server.exe"));
@@ -489,6 +504,18 @@ fn post_inference(port: u16, wav_bytes: &[u8]) -> Result<String, String> {
 
 fn free_port() -> Option<u16> {
     (BASE_PORT..BASE_PORT + 20).find(|p| std::net::TcpListener::bind((HOST, *p)).is_ok())
+}
+
+/// Which acceleration family a server binary belongs to, by its pack directory.
+fn binary_kind(path: &Path) -> String {
+    let p = path.to_string_lossy();
+    if p.contains("cuda_release") {
+        "cuda".to_string()
+    } else if p.contains("vulkan_release") {
+        "vulkan".to_string()
+    } else {
+        "cpu".to_string()
+    }
 }
 
 fn detect_hardware() -> Hardware {

@@ -3,6 +3,7 @@
 mod audio;
 mod db;
 mod license;
+mod packs;
 mod paste;
 mod settings;
 mod text_cleanup;
@@ -119,12 +120,33 @@ fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Valu
 fn validate_license(state: State<Arc<AppState>>, key: String) -> Result<serde_json::Value, String> {
     let mut lm = state.license.lock();
     let (valid, msg) = lm.activate(&key);
+    let mut persisted = true;
     if valid {
         let mut s = state.settings.lock();
         s.set("license_key", serde_json::Value::String(key.trim().to_uppercase().replace(' ', "")));
-        let _ = s.save();
+        // A failed write (disk full, AV blocking %APPDATA%) means the key
+        // works THIS session but the gate reappears next launch — the UI
+        // must warn instead of celebrating.
+        if let Err(e) = s.save() {
+            log::error!("License accepted but could not be saved: {}", e);
+            persisted = false;
+        }
     }
-    Ok(serde_json::json!({ "valid": valid, "message": msg }))
+    Ok(serde_json::json!({ "valid": valid, "message": msg, "persisted": persisted }))
+}
+
+/// Release-build license check for the dictation-path commands. The frontend
+/// gate (LicenseGate) is the UX layer; this is the second, backend layer so
+/// enforcement never depends on which React component happens to be mounted.
+fn require_license(state: &AppState) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        return Ok(());
+    }
+    if state.license.lock().is_licensed() {
+        Ok(())
+    } else {
+        Err("ALAN Echo isn't activated — enter your license key first".into())
+    }
 }
 
 #[tauri::command]
@@ -145,6 +167,8 @@ fn list_audio_devices() -> Result<Vec<DeviceInfo>, String> {
 
 #[tauri::command]
 fn start_recording(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<(), String> {
+    require_license(&state)?;
+
     // Capture the focused app NOW — this is where the transcript gets pasted.
     let target = paste::foreground_window();
 
@@ -285,6 +309,7 @@ async fn test_microphone() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_path: String) -> Result<serde_json::Value, String> {
+    require_license(&state)?;
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
         let result = state.whisper.transcribe(&wav_path);
@@ -471,11 +496,30 @@ fn main() {
     let db_path = data_dir.join("transcripts.db");
     let settings_path = data_dir.join("settings.json");
 
-    // A corrupt settings file must not brick saving forever — keep the path.
-    let settings = Settings::load(&settings_path).unwrap_or_else(|e| {
-        log::warn!("Settings load failed ({}), starting fresh", e);
-        Settings::new(settings_path.clone())
-    });
+    // A corrupt settings file must not brick saving forever — and it must not
+    // silently discard the license key. Try the backup copy first; only then
+    // fall back to fresh settings.
+    let settings_backup = data_dir.join("backups").join("settings.json");
+    let settings = Settings::load(&settings_path)
+        .or_else(|e| {
+            log::warn!("Settings load failed ({}), trying backup", e);
+            if settings_backup.exists() {
+                std::fs::copy(&settings_backup, &settings_path)
+                    .map_err(|c| -> Box<dyn std::error::Error> { Box::new(c) })?;
+                Settings::load(&settings_path)
+            } else {
+                Err(e)
+            }
+        })
+        .unwrap_or_else(|e| {
+            log::warn!("Settings load failed ({}), starting fresh", e);
+            Settings::new(settings_path.clone())
+        });
+    // Keep a daily-ish backup next to the transcript backups — settings.json
+    // holds the license key, the only file whose loss costs the customer.
+    if settings_path.exists() {
+        std::fs::copy(&settings_path, &settings_backup).ok();
+    }
     let license_key = settings.get_str("license_key");
     let cleanup_level = settings.get_str("text_cleanup_level").unwrap_or_else(|| "standard".into());
     let model_pref = settings.get_str("whisper_model");
@@ -681,6 +725,9 @@ fn main() {
             clean_text,
             test_microphone,
             read_wav_base64,
+            packs::get_gpu_pack_status,
+            packs::download_gpu_pack,
+            packs::test_gpu,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ALAN Echo");

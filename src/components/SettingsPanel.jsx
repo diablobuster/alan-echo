@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Icon from './Icons'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { applyTheme } from '../theme'
 
 const CLEANUP_SAMPLE = "um so basically i think we should you know move the the meeting to friday"
@@ -157,6 +158,10 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
           <EngineStatus engine={engine} />
 
+          <GpuTestRow savedResult={settings.gpu_test} />
+
+          <GpuPackRow onEngineRestart={() => { loadEngineInfo(); startEnginePoll() }} />
+
           {/* Microphone */}
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Microphone</div>
           <SettingsRow label="Input device">
@@ -257,7 +262,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           textAlign: 'center',
         }}>
           <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-            Part of ALAN Global Intelligence &middot; v1.0
+            Part of ALAN Global Intelligence &middot; v1.1
           </span>
         </div>
       </div>
@@ -273,9 +278,15 @@ function EngineStatus({ engine }) {
     ? `Engine ready — ${engine?.model_label || ''} model`.trim()
     : loading ? 'Loading model...'
     : engine?.status ? `Engine ${engine.status}` : 'Checking engine...'
+  // engine_kind reports the binary actually running — a present GPU with the
+  // CPU engine active means the acceleration pack isn't installed yet.
   const computeText = engine
-    ? (engine.cuda
-        ? `GPU: ${engine.gpu_name}${engine.vram_mb ? ` (${Math.round(engine.vram_mb / 1024)} GB)` : ''} · CUDA`
+    ? (engine.engine_kind === 'cuda'
+        ? `GPU: ${engine.gpu_name}${engine.vram_mb ? ` (${Math.round(engine.vram_mb / 1024)} GB)` : ''} · CUDA active`
+        : engine.engine_kind === 'vulkan'
+        ? `GPU acceleration · Vulkan active`
+        : engine.cuda
+        ? `CPU engine · ${engine.cpu_cores} cores (${engine.gpu_name} idle)`
         : `CPU only · ${engine.cpu_cores} cores`)
     : ''
 
@@ -303,6 +314,191 @@ function EngineStatus({ engine }) {
         </SettingsRow>
       )}
     </>
+  )
+}
+
+/** Plain-language consequences of a GPU test result. */
+function gpuVerdictText(r) {
+  const vram = r.vram_mb ? ` (${Math.round(r.vram_mb / 1024)} GB)` : ''
+  if (r.verdict === 'cuda_ready') {
+    return `${r.nvidia_gpu}${vram} — GPU acceleration is installed and active. Short dictations transcribe in well under a second.`
+  }
+  if (r.verdict === 'cuda_available') {
+    return `${r.nvidia_gpu}${vram} found — but Echo is using the CPU engine right now. Enable GPU acceleration below to transcribe several times faster.`
+  }
+  // cpu_only: name what we DID find so AMD/Intel owners get a real answer.
+  const other = (r.display_gpus || []).filter(n => !/nvidia/i.test(n))
+  if (other.length > 0) {
+    return `No NVIDIA GPU found. We see ${other.join(', ')} — support for AMD and Intel graphics is on the roadmap. Until then Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU.`
+  }
+  return `No dedicated GPU found. Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU; very long clips take proportionally longer.`
+}
+
+/** Explicit "do I have a GPU?" test — runs a fresh probe, persists the
+ *  result (settings.gpu_test), and states the consequences in plain words. */
+function GpuTestRow({ savedResult }) {
+  const [result, setResult] = useState(savedResult || null)
+  const [testing, setTesting] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => { if (savedResult) setResult(savedResult) }, [savedResult])
+
+  const runTest = async () => {
+    setTesting(true)
+    setError(null)
+    try {
+      setResult(await invoke('test_gpu'))
+    } catch (e) {
+      setError(String(e))
+    }
+    setTesting(false)
+  }
+
+  const testedDate = result?.tested_at
+    ? new Date(result.tested_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+    : null
+
+  return (
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>Test my GPU</div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>
+            {testedDate ? `Last tested ${testedDate}` : 'Check what your hardware means for speed'}
+          </div>
+        </div>
+        <button type="button" onClick={runTest} disabled={testing} style={{
+          padding: '4px 14px', fontSize: 11,
+          background: 'var(--bg-card)', color: 'var(--text-secondary)',
+          border: '1px solid var(--border-primary)', borderRadius: 'var(--echo-radius-sm)',
+          cursor: testing ? 'default' : 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0,
+        }}>{testing ? 'Testing…' : result ? 'Re-test' : 'Run test'}</button>
+      </div>
+      {result && (
+        <div style={{
+          marginTop: 6, padding: '8px 10px',
+          background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+          borderRadius: 'var(--echo-radius-sm)', fontSize: 11, lineHeight: 1.55,
+          color: 'var(--text-secondary)', display: 'flex', gap: 6, alignItems: 'flex-start',
+        }}>
+          <Icon
+            name={result.verdict === 'cpu_only' ? 'cpu' : 'check'}
+            size={12}
+            color={result.verdict === 'cuda_ready' ? 'var(--accent-green)' : result.verdict === 'cuda_available' ? 'var(--brass)' : 'var(--text-muted)'}
+            style={{ flexShrink: 0, marginTop: 2 }}
+          />
+          <span>{gpuVerdictText(result)}</span>
+        </div>
+      )}
+      {error && (
+        <div className="echo-mono" style={{ fontSize: 10, color: 'var(--accent-red)', marginTop: 4 }}>{error}</div>
+      )}
+    </div>
+  )
+}
+
+/** One-click GPU acceleration: shows nothing without an NVIDIA GPU; offers
+ *  the free pack download when the GPU is idle on the CPU engine; renders
+ *  progress while the ~440 MB pack streams in; hands off to the engine poll
+ *  once the CUDA build restarts. */
+function GpuPackRow({ onEngineRestart }) {
+  const [status, setStatus] = useState(null) // { gpu_name, installed, engine_kind, progress }
+  const [progress, setProgress] = useState(null)
+  const [error, setError] = useState(null)
+  const doneRef = useRef(false)
+
+  const refresh = async () => {
+    try {
+      const s = await invoke('get_gpu_pack_status')
+      setStatus(s)
+      if (s?.progress?.state && s.progress.state !== 'idle') setProgress(s.progress)
+      return s
+    } catch { return null }
+  }
+
+  useEffect(() => {
+    refresh()
+    let unsub = null
+    listen('gpu-pack-progress', (event) => {
+      const p = event.payload
+      setProgress(p)
+      if (p.state === 'failed') setError(p.error || 'Download failed — try again')
+      if (p.state === 'done' && !doneRef.current) {
+        doneRef.current = true
+        refresh()
+        onEngineRestart()
+      }
+    }).then(fn => { unsub = fn })
+    return () => { if (unsub) unsub() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const start = async () => {
+    setError(null)
+    doneRef.current = false
+    try {
+      await invoke('download_gpu_pack')
+      setProgress({ state: 'downloading', downloaded_mb: 0, total_mb: null })
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  // No NVIDIA GPU → nothing to offer (Vulkan pack for AMD/Intel is a separate
+  // future drop-in; the engine already probes for it).
+  if (!status?.gpu_name) return null
+
+  const busy = progress && ['downloading', 'extracting', 'restarting'].includes(progress.state)
+  const active = status.installed && !busy
+
+  if (active && !progress) {
+    // Pack on disk and no install in flight — the Compute row already says
+    // "CUDA active"; stay quiet.
+    return null
+  }
+
+  return (
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>GPU acceleration</div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>
+            {busy
+              ? progress.state === 'downloading'
+                ? `Downloading… ${progress.downloaded_mb || 0}${progress.total_mb ? ` / ${progress.total_mb}` : ''} MB`
+                : progress.state === 'extracting'
+                ? 'Installing…'
+                : 'Restarting the speech engine…'
+              : progress?.state === 'done'
+              ? `Active — transcribing on your ${status.gpu_name}`
+              : `Free one-time download (~440 MB) — uses your ${status.gpu_name}`}
+          </div>
+        </div>
+        {!busy && progress?.state !== 'done' && (
+          <button type="button" onClick={start} style={{
+            padding: '4px 14px', fontSize: 11, background: 'var(--accent-green)', color: '#fff',
+            border: 'none', borderRadius: 'var(--echo-radius-sm)', cursor: 'pointer',
+            fontFamily: 'var(--font-sans)', fontWeight: 500, flexShrink: 0,
+          }}>Enable</button>
+        )}
+        {progress?.state === 'done' && (
+          <Icon name="check" size={14} color="var(--accent-green)" />
+        )}
+      </div>
+      {busy && progress.state === 'downloading' && (
+        <div style={{
+          marginTop: 6, height: 4, borderRadius: 2, background: 'var(--bg-tertiary)', overflow: 'hidden',
+        }}>
+          <div style={{
+            height: '100%', background: 'var(--accent-green)', transition: 'width 0.4s',
+            width: progress.total_mb ? `${Math.min(100, Math.round((progress.downloaded_mb / progress.total_mb) * 100))}%` : '30%',
+          }} />
+        </div>
+      )}
+      {error && (
+        <div className="echo-mono" style={{ fontSize: 10, color: 'var(--accent-red)', marginTop: 4 }}>{error}</div>
+      )}
+    </div>
   )
 }
 

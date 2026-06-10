@@ -18,7 +18,13 @@ export function StatusDot({ status = 'ready', size = 7 }) {
   )
 }
 
-export default function TitleBar({ status = 'ready', onSettings, onMinimize, onMaximize, onClose }) {
+function fmtClock(s) {
+  const m = Math.floor(s / 60)
+  const sec = Math.floor(s % 60)
+  return `${m}:${String(sec).padStart(2, '0')}`
+}
+
+export default function TitleBar({ status = 'ready', elapsed = 0, onSettings, onMinimize, onMaximize, onClose }) {
   const s = STATUS[status] || STATUS.ready
   return (
     <div data-tauri-drag-region style={{
@@ -49,6 +55,11 @@ export default function TitleBar({ status = 'ready', onSettings, onMinimize, onM
       }}>
         <StatusDot status={status} size={6} />
         <span style={{ fontWeight: 500 }}>{s.label}</span>
+        {status === 'recording' && (
+          <span className="echo-mono" style={{ fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
+            {fmtClock(elapsed)}
+          </span>
+        )}
       </div>
 
       <div style={{ flex: 1 }} />

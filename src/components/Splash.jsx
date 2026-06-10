@@ -1,6 +1,6 @@
 import { Monogram } from './Icons'
 
-export default function Splash({ progress = 64 }) {
+export default function Splash({ progress = 64, modelLabel = '' }) {
   return (
     <div style={{
       height: '100vh', display: 'flex', flexDirection: 'column',
@@ -47,8 +47,8 @@ export default function Splash({ progress = 64 }) {
       <div className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
         Initializing speech engine...
       </div>
-      <div className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>
-        Enhanced model
+      <div className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2, minHeight: 13 }}>
+        {modelLabel || ' '}
       </div>
 
       {/* Footer */}

@@ -18,6 +18,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Empty settings that still save to the right place — used when the
+    /// settings file exists but is unreadable/corrupt.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, data: Map::new() }
+    }
+
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let data = if path.exists() {
             let content = std::fs::read_to_string(path)?;

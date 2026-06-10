@@ -191,6 +191,7 @@ impl TranscriptDB {
         self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         std::fs::copy(&self.path, &backup_path)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        prune_backups(&backup_dir, 7);
         Ok(backup_path.to_string_lossy().to_string())
     }
 
@@ -255,5 +256,29 @@ impl TranscriptDB {
             }
         }
         Ok(true)
+    }
+}
+
+/// Keep only the newest `keep` backups. Timestamped filenames sort
+/// chronologically, so a name sort is a date sort.
+fn prune_backups(backup_dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(backup_dir) else { return };
+    let mut backups: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().map(|e| e == "db").unwrap_or(false)
+                && p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("transcripts_"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    if backups.len() <= keep {
+        return;
+    }
+    backups.sort();
+    let excess = backups.len() - keep;
+    for old in backups.into_iter().take(excess) {
+        std::fs::remove_file(old).ok();
     }
 }

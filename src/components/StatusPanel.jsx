@@ -7,7 +7,7 @@ function fmtClock(s) {
   return `${m}:${String(sec).padStart(2, '0')}`
 }
 
-export default function StatusPanel({ status, elapsed = 0, cap = 300, onToggle, onCancel }) {
+export default function StatusPanel({ status, elapsed = 0, cap = 300, hotkeys = {}, onToggle, onCancel }) {
   if (status === 'recording') {
     const pct = Math.min((elapsed / cap) * 100, 100)
     return (
@@ -78,8 +78,19 @@ export default function StatusPanel({ status, elapsed = 0, cap = 300, onToggle, 
       <span style={{ fontWeight: 500, color: 'var(--accent-green)' }}>Ready to dictate</span>
       <div style={{ flex: 1 }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-muted)' }}>
-        <Kbd>Ctrl</Kbd><Kbd>Shift</Kbd><Kbd>Space</Kbd>
-        <span style={{ marginLeft: 4 }}>to start</span>
+        {hotkeys.toggle === null ? (
+          <>
+            <span style={{ color: 'var(--accent-yellow)' }}>Hotkey unavailable</span>
+            <Btn kind="primary" size="sm" onClick={onToggle} style={{ marginLeft: 6 }}>
+              <Icon name="mic" size={12} color="#fff" /> Start
+            </Btn>
+          </>
+        ) : (
+          <>
+            {(hotkeys.toggle || 'Ctrl + Shift + Space').split(' + ').map(k => <Kbd key={k}>{k}</Kbd>)}
+            <span style={{ marginLeft: 4 }}>to start</span>
+          </>
+        )}
       </div>
     </div>
   )

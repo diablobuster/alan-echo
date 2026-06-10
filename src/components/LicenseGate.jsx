@@ -23,19 +23,27 @@ export default function LicenseGate({ onActivated }) {
         setError(result.message || 'Invalid license key')
       }
     } catch (e) {
-      console.warn('License validation error:', e)
-      setSuccess(true)
-      setLoading(false)
-      setTimeout(() => onActivated(), 400)
-      return
+      // An IPC failure is NOT a valid activation.
+      console.error('License validation error:', e)
+      setError('Could not validate the key — please restart the app and try again')
     }
     setLoading(false)
   }
 
   const handleKeyInput = (e) => {
-    let val = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '')
-    // Auto-format: add dashes after ECHO and every 5 chars
-    if (val.startsWith('ECHO') && val.length === 4) val += '-'
+    // Re-chunk whatever was typed/pasted into ECHO-XXXXX-XXXXX-XXXXX-XXXXX
+    const raw = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')
+    let val
+    if ('ECHO'.startsWith(raw)) {
+      // Still typing (or deleting back through) the prefix — leave it alone.
+      val = raw
+    } else {
+      // Locate the key anywhere in the pasted text ("Key: ECHO-…" etc.)
+      const idx = raw.indexOf('ECHO')
+      const body = idx !== -1 ? raw.slice(idx + 4) : raw
+      const groups = (body.match(/.{1,5}/g) || []).slice(0, 4)
+      val = ['ECHO', ...groups].join('-')
+    }
     setKey(val)
     setError('')
   }
@@ -70,7 +78,6 @@ export default function LicenseGate({ onActivated }) {
             value={key}
             onChange={handleKeyInput}
             onKeyDown={handleKeyDown}
-            maxLength={29}
             style={{
               width: '100%', padding: '10px 14px',
               background: 'var(--bg-card)', border: `1px solid ${error ? 'var(--accent-red)' : 'var(--border-primary)'}`,

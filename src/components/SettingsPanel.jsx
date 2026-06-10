@@ -1,8 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import Icon from './Icons'
 import { invoke } from '@tauri-apps/api/core'
+import { applyTheme } from '../theme'
 
-export default function SettingsPanel({ open, onClose }) {
+const CLEANUP_SAMPLE = "um so basically i think we should you know move the the meeting to friday"
+const MODEL_LABELS = { small: 'Standard', medium: 'Enhanced', 'large-v3': 'Ultra' }
+
+export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [settings, setSettings] = useState({
     auto_paste: true,
     sound_enabled: true,
@@ -10,7 +14,30 @@ export default function SettingsPanel({ open, onClose }) {
   })
   const [devices, setDevices] = useState([])
   const [selectedDevice, setSelectedDevice] = useState(null)
-  const [whisperReady, setWhisperReady] = useState(false)
+  const [engine, setEngine] = useState(null)
+  const [preview, setPreview] = useState(null)
+  const [modelError, setModelError] = useState(null)
+  const pollRef = useRef(null)
+
+  const loadEngineInfo = async () => {
+    try {
+      const info = await invoke('get_engine_info')
+      setEngine(info)
+      return info
+    } catch { return null }
+  }
+
+  // clearInterval+setInterval run in one synchronous block, and a stale
+  // interval clears only its own id — concurrent model switches can't orphan
+  // a poll that then runs forever.
+  const startEnginePoll = () => {
+    clearInterval(pollRef.current)
+    const id = setInterval(async () => {
+      const info = await loadEngineInfo()
+      if (info?.ready || info?.status?.startsWith('failed')) clearInterval(id)
+    }, 800)
+    pollRef.current = id
+  }
 
   useEffect(() => {
     if (!open) return
@@ -21,25 +48,66 @@ export default function SettingsPanel({ open, onClose }) {
         if (s.microphone_device) setSelectedDevice(s.microphone_device)
         const devs = await invoke('list_audio_devices')
         setDevices(devs || [])
-        const ready = await invoke('check_whisper_ready')
-        setWhisperReady(ready)
+        const info = await loadEngineInfo()
+        // Resume polling if the panel reopens while a model is still loading.
+        if (info && !info.ready && !info.status?.startsWith('failed')) startEnginePoll()
+        const cleaned = await invoke('clean_text', { text: CLEANUP_SAMPLE })
+        setPreview(cleaned)
       } catch (e) { console.error('Settings error:', e) }
     }
     load()
+    return () => clearInterval(pollRef.current)
   }, [open])
 
   const updateSetting = async (key, value) => {
     setSettings(prev => ({ ...prev, [key]: value }))
-    try { await invoke('set_setting', { key, value }) } catch {}
+    try { await invoke('set_setting', { key, value }) } catch (e) { console.error('Save failed:', e) }
+  }
+
+  const changeModel = async (label) => {
+    const map = { Standard: 'small', Enhanced: 'medium', Ultra: 'large-v3' }
+    const name = map[label] || 'medium'
+    setModelError(null)
+    try {
+      // Direct invoke (not updateSetting) — the backend rejects models that
+      // aren't installed, and that error belongs in the UI.
+      await invoke('set_setting', { key: 'whisper_model', value: name })
+      setSettings(prev => ({ ...prev, whisper_model: name }))
+    } catch (e) {
+      setModelError(String(e))
+      return
+    }
+    // The backend restarts whisper-server with the new model — poll until done.
+    loadEngineInfo()
+    startEnginePoll()
+  }
+
+  const changeCleanup = async (level) => {
+    await updateSetting('text_cleanup_level', level)
+    try {
+      const cleaned = await invoke('clean_text', { text: CLEANUP_SAMPLE })
+      setPreview(cleaned)
+    } catch {}
+  }
+
+  const changeTheme = async (label) => {
+    const theme = label === 'Dark' ? 'dark' : 'light'
+    applyTheme({ theme })
+    await updateSetting('theme', theme)
   }
 
   if (!open) return null
+
+  const activeModelLabel = engine?.model_label
+    || MODEL_LABELS[settings.whisper_model]
+    || 'Enhanced'
 
   return (
     <>
       {/* Backdrop */}
       <div onClick={onClose} style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.2)', zIndex: 100,
+        animation: 'echo-fade-in 0.2s ease-out both',
       }} />
 
       {/* Panel */}
@@ -47,7 +115,7 @@ export default function SettingsPanel({ open, onClose }) {
         position: 'fixed', top: 0, right: 0, bottom: 0, width: 380,
         background: 'var(--bg-primary)', borderLeft: '1px solid var(--border-primary)',
         zIndex: 101, display: 'flex', flexDirection: 'column',
-        animation: 'echo-rise 0.2s ease-out both',
+        animation: 'echo-slide-in 0.22s ease-out both',
       }}>
         {/* Header */}
         <div style={{
@@ -72,25 +140,15 @@ export default function SettingsPanel({ open, onClose }) {
           <SettingsRow label="Speech model" hint="Higher quality = more accurate, slower">
             <Seg
               options={['Standard', 'Enhanced', 'Ultra']}
-              value={({'small':'Standard','medium':'Enhanced','large-v3':'Ultra'})[settings.whisper_model] || 'Enhanced'}
-              onChange={v => {
-                const map = {'Standard':'small','Enhanced':'medium','Ultra':'large-v3'}
-                updateSetting('whisper_model', map[v] || 'medium')
-              }}
+              value={activeModelLabel}
+              onChange={changeModel}
             />
           </SettingsRow>
+          {modelError && (
+            <div style={{ fontSize: 10, color: 'var(--accent-yellow)', marginBottom: 4 }}>{modelError}</div>
+          )}
 
-          <SettingsRow label="Status" hint="">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: whisperReady ? 'var(--accent-green)' : 'var(--accent-red)',
-              }} />
-              <span className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                {whisperReady ? 'Engine ready' : 'Model not found'}
-              </span>
-            </div>
-          </SettingsRow>
+          <EngineStatus engine={engine} />
 
           {/* Microphone */}
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Microphone</div>
@@ -134,16 +192,56 @@ export default function SettingsPanel({ open, onClose }) {
             <Seg
               options={['light', 'standard', 'aggressive']}
               value={settings.text_cleanup_level || 'standard'}
-              onChange={v => updateSetting('text_cleanup_level', v)}
+              onChange={changeCleanup}
+            />
+          </SettingsRow>
+
+          {preview != null && (
+            <div style={{
+              margin: '4px 0 8px', padding: '8px 10px',
+              background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+              borderRadius: 'var(--echo-radius-sm)', fontSize: 11, lineHeight: 1.5,
+            }}>
+              <div style={{ color: 'var(--text-faint)', textDecoration: 'line-through' }}>
+                "{CLEANUP_SAMPLE}"
+              </div>
+              <div style={{ color: 'var(--text-secondary)', marginTop: 4, display: 'flex', gap: 5, alignItems: 'baseline' }}>
+                <Icon name="sparkle" size={11} color="var(--brass)" style={{ flexShrink: 0, alignSelf: 'center' }} />
+                <span>"{preview}"</span>
+              </div>
+            </div>
+          )}
+
+          {/* Appearance */}
+          <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Appearance</div>
+          <SettingsRow label="Theme">
+            <Seg
+              options={['Light', 'Dark']}
+              value={settings.theme === 'dark' ? 'Dark' : 'Light'}
+              onChange={changeTheme}
             />
           </SettingsRow>
 
           {/* Hotkeys section */}
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Hotkeys</div>
 
-          <HotkeyRow label="Toggle dictation" keys="Ctrl + Shift + Space" />
-          <HotkeyRow label="Cancel recording" keys="Ctrl + Shift + Esc" />
-          <HotkeyRow label="Show dashboard" keys="Ctrl + Shift + H" />
+          <HotkeyRow
+            label="Toggle dictation"
+            keys={hotkeys.toggle === null ? 'Unavailable' : (hotkeys.toggle || 'Ctrl + Shift + Space')}
+            warn={hotkeys.toggle === null}
+          />
+          <HotkeyRow label="Cancel recording" keys={hotkeys.cancel || 'Unavailable'} warn={!hotkeys.cancel} />
+          <HotkeyRow label="Show dashboard" keys={hotkeys.show || 'Ctrl + Shift + H'} />
+          {hotkeys.toggle === null && (
+            <div style={{ fontSize: 10, color: 'var(--accent-yellow)', marginTop: 4 }}>
+              Dictation hotkey could not be registered — another app may be using it. Use the tray menu's Start Dictation instead.
+            </div>
+          )}
+          {!hotkeys.cancel && (
+            <div style={{ fontSize: 10, color: 'var(--accent-yellow)', marginTop: 4 }}>
+              Cancel hotkey could not be registered — another app may be using it. Press Esc in the dashboard instead.
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -156,6 +254,47 @@ export default function SettingsPanel({ open, onClose }) {
           </span>
         </div>
       </div>
+    </>
+  )
+}
+
+function EngineStatus({ engine }) {
+  const ready = engine?.ready
+  const loading = engine?.status === 'loading model'
+  const color = ready ? 'var(--accent-green)' : loading ? 'var(--accent-yellow)' : 'var(--accent-red)'
+  const statusText = ready
+    ? `Engine ready — ${engine?.model_label || ''} model`.trim()
+    : loading ? 'Loading model...'
+    : engine?.status ? `Engine ${engine.status}` : 'Checking engine...'
+  const computeText = engine
+    ? (engine.cuda
+        ? `GPU: ${engine.gpu_name}${engine.vram_mb ? ` (${Math.round(engine.vram_mb / 1024)} GB)` : ''} · CUDA`
+        : `CPU only · ${engine.cpu_cores} cores`)
+    : ''
+
+  return (
+    <>
+      <SettingsRow label="Status" hint="">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%', background: color,
+            animation: loading ? 'echo-blink 1.2s ease-in-out infinite' : 'none',
+          }} />
+          <span className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {statusText}
+          </span>
+        </div>
+      </SettingsRow>
+      {computeText && (
+        <SettingsRow label="Compute" hint="">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Icon name="cpu" size={12} color="var(--text-muted)" />
+            <span className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {computeText}
+            </span>
+          </div>
+        </SettingsRow>
+      )}
     </>
   )
 }
@@ -215,28 +354,43 @@ function Toggle({ checked, onChange }) {
   )
 }
 
-function HotkeyRow({ label, keys }) {
+function HotkeyRow({ label, keys, warn }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '6px 0',
     }}>
       <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{label}</span>
-      <span className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>{keys}</span>
+      <span className="echo-mono" style={{ fontSize: 10, color: warn ? 'var(--accent-yellow)' : 'var(--text-faint)' }}>{keys}</span>
     </div>
   )
 }
 
-function MicTest() {
+export function MicTest() {
   const [state, setState] = useState('idle') // idle | recording | playing
   const [audioUrl, setAudioUrl] = useState(null)
+  const [error, setError] = useState(null)
   const audioRef = useRef(null)
+  const stateRef = useRef(state)
+  stateRef.current = state
+
+  // Discard an in-flight recording if the panel unmounts mid-test — an
+  // abandoned recording would otherwise block dictation until restart.
+  useEffect(() => () => {
+    if (stateRef.current === 'recording') invoke('cancel_recording').catch(() => {})
+  }, [])
 
   const startTest = async () => {
+    setError(null)
     try {
+      if (await invoke('is_recording')) {
+        setError('Dictation in progress — stop it before testing the microphone.')
+        return
+      }
       await invoke('start_recording')
       setState('recording')
     } catch (e) {
+      setError(String(e))
       console.error('Mic test failed:', e)
     }
   }
@@ -295,6 +449,9 @@ function MicTest() {
         <div className="echo-mono" style={{ fontSize: 10, color: 'var(--accent-red)' }}>
           Recording... speak now
         </div>
+      )}
+      {error && (
+        <div className="echo-mono" style={{ fontSize: 10, color: 'var(--accent-red)' }}>{error}</div>
       )}
       {audioUrl && (
         <audio ref={audioRef} src={audioUrl} controls onEnded={reset} style={{

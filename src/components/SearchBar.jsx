@@ -1,7 +1,17 @@
+import { useState } from 'react'
 import Icon from './Icons'
 import { Btn } from './StatusPanel'
 
-export default function SearchBar({ query, onChange, count, total, onExport, onSettings }) {
+const FORMATS = [
+  ['txt', 'Plain text (.txt)'],
+  ['md', 'Markdown (.md)'],
+  ['json', 'JSON (.json)'],
+  ['csv', 'CSV (.csv)'],
+]
+
+export default function SearchBar({ query, onChange, count, total, onExport }) {
+  const [menuOpen, setMenuOpen] = useState(false)
+
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
@@ -30,10 +40,40 @@ export default function SearchBar({ query, onChange, count, total, onExport, onS
         )}
       </div>
 
-      {/* Export */}
-      <Btn kind="ghost" size="sm" onClick={onExport}>
-        <Icon name="download" size={13} /> Export
-      </Btn>
+      {/* Export with format menu */}
+      <div style={{ position: 'relative' }}>
+        <Btn kind="ghost" size="sm" onClick={() => setMenuOpen(o => !o)}>
+          <Icon name="download" size={13} /> Export <Icon name="chevron" size={11} />
+        </Btn>
+        {menuOpen && (
+          <>
+            <div onClick={() => setMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
+            <div style={{
+              position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 91,
+              background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+              borderRadius: 'var(--echo-radius)', boxShadow: '0 4px 16px rgba(0,0,0,0.14)',
+              padding: 4, minWidth: 150, animation: 'echo-rise 0.14s ease-out both',
+            }}>
+              {FORMATS.map(([fmt, label]) => (
+                <button
+                  key={fmt}
+                  onClick={() => { setMenuOpen(false); onExport(fmt) }}
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left', padding: '6px 10px',
+                    fontSize: 11, background: 'none', border: 'none', cursor: 'pointer',
+                    borderRadius: 'var(--echo-radius-sm)', color: 'var(--text-primary)',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   )
 }

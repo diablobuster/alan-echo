@@ -10,6 +10,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
+/// Hard backstop just past the UI's 5-minute cap — even if the frontend loses
+/// track of a recording, memory use stays bounded.
+const MAX_RECORD_SECONDS: usize = 310;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceInfo {
@@ -61,15 +64,12 @@ enum RecCmd {
     Level { tx_result: mpsc::Sender<f32> },
 }
 
-/// Thread-safe recorder handle. The actual cpal stream lives on a background thread.
+/// Thread-safe recorder handle. The actual cpal stream lives on a background
+/// thread; the sender is wrapped in a Mutex because std's mpsc::Sender is
+/// !Sync and Tauri state is shared across threads.
 pub struct RecorderHandle {
-    cmd_tx: mpsc::Sender<RecCmd>,
+    cmd_tx: Mutex<mpsc::Sender<RecCmd>>,
 }
-
-// mpsc::Sender is Send. We need Sync for Tauri State — wrap in Mutex at call site if needed.
-// Actually mpsc::Sender is Send but NOT Sync. We use unsafe Sync here because
-// all methods create a new channel per call and never share the sender across threads simultaneously.
-unsafe impl Sync for RecorderHandle {}
 
 impl RecorderHandle {
     pub fn new() -> Self {
@@ -82,28 +82,31 @@ impl RecorderHandle {
             })
             .expect("Failed to spawn recorder thread");
 
-        Self { cmd_tx }
+        Self { cmd_tx: Mutex::new(cmd_tx) }
+    }
+
+    fn send(&self, cmd: RecCmd) -> Result<(), String> {
+        self.cmd_tx.lock().send(cmd).map_err(|_| "Recorder thread dead".to_string())
     }
 
     pub fn start(&self, device_name: Option<&str>) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
-        self.cmd_tx.send(RecCmd::Start {
+        self.send(RecCmd::Start {
             device_name: device_name.map(|s| s.to_string()),
             tx_result: tx,
-        }).map_err(|_| "Recorder thread dead".to_string())?;
+        })?;
         rx.recv().map_err(|_| "Recorder thread dead".to_string())?
     }
 
     pub fn stop(&self) -> Result<RecordingResult, String> {
         let (tx, rx) = mpsc::channel();
-        self.cmd_tx.send(RecCmd::Stop { tx_result: tx })
-            .map_err(|_| "Recorder thread dead".to_string())?;
+        self.send(RecCmd::Stop { tx_result: tx })?;
         rx.recv().map_err(|_| "Recorder thread dead".to_string())?
     }
 
     pub fn is_recording(&self) -> bool {
         let (tx, rx) = mpsc::channel();
-        if self.cmd_tx.send(RecCmd::IsRecording { tx_result: tx }).is_ok() {
+        if self.send(RecCmd::IsRecording { tx_result: tx }).is_ok() {
             rx.recv().unwrap_or(false)
         } else {
             false
@@ -112,7 +115,7 @@ impl RecorderHandle {
 
     pub fn current_level(&self) -> f32 {
         let (tx, rx) = mpsc::channel();
-        if self.cmd_tx.send(RecCmd::Level { tx_result: tx }).is_ok() {
+        if self.send(RecCmd::Level { tx_result: tx }).is_ok() {
             rx.recv().unwrap_or(0.0)
         } else {
             0.0
@@ -164,6 +167,7 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
                 *rms_level.lock() = 0.0;
 
                 let threshold = 0.001f32;
+                let max_samples = device_rate as usize * MAX_RECORD_SECONDS;
                 let sample_format = config.sample_format();
                 let stream_config: cpal::StreamConfig = config.into();
 
@@ -185,7 +189,11 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
                                 let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len().max(1) as f32).sqrt();
                                 *rl.lock() = rms;
                                 if rms > threshold { *hs.lock() = true; }
-                                smp.lock().extend_from_slice(&mono);
+                                let mut buf = smp.lock();
+                                if buf.len() < max_samples {
+                                    let take = mono.len().min(max_samples - buf.len());
+                                    buf.extend_from_slice(&mono[..take]);
+                                }
                             },
                             |err| log::error!("Audio error (f32): {}", err),
                             None,
@@ -208,7 +216,11 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
                                 let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len().max(1) as f32).sqrt();
                                 *rl.lock() = rms;
                                 if rms > threshold { *hs.lock() = true; }
-                                smp.lock().extend_from_slice(&mono);
+                                let mut buf = smp.lock();
+                                if buf.len() < max_samples {
+                                    let take = mono.len().min(max_samples - buf.len());
+                                    buf.extend_from_slice(&mono[..take]);
+                                }
                             },
                             |err| log::error!("Audio error (i16): {}", err),
                             None,
@@ -231,7 +243,11 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
                                 let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len().max(1) as f32).sqrt();
                                 *rl.lock() = rms;
                                 if rms > threshold { *hs.lock() = true; }
-                                smp.lock().extend_from_slice(&mono);
+                                let mut buf = smp.lock();
+                                if buf.len() < max_samples {
+                                    let take = mono.len().min(max_samples - buf.len());
+                                    buf.extend_from_slice(&mono[..take]);
+                                }
                             },
                             |err| log::error!("Audio error (u16): {}", err),
                             None,

@@ -1,6 +1,16 @@
 import Icon, { Kbd } from './Icons'
 
-export default function FooterBar() {
+function HotkeyHint({ accel, label }) {
+  if (!accel) return null
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)' }}>
+      {accel.split(' + ').map(k => <Kbd key={k}>{k}</Kbd>)}
+      <span style={{ marginLeft: 2 }}>{label}</span>
+    </div>
+  )
+}
+
+export default function FooterBar({ hotkeys = {} }) {
   return (
     <div style={{
       height: 36, display: 'flex', alignItems: 'center', padding: '0 16px',
@@ -8,15 +18,10 @@ export default function FooterBar() {
       background: 'var(--bg-secondary)',
       gap: 16, fontSize: 10,
     }}>
-      {/* Hotkey hints */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)' }}>
-        <Kbd>Ctrl</Kbd><Kbd>&#8679;</Kbd><Kbd>Space</Kbd>
-        <span style={{ marginLeft: 2 }}>Dictate</span>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)' }}>
-        <Kbd>Esc</Kbd>
-        <span style={{ marginLeft: 2 }}>Cancel</span>
-      </div>
+      {/* Hotkey hints — "Shift" spelled out; ⇧ doesn't render everywhere.
+          toggle === null means registration failed: advertise nothing. */}
+      <HotkeyHint accel={hotkeys.toggle === null ? null : (hotkeys.toggle || 'Ctrl + Shift + Space')} label="Dictate" />
+      <HotkeyHint accel={hotkeys.cancel} label="Cancel" />
 
       <div style={{ flex: 1 }} />
 

@@ -46,12 +46,17 @@ pub struct LicenseManager {
 }
 
 impl LicenseManager {
-    pub fn new(key: Option<String>, machine_id: String) -> Self {
+    pub fn new(key: Option<String>, machine_id: String, bound_machine: Option<String>) -> Self {
         Self {
             key,
             machine_id,
-            bound_machine: None,
+            bound_machine,
         }
+    }
+
+    /// The machine binding produced at activation — persist this alongside the key.
+    pub fn bound_machine(&self) -> Option<&str> {
+        self.bound_machine.as_deref()
     }
 
     /// Check if the current key is valid for this machine.
@@ -162,6 +167,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Generate a valid license key (for sales backend / CLI tool).
 /// Only available in debug builds — stripped from release binary.
 #[cfg(debug_assertions)]
+#[allow(dead_code)]
 pub fn generate_key() -> String {
     use rand::Rng;
     let mut rng = rand::rng();
@@ -175,4 +181,62 @@ pub fn generate_key() -> String {
     let payload = segments.join("-");
     let check = compute_check(&payload);
     format!("{}-{}-{}", PREFIX, payload, check)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Vectors computed with the Python keygen — proves checksum parity:
+    /// hmac.new(b'ALAN_ECHO_v1_GLOBAL_INTELLIGENCE_2026', payload, sha256),
+    /// CHARSET[b % 31] over the first 5 digest bytes.
+    #[test]
+    fn check_matches_python_keygen() {
+        assert_eq!(compute_check("AAAAA-BBBBB-CCCCC"), "FEMJB");
+        assert_eq!(compute_check("M7K2P-QRST3-UVWX9"), "GA6NJ");
+    }
+
+    #[test]
+    fn python_generated_key_validates() {
+        let lm = LicenseManager::new(None, "test-machine".into(), None);
+        assert!(lm.validate_key("ECHO-AAAAA-BBBBB-CCCCC-FEMJB"));
+        assert!(lm.validate_key("echo-aaaaa-bbbbb-ccccc-femjb")); // case-insensitive
+        assert!(!lm.validate_key("ECHO-AAAAA-BBBBB-CCCCC-FEMJA")); // bad checksum
+        assert!(!lm.validate_key("ECHO-AAAAA-BBBBB-CCCCC")); // missing segment
+        assert!(!lm.validate_key("NOPE-AAAAA-BBBBB-CCCCC-FEMJB")); // wrong prefix
+    }
+
+    #[test]
+    fn activation_binds_to_machine() {
+        let mut lm = LicenseManager::new(None, "machine-a".into(), None);
+        let (ok, _) = lm.activate("ECHO-AAAAA-BBBBB-CCCCC-FEMJB");
+        assert!(ok);
+        assert!(lm.is_licensed());
+        let binding = lm.bound_machine().expect("binding set").to_string();
+
+        // Same key + binding on a different machine must fail.
+        let lm_b = LicenseManager::new(
+            Some("ECHO-AAAAA-BBBBB-CCCCC-FEMJB".into()),
+            "machine-b".into(),
+            Some(binding.clone()),
+        );
+        assert!(!lm_b.is_licensed());
+
+        // Same machine restores fine.
+        let lm_a = LicenseManager::new(
+            Some("ECHO-AAAAA-BBBBB-CCCCC-FEMJB".into()),
+            "machine-a".into(),
+            Some(binding),
+        );
+        assert!(lm_a.is_licensed());
+    }
+
+    #[test]
+    fn generated_keys_validate() {
+        let lm = LicenseManager::new(None, "m".into(), None);
+        for _ in 0..50 {
+            let key = generate_key();
+            assert!(lm.validate_key(&key), "generated key failed: {}", key);
+        }
+    }
 }

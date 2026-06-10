@@ -43,6 +43,35 @@
   --echo-list-gap: 8px;
 }
 
+/* Dark mode — warm charcoal, same hierarchy as light */
+:root[data-theme="dark"] {
+  --bg-primary: #171511;
+  --bg-secondary: #1f1c17;
+  --bg-tertiary: #2b2820;
+  --bg-hover: #262219;
+  --bg-card: #211e18;
+  --bg-input: #211e18;
+
+  --border-primary: #38332a;
+  --border-secondary: #4d463a;
+
+  --text-primary: #ede9e0;
+  --text-secondary: #cbc5b8;
+  --text-muted: #948d7e;
+  --text-faint: #6e6759;
+
+  --accent-green: #3cb371;
+  --accent-red: #e0565b;
+  --accent-blue: #6ba3ef;
+  --accent-yellow: #d8ae45;
+
+  --brass: #d2a755;
+  --brass-text: #d2a755;
+
+  --echo-accent: #6ba3ef;
+  --echo-rec: #e0565b;
+}
+
 *, *::before, *::after { box-sizing: border-box; }
 
 body {
@@ -92,8 +121,16 @@ body {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
 }
+@keyframes echo-slide-in {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+@keyframes echo-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 @keyframes echo-flash {
-  0% { background: color-mix(in srgb, var(--echo-accent) 16%, #fff); }
+  0% { background: color-mix(in srgb, var(--echo-accent) 18%, var(--bg-card)); }
   100% { background: var(--bg-card); }
 }
 

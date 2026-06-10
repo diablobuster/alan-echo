@@ -5,20 +5,30 @@ import Splash from './components/Splash'
 import Dashboard from './components/Dashboard'
 import LicenseGate from './components/LicenseGate'
 import { invoke } from '@tauri-apps/api/core'
+import { applyTheme } from './theme'
+
+const ENGINE_WAIT_MS = 90000
 
 function App() {
   const [phase, setPhase] = useState('checking')
   const [progress, setProgress] = useState(0)
+  const [engineLabel, setEngineLabel] = useState('')
   const mounted = useRef(true)
 
   useEffect(() => {
     mounted.current = true
     async function init() {
+      try {
+        const s = await invoke('get_settings')
+        applyTheme(s)
+      } catch {}
+
       let licensed = false
       try {
         licensed = await invoke('check_license')
       } catch (e) {
-        console.warn('License check failed, assuming dev mode:', e)
+        // Fail open: an internal error must never brick a paying user.
+        console.warn('License check failed, allowing through:', e)
         licensed = true
       }
       if (!mounted.current) return
@@ -33,23 +43,30 @@ function App() {
     return () => { mounted.current = false }
   }, [])
 
+  // Wait (bounded) for whisper-server to finish loading the model so the
+  // first dictation is instant. On failure/timeout we proceed anyway — the
+  // dashboard surfaces engine errors when the user actually dictates.
   async function loadEngine() {
-    const interval = setInterval(() => {
-      if (!mounted.current) { clearInterval(interval); return }
-      setProgress(p => p >= 92 ? 92 : p + Math.random() * 6)
-    }, 250)
-
-    try {
-      const ready = await invoke('check_whisper_ready')
-      if (!ready) console.warn('Whisper engine not ready — transcription may fail')
-    } catch (e) {
-      console.warn('Whisper check failed:', e)
+    const started = Date.now()
+    while (mounted.current && Date.now() - started < ENGINE_WAIT_MS) {
+      try {
+        const info = await invoke('get_engine_info')
+        if (info?.model_label) setEngineLabel(`${info.model_label} model`)
+        if (info?.ready) break
+        if (info?.status?.startsWith('failed')) {
+          console.warn('Speech engine failed to start:', info.status)
+          break
+        }
+      } catch (e) {
+        console.warn('Engine check failed:', e)
+        break
+      }
+      setProgress(p => Math.min(92, p + 3))
+      await new Promise(r => setTimeout(r, 500))
     }
-
-    clearInterval(interval)
     if (!mounted.current) return
     setProgress(100)
-    setTimeout(() => { if (mounted.current) setPhase('ready') }, 500)
+    setTimeout(() => { if (mounted.current) setPhase('ready') }, 400)
   }
 
   function handleLicenseActivated() {
@@ -57,9 +74,9 @@ function App() {
     loadEngine()
   }
 
-  if (phase === 'checking') return <Splash progress={0} />
+  if (phase === 'checking') return <Splash progress={0} modelLabel={engineLabel} />
   if (phase === 'license') return <LicenseGate onActivated={handleLicenseActivated} />
-  if (phase === 'splash') return <Splash progress={Math.min(progress, 100)} />
+  if (phase === 'splash') return <Splash progress={Math.min(progress, 100)} modelLabel={engineLabel} />
   return <Dashboard />
 }
 

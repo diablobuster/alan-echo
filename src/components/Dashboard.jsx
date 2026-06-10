@@ -9,7 +9,11 @@ import TranscriptCard from './TranscriptCard'
 import DetailPanel from './DetailPanel'
 import FooterBar from './FooterBar'
 import SettingsPanel from './SettingsPanel'
+import Onboarding from './Onboarding'
 import Icon from './Icons'
+import { applyTheme } from '../theme'
+
+const MAX_RECORDING_SECONDS = 300
 
 export default function Dashboard() {
   const [transcripts, setTranscripts] = useState([])
@@ -20,11 +24,14 @@ export default function Dashboard() {
   const [status, setStatus] = useState('ready')
   const [elapsed, setElapsed] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState(false)
   const [toast, setToast] = useState(null)
   const [error, setError] = useState(null)
+  const [hotkeys, setHotkeys] = useState({})
   const timerRef = useRef(null)
   const statusRef = useRef(status)
   statusRef.current = status
+  const settingsRef = useRef({})
 
   // ── Load data ──────────────────────────────────────────────────────
   const loadTranscripts = useCallback(async () => {
@@ -41,14 +48,26 @@ export default function Dashboard() {
     } catch (e) { console.error('Failed to load stats:', e) }
   }, [])
 
+  const loadSettings = useCallback(async () => {
+    try {
+      const s = await invoke('get_settings')
+      settingsRef.current = s || {}
+      applyTheme(s)
+      if (s?.onboarding_complete !== true) setShowOnboarding(true)
+    } catch (e) { console.error('Failed to load settings:', e) }
+  }, [])
+
   useEffect(() => {
     loadTranscripts()
     loadStats()
-  }, [loadTranscripts, loadStats])
+    loadSettings()
+    invoke('get_hotkey_info').then(h => setHotkeys(h || {})).catch(() => {})
+  }, [loadTranscripts, loadStats, loadSettings])
 
   // ── Audio beeps ─────────────────────────────────────────────────────
   const audioCtx = useRef(null)
   const playBeep = useCallback((type) => {
+    if (settingsRef.current.sound_enabled === false) return
     try {
       if (!audioCtx.current) audioCtx.current = new AudioContext()
       const ctx = audioCtx.current
@@ -66,23 +85,21 @@ export default function Dashboard() {
         const osc2 = ctx.createOscillator()
         const gain2 = ctx.createGain()
         osc2.connect(gain2); gain2.connect(ctx.destination)
-        gain2.gain.value = 0.15; osc2.frequency.value = 400
+        gain2.gain.value = 0.05; osc2.frequency.value = 400
         osc2.start(ctx.currentTime + 0.1); osc2.stop(ctx.currentTime + 0.18)
       }
     } catch {}
   }, [])
 
-  // ── Tauri event listeners (hotkeys from backend) ───────────────────
+  // ── Tauri event listeners (hotkeys + tray from backend) ────────────
   useEffect(() => {
     let cancelled = false
     const unsub1 = listen('dictate-toggle', () => { if (!cancelled) handleToggleRef.current() })
     const unsub2 = listen('dictate-cancel', () => { if (!cancelled) handleCancelRef.current() })
-    const unsub3 = listen('play-beep', (event) => { if (!cancelled) playBeep(event.payload) })
     return () => {
       cancelled = true
       unsub1.then(fn => fn())
       unsub2.then(fn => fn())
-      unsub3.then(fn => fn())
     }
   }, [])
 
@@ -106,64 +123,108 @@ export default function Dashboard() {
     return () => clearInterval(timerRef.current)
   }, [status])
 
-  // ── Dictation state machine ────────────────────────────────────────
-  const handleToggle = useCallback(async () => {
-    const s = statusRef.current
-    if (s === 'ready') {
-      setError(null)
-      try {
-        await invoke('start_recording')
-        playBeep('start')
-        setStatus('recording')
-      } catch (e) {
-        setError('Microphone error — ' + (e || 'check your audio device'))
-        console.error('Recording error:', e)
-      }
-    } else if (s === 'recording') {
-      playBeep('stop')
-      setStatus('processing')
-      try {
-        const recording = await invoke('stop_recording')
-        if (!recording?.has_speech) {
-          setError('No speech detected — try again')
-          setStatus('ready')
-          return
-        }
-        if (!recording?.wav_path) {
-          setError('Recording failed')
-          setStatus('ready')
-          return
-        }
-        const result = await invoke('transcribe', { wavPath: recording.wav_path })
-        if (result?.empty) {
-          setError('Transcription returned empty — audio may be too short')
-        } else if (result?.id) {
-          await loadTranscripts()
-          await loadStats()
-          setFlashId(result.id)
-          setSelectedId(result.id)
-          setTimeout(() => setFlashId(null), 1500)
-          // Auto-paste via clipboard
-          try { await navigator.clipboard.writeText(result.text) } catch {}
-        }
-      } catch (e) {
-        setError('Transcription failed — ' + (e || 'unknown error'))
-        console.error('Transcription error:', e)
-      }
-      setStatus('ready')
+  // Enforce the recording cap — the progress bar promises 5:00 max.
+  useEffect(() => {
+    if (status === 'recording' && elapsed >= MAX_RECORDING_SECONDS) {
+      handleToggleRef.current()
     }
-  }, [loadTranscripts, loadStats])
+  }, [status, elapsed])
+
+  // ── Dictation state machine ────────────────────────────────────────
+  // statusRef is also written synchronously (not just at render) and an
+  // inflight guard serializes toggles — otherwise rapid hotkey presses
+  // double-invoke start/stop and desync the UI from the recorder.
+  const inflightRef = useRef(false)
+  const applyStatus = useCallback((next) => {
+    statusRef.current = next
+    setStatus(next)
+  }, [])
+
+  const discardWav = (wavPath) => {
+    if (wavPath) invoke('discard_recording', { wavPath }).catch(() => {})
+  }
+
+  const handleToggle = useCallback(async () => {
+    if (inflightRef.current) return
+    inflightRef.current = true
+    try {
+      const s = statusRef.current
+      if (s === 'ready') {
+        setError(null)
+        try {
+          await invoke('start_recording')
+          playBeep('start')
+          applyStatus('recording')
+        } catch (e) {
+          setError('Microphone error — ' + (e || 'check your audio device'))
+          console.error('Recording error:', e)
+        }
+      } else if (s === 'recording') {
+        playBeep('stop')
+        applyStatus('processing')
+        try {
+          const recording = await invoke('stop_recording')
+          if (recording?.duration_seconds != null && recording.duration_seconds < 0.5) {
+            discardWav(recording?.wav_path)
+            setError('Recording too short — try a full sentence')
+            applyStatus('ready')
+            return
+          }
+          if (!recording?.has_speech) {
+            discardWav(recording?.wav_path)
+            setError('No speech detected — try again')
+            applyStatus('ready')
+            return
+          }
+          if (!recording?.wav_path) {
+            setError('Recording failed')
+            applyStatus('ready')
+            return
+          }
+          const result = await invoke('transcribe', { wavPath: recording.wav_path })
+          if (result?.empty) {
+            setError('Nothing worth keeping was heard — try again')
+          } else if (result?.id) {
+            await loadTranscripts()
+            await loadStats()
+            setFlashId(result.id)
+            setSelectedId(result.id)
+            setTimeout(() => setFlashId(null), 1500)
+            fireToast(result.pasted ? 'Pasted into your app' : 'Copied to clipboard')
+          }
+        } catch (e) {
+          setError('Transcription failed — ' + (e || 'unknown error'))
+          console.error('Transcription error:', e)
+        }
+        applyStatus('ready')
+      }
+    } finally {
+      inflightRef.current = false
+    }
+  }, [loadTranscripts, loadStats, applyStatus])
 
   const handleCancel = useCallback(async () => {
+    if (inflightRef.current) return
     if (statusRef.current === 'recording') {
-      try { await invoke('stop_recording') } catch {}
-      setStatus('ready')
+      try { await invoke('cancel_recording') } catch {}
+      applyStatus('ready')
     }
-  }, [])
+  }, [applyStatus])
 
   // Keep refs updated
   handleToggleRef.current = handleToggle
   handleCancelRef.current = handleCancel
+
+  // Escape cancels a recording while the dashboard itself is focused.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape' && statusRef.current === 'recording') {
+        handleCancelRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // ── Search ─────────────────────────────────────────────────────────
   const [searchResults, setSearchResults] = useState(null)
@@ -204,14 +265,49 @@ export default function Dashboard() {
     fireToast('Transcript deleted')
   }, [selected, fireToast, loadStats])
 
-  const handleExport = useCallback(() => {
-    fireToast('Export: coming soon')
+  const handleSaveEdit = useCallback(async (id, text) => {
+    try {
+      await invoke('update_transcript', { id, text })
+      await loadTranscripts()
+      await loadStats()
+      fireToast('Transcript updated')
+      return true
+    } catch (e) {
+      console.error('Update failed:', e)
+      fireToast('Update failed')
+      return false
+    }
+  }, [loadTranscripts, loadStats, fireToast])
+
+  const handleExport = useCallback(async (format) => {
+    const meta = {
+      txt: { name: 'Plain text', ext: 'txt' },
+      md: { name: 'Markdown', ext: 'md' },
+      json: { name: 'JSON', ext: 'json' },
+      csv: { name: 'CSV', ext: 'csv' },
+    }[format] || { name: 'File', ext: 'txt' }
+    try {
+      const path = await invoke('plugin:dialog|save', {
+        options: {
+          title: 'Export transcripts',
+          defaultPath: `alan-echo-transcripts.${meta.ext}`,
+          filters: [{ name: meta.name, extensions: [meta.ext] }],
+        },
+      })
+      if (!path) return
+      await invoke('export_transcripts', { path, format })
+      fireToast('Exported ' + String(path).split(/[\\/]/).pop())
+    } catch (e) {
+      console.error('Export failed:', e)
+      fireToast('Export failed')
+    }
   }, [fireToast])
 
   // ── Window controls ────────────────────────────────────────────────
   const handleMinimize = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().minimize() }
   const handleMaximize = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().toggleMaximize() }
-  const handleClose = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().hide() }
+  // close() routes through Rust's CloseRequested handler → hides to tray.
+  const handleClose = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().close() }
 
   // ── Clear error after timeout ──────────────────────────────────────
   useEffect(() => {
@@ -220,12 +316,12 @@ export default function Dashboard() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-primary)' }}>
-      <TitleBar status={status} onSettings={() => setShowSettings(!showSettings)} onMinimize={handleMinimize} onMaximize={handleMaximize} onClose={handleClose} />
+      <TitleBar status={status} elapsed={elapsed} onSettings={() => setShowSettings(!showSettings)} onMinimize={handleMinimize} onMaximize={handleMaximize} onClose={handleClose} />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 16px', gap: 12, overflow: 'hidden' }}>
         <QuickStats total={stats.total} words={stats.words} duration={stats.duration} />
 
-        <StatusPanel status={status} elapsed={elapsed} onToggle={handleToggle} onCancel={handleCancel} />
+        <StatusPanel status={status} elapsed={elapsed} cap={MAX_RECORDING_SECONDS} hotkeys={hotkeys} onToggle={handleToggle} onCancel={handleCancel} />
 
         {error && (
           <div style={{
@@ -242,18 +338,30 @@ export default function Dashboard() {
 
         <div style={{ flex: 1, display: 'flex', gap: 12, overflow: 'hidden', minHeight: 0 }}>
           <div style={{ flex: 1.05, display: 'flex', flexDirection: 'column', gap: 'var(--echo-list-gap)', overflow: 'auto', paddingRight: 4 }}>
-            {displayList.length === 0 ? <EmptyState query={query} /> : displayList.map(t => (
+            {displayList.length === 0 ? <EmptyState query={query} hotkeys={hotkeys} /> : displayList.map(t => (
               <TranscriptCard key={t.id} transcript={t} selected={t.id === selectedId} isNew={t.id === flashId} onClick={() => setSelectedId(t.id)} />
             ))}
           </div>
           <div style={{ flex: 0.95, minWidth: 0 }}>
-            <DetailPanel transcript={selected} onCopy={handleCopy} onDelete={handleDelete} />
+            <DetailPanel transcript={selected} onCopy={handleCopy} onDelete={handleDelete} onSaveEdit={handleSaveEdit} />
           </div>
         </div>
       </div>
 
-      <FooterBar />
-      <SettingsPanel open={showSettings} onClose={() => setShowSettings(false)} />
+      <FooterBar hotkeys={hotkeys} />
+      <SettingsPanel open={showSettings} onClose={() => { setShowSettings(false); loadSettings() }} hotkeys={hotkeys} />
+
+      {showOnboarding && (
+        <Onboarding
+          hotkeys={hotkeys}
+          onDone={async () => {
+            setShowOnboarding(false)
+            try { await invoke('set_setting', { key: 'onboarding_complete', value: true }) } catch {}
+            loadTranscripts()
+            loadStats()
+          }}
+        />
+      )}
 
       {toast && (
         <div style={{
@@ -270,7 +378,7 @@ export default function Dashboard() {
   )
 }
 
-function EmptyState({ query }) {
+function EmptyState({ query, hotkeys }) {
   if (query) {
     return (
       <div style={{ padding: 40, textAlign: 'center' }}>
@@ -279,13 +387,20 @@ function EmptyState({ query }) {
       </div>
     )
   }
+  // hotkeys.toggle === null means registration FAILED (vs undefined = loading)
+  const toggleDead = hotkeys?.toggle === null
   return (
     <div style={{ padding: 40, textAlign: 'center' }}>
       <Icon name="mic" size={32} color="var(--text-faint)" style={{ opacity: 0.5, marginBottom: 12 }} />
       <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 6 }}>Nothing captured yet</div>
       <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-        Press <strong>Ctrl + Shift + Space</strong> to start your first dictation.
-        <br />Your transcriptions will appear here automatically.
+        {toggleDead ? (
+          <>The dictation hotkey is unavailable — another app owns it.<br />
+          Start dictation from the tray menu or the panel above.</>
+        ) : (
+          <>Press <strong>{hotkeys?.toggle || 'Ctrl + Shift + Space'}</strong> to start your first dictation.
+          <br />Your transcriptions will appear here automatically.</>
+        )}
       </div>
     </div>
   )

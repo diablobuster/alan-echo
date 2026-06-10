@@ -56,7 +56,6 @@ static RE_HALLUCINATIONS: Lazy<Vec<Regex>> = Lazy::new(|| vec![
 static RE_MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 static RE_DOUBLE_PERIOD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").unwrap());
 static RE_SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([.,!?;:])").unwrap());
-static RE_AFTER_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"([.!?])\s+([a-z])").unwrap());
 static RE_STANDALONE_I: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bi\b").unwrap());
 
 pub struct TextCleanupEngine {
@@ -143,16 +142,42 @@ impl TextCleanupEngine {
 
     fn remove_filler_phrases(&self, text: &str) -> String {
         let mut result = text.to_string();
-        let lower = text.to_lowercase();
-        // Remove longest phrases first
+        // Remove longest phrases first so "kind of like" wins over "kind of"
         let mut phrases: Vec<&&str> = FILLER_PHRASES.iter().collect();
         phrases.sort_by(|a, b| b.len().cmp(&a.len()));
         for phrase in phrases {
-            if let Some(pos) = lower.find(phrase) {
+            // Re-derive the lowercase view after every removal — indices into a
+            // stale lowercase string would mis-slice (or panic) once `result`
+            // has been shortened by a previous removal.
+            let mut search_from = 0;
+            loop {
+                let lower = result.to_lowercase();
+                if lower.len() != result.len() || search_from >= lower.len() {
+                    break; // non-ASCII case folding shifted bytes — bail safely
+                }
+                while search_from < lower.len() && !lower.is_char_boundary(search_from) {
+                    search_from += 1;
+                }
+                if search_from >= lower.len() {
+                    break;
+                }
+                let Some(rel) = lower[search_from..].find(*phrase) else { break };
+                let pos = search_from + rel;
                 let end = pos + phrase.len();
-                let after = &result[end..];
-                let after_trimmed = after.trim_start_matches(|c: char| ", ".contains(c));
+
+                // Whole-word match only: don't eat "you know" out of "you knowing".
+                let before_ok = pos == 0
+                    || !result[..pos].chars().next_back().map(|c| c.is_alphanumeric()).unwrap_or(false);
+                let after_ok = end >= result.len()
+                    || !result[end..].chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false);
+                if !(before_ok && after_ok) {
+                    search_from = pos + 1;
+                    continue;
+                }
+
+                let after_trimmed = result[end..].trim_start_matches(|c: char| ", ".contains(c));
                 result = format!("{}{}", &result[..pos], after_trimmed);
+                search_from = pos;
             }
         }
         RE_MULTI_SPACE.replace_all(&result, " ").trim().to_string()
@@ -289,5 +314,47 @@ fn capitalize_word(word: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(c) => format!("{}{}", c.to_uppercase().collect::<String>(), chars.collect::<String>()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multiple_filler_phrases_no_panic() {
+        // Regression: two phrase removals used to slice with stale indices.
+        let engine = TextCleanupEngine::new("standard");
+        let out = engine.clean("you know I think kind of we should you know just ship it sort of soon");
+        assert!(!out.to_lowercase().contains("you know"));
+        assert!(!out.to_lowercase().contains("kind of"));
+    }
+
+    #[test]
+    fn phrase_not_removed_mid_word() {
+        let engine = TextCleanupEngine::new("standard");
+        let out = engine.clean("they were you knowing nothing about it");
+        assert!(out.to_lowercase().contains("knowing"));
+    }
+
+    #[test]
+    fn unicode_input_no_panic() {
+        let engine = TextCleanupEngine::new("aggressive");
+        let out = engine.clean("um so the café — naïve approach you know works fine");
+        assert!(out.contains("café"));
+    }
+
+    #[test]
+    fn hallucination_only_input_empty() {
+        let engine = TextCleanupEngine::new("standard");
+        assert_eq!(engine.clean("Thanks for watching!"), "");
+        assert_eq!(engine.clean("you"), "");
+    }
+
+    #[test]
+    fn basic_cleanup() {
+        let engine = TextCleanupEngine::new("standard");
+        let out = engine.clean("um so basically i think the the api is ready");
+        assert_eq!(out, "I think the API is ready.");
     }
 }

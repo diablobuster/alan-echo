@@ -545,14 +545,27 @@ fn has_multilingual_model(state: State<Arc<AppState>>) -> bool {
 
 #[tauri::command]
 fn download_multilingual_model(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<(), String> {
-    if state.whisper.has_multilingual_model() {
+    download_model(app, state, "base".into())
+}
+
+#[tauri::command]
+fn download_model(app: tauri::AppHandle, state: State<Arc<AppState>>, name: String) -> Result<(), String> {
+    let filename = match name.as_str() {
+        "base" => "ggml-base.en.bin",
+        "small" => "ggml-small.en.bin",
+        "medium" => "ggml-medium.en.bin",
+        "large-v3" => "ggml-large-v3.bin",
+        _ => return Err(format!("Unknown model: {}", name)),
+    };
+    if state.whisper.model_available(&name) {
         return Ok(());
     }
     let data_dir = state.data_dir.clone();
+    let fname = filename.to_string();
     std::thread::Builder::new()
-        .name("multilingual-model-download".into())
+        .name("model-download".into())
         .spawn(move || {
-            if let Err(e) = download_model_file(&app, &data_dir) {
+            if let Err(e) = download_model_file(&app, &data_dir, &fname) {
                 let _ = app.emit("model_download_progress", serde_json::json!({
                     "stage": "error", "error": e
                 }));
@@ -562,16 +575,16 @@ fn download_multilingual_model(app: tauri::AppHandle, state: State<Arc<AppState>
     Ok(())
 }
 
-fn download_model_file(app: &tauri::AppHandle, data_dir: &std::path::Path) -> Result<(), String> {
+fn download_model_file(app: &tauri::AppHandle, data_dir: &std::path::Path, filename: &str) -> Result<(), String> {
     use std::io::{Read as _, Write as _};
 
     let models_dir = data_dir.join("models");
     std::fs::create_dir_all(&models_dir).map_err(|e| format!("Couldn't create models dir: {}", e))?;
 
-    let dest = models_dir.join("ggml-base.bin");
-    let partial = models_dir.join("ggml-base.bin.partial");
+    let dest = models_dir.join(filename);
+    let partial = models_dir.join(format!("{}.partial", filename));
 
-    let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+    let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}", filename);
     app.emit("model_download_progress", serde_json::json!({
         "stage": "downloading", "percent": 0
     })).ok();
@@ -580,7 +593,7 @@ fn download_model_file(app: &tauri::AppHandle, data_dir: &std::path::Path) -> Re
         .timeout_connect(std::time::Duration::from_secs(15))
         .timeout_read(std::time::Duration::from_secs(60))
         .build();
-    let resp = agent.get(url).call()
+    let resp = agent.get(&url).call()
         .map_err(|e| format!("Download failed: {}", e))?;
 
     let total: u64 = resp.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -955,6 +968,7 @@ fn main() {
             get_engine_info,
             has_multilingual_model,
             download_multilingual_model,
+            download_model,
             list_models,
             get_hotkey_info,
             clean_text,

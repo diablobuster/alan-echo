@@ -88,7 +88,8 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
       if (d.stage === 'done') {
         setHasMultilingualModel(true)
         setModelDownload(null)
-        setModelError(null)
+        setModelError('Model downloaded! Select it again to activate.')
+        invoke('list_models').then(m => setModels(m || [])).catch(() => {})
       }
       if (d.stage === 'error') {
         setModelError(d.error || 'Download failed')
@@ -106,16 +107,25 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const changeModel = async (label) => {
     const name = LABEL_TO_MODEL[label] || 'base'
     setModelError(null)
+    const isAvailable = models.find(m => m.label === label)?.available !== false
+    if (!isAvailable) {
+      const sizes = { Basic: '~148 MB', Standard: '~488 MB', Enhanced: '~1.5 GB', Ultra: '~3.1 GB' }
+      setModelError(`Downloading ${label} model (${sizes[label] || ''})...`)
+      try {
+        await invoke('download_model', { name })
+      } catch (e) {
+        setModelError(String(e))
+        return
+      }
+      return
+    }
     try {
-      // Direct invoke (not updateSetting) — the backend rejects models that
-      // aren't installed, and that error belongs in the UI.
       await invoke('set_setting', { key: 'whisper_model', value: name })
       setSettings(prev => ({ ...prev, whisper_model: name }))
     } catch (e) {
       setModelError(String(e))
       return
     }
-    // The backend restarts whisper-server with the new model — poll until done.
     loadEngineInfo()
     startEnginePoll()
   }
@@ -655,21 +665,21 @@ function Seg({ options, value, onChange, disabled = [] }) {
       borderRadius: 'var(--echo-radius-sm)', padding: 2, gap: 1,
     }}>
       {options.map(opt => {
-        const isDisabled = disabled.includes(opt) && opt !== value
+        const needsDownload = disabled.includes(opt) && opt !== value
         return (
           <button
             key={opt}
-            onClick={() => { if (!isDisabled) onChange(opt) }}
-            title={isDisabled ? 'Model not installed — place the model file in the models folder' : undefined}
+            onClick={() => onChange(opt)}
+            title={needsDownload ? 'Click to download this model' : undefined}
             style={{
               padding: '3px 10px', fontSize: 10, fontFamily: 'var(--font-mono)',
               border: 'none', borderRadius: 'var(--echo-radius-sm)',
-              cursor: isDisabled ? 'not-allowed' : 'pointer',
+              cursor: 'pointer',
               fontWeight: opt === value ? 600 : 400,
               background: opt === value ? 'var(--bg-card)' : 'transparent',
-              color: opt === value ? 'var(--text-primary)' : 'var(--text-muted)',
-              opacity: isDisabled ? 0.35 : 1,
+              color: opt === value ? 'var(--text-primary)' : needsDownload ? 'var(--text-faint)' : 'var(--text-muted)',
               boxShadow: opt === value ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+              textDecoration: needsDownload ? 'underline dotted' : 'none',
             }}
           >
             {opt}

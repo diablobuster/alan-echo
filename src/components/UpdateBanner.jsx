@@ -114,6 +114,12 @@ export default function UpdateBanner() {
         </span>
       )}
 
+      {stage === 'mac_drag_install' && (
+        <span style={{ fontSize: 11, color: 'var(--echo-accent)' }}>
+          Drag ALAN Echo to your Applications folder, then relaunch.
+        </span>
+      )}
+
       {stage === 'error' && (
         <span style={{ fontSize: 11, color: 'var(--accent-red, #e53e3e)' }}>
           Update failed — try downloading from the website

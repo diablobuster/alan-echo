@@ -150,9 +150,14 @@ fn validate_license(state: State<Arc<AppState>>, key: String) -> Result<serde_js
             }
             Err(e) => {
                 log::warn!("Online activation failed (key stored for retry): {}", e);
+                let msg = if e.contains("ureq") || e.contains("connect") || e.contains("timeout") || e.contains("dns") {
+                    "Key accepted — connect to the internet to complete activation".to_string()
+                } else {
+                    e.clone()
+                };
                 return Ok(serde_json::json!({
                     "valid": true, "activated": false,
-                    "message": "Key accepted — connect to the internet to complete activation",
+                    "message": msg,
                     "persisted": persisted
                 }));
             }
@@ -562,13 +567,14 @@ fn has_multilingual_model(state: State<Arc<AppState>>) -> bool {
 
 #[tauri::command]
 fn download_multilingual_model(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<(), String> {
-    download_model(app, state, "base".into())
+    download_model(app, state, "base-multi".into())
 }
 
 #[tauri::command]
 fn download_model(app: tauri::AppHandle, state: State<Arc<AppState>>, name: String) -> Result<(), String> {
     let filename = match name.as_str() {
         "base" => "ggml-base.en.bin",
+        "base-multi" => "ggml-base.bin",
         "small" => "ggml-small.en.bin",
         "medium" => "ggml-medium.en.bin",
         "large-v3" => "ggml-large-v3.bin",
@@ -901,8 +907,13 @@ fn main() {
         ))
         .manage(app_state.clone())
         .on_window_event(|window, event| {
-            // X closes to tray; only the tray menu's Quit exits the app.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let state = app.state::<Arc<AppState>>();
+                let tray_ok = state.settings.lock().get_bool("_tray_ok") == Some(true);
+                if !tray_ok {
+                    return;
+                }
                 api.prevent_close();
                 window.hide().ok();
 
@@ -984,7 +995,12 @@ fn main() {
                 tray_builder = tray_builder.icon(icon);
             }
             match tray_builder.build(app) {
-                Ok(_) => {},
+                Ok(_) => {
+                    let state = app.state::<Arc<AppState>>();
+                    let mut s = state.settings.lock();
+                    s.set("_tray_ok", serde_json::Value::Bool(true));
+                    s.save().ok();
+                },
                 Err(e) => log::warn!("Failed to create tray icon: {}", e),
             }
 

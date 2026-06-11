@@ -136,6 +136,11 @@ body {
 
 .echo-rise { animation: echo-rise 0.26s ease-out both; }
 
+/* Theme-aware monogram (Icons.jsx Monogram tone="auto"): ink on light, brass on dark */
+.alan-mono .mono-brass { display: none; }
+:root[data-theme="dark"] .alan-mono .mono-ink { display: none; }
+:root[data-theme="dark"] .alan-mono .mono-brass { display: inline-block; }
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

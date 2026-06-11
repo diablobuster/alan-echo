@@ -352,6 +352,18 @@ mod tests {
     }
 
     #[test]
+    fn levels_visibly_differ_on_settings_sample() {
+        // Keep in sync with CLEANUP_SAMPLE in SettingsPanel.jsx — the settings
+        // preview must show a visible difference between the two levels.
+        let sample = "um so basically we're gonna need to move the the meeting to friday in order to hit the api deadline";
+        let std_out = TextCleanupEngine::new("standard").clean(sample);
+        let agg_out = TextCleanupEngine::new("aggressive").clean(sample);
+        assert_ne!(std_out, agg_out);
+        assert!(agg_out.contains("going to"));
+        assert!(!agg_out.to_lowercase().contains("in order to"));
+    }
+
+    #[test]
     fn basic_cleanup() {
         let engine = TextCleanupEngine::new("standard");
         let out = engine.clean("um so basically i think the the api is ready");

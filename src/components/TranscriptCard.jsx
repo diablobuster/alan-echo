@@ -1,6 +1,15 @@
+function parseTimestamp(iso) {
+  const d = new Date(iso)
+  if (!isNaN(d)) return d
+  // Engine-proof fallback: build a local Date from the date+time prefix.
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/)
+  return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null
+}
+
 function formatTimestamp(iso) {
   if (!iso) return ''
-  const d = new Date(iso)
+  const d = parseTimestamp(iso)
+  if (!d) return String(iso)
   const now = new Date()
   const isToday = d.toDateString() === now.toDateString()
   const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1)

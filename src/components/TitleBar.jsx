@@ -35,7 +35,7 @@ export default function TitleBar({ status = 'ready', elapsed = 0, onSettings, on
     }}>
       {/* Wordmark */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Monogram size={20} tone="ink" />
+        <Monogram size={20} />
         <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>
           ALAN
         </span>

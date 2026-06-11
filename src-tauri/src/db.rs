@@ -1,6 +1,6 @@
 //! ALAN Echo — SQLite transcript database with FTS5, pagination, backup, export.
 
-use chrono::Local;
+use chrono::{Local, SecondsFormat};
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -90,7 +90,11 @@ impl TranscriptDB {
     }
 
     pub fn save(&self, text: &str, raw_text: Option<&str>, duration: f64) -> Result<i64> {
-        let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
+        // RFC3339 with UTC offset (e.g. 2026-06-10T15:29:00.123456-06:00) — an
+        // offset-less local string is ambiguous across DST/timezone changes.
+        // Same prefix shape as legacy rows, so lexicographic ORDER BY still sorts
+        // chronologically against them.
+        let ts = Local::now().to_rfc3339_opts(SecondsFormat::Micros, false);
         let wc = text.split_whitespace().count() as i32;
         let cc = text.chars().count() as i32;
         self.conn.execute(

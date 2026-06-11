@@ -4,7 +4,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { applyTheme } from '../theme'
 
-const CLEANUP_SAMPLE = "um so basically i think we should you know move the the meeting to friday"
+// Must contain aggressive-only tokens ("gonna", "in order to") so the preview
+// visibly differs between standard and aggressive — pinned by the
+// levels_visibly_differ_on_settings_sample test in text_cleanup.rs.
+const CLEANUP_SAMPLE = "um so basically we're gonna need to move the the meeting to friday in order to hit the api deadline"
 const MODEL_LABELS = { base: 'Basic', small: 'Standard', medium: 'Enhanced', 'large-v3': 'Ultra' }
 const LABEL_TO_MODEL = { Basic: 'base', Standard: 'small', Enhanced: 'medium', Ultra: 'large-v3' }
 

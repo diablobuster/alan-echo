@@ -37,11 +37,20 @@ import { BRASS, INK, NAVY } from './logoData.js'
 
 const LOGO_MAP = { brass: BRASS, ink: INK, navy: NAVY }
 
-export function Monogram({ size = 26, tone = 'ink' }) {
-  const src = LOGO_MAP[tone] || LOGO_MAP.ink
+export function Monogram({ size = 26, tone = 'auto' }) {
+  const imgStyle = { height: size, width: size * 1.2, objectFit: 'contain', flexShrink: 0 }
+  if (tone !== 'auto') {
+    const src = LOGO_MAP[tone] || LOGO_MAP.ink
+    return <img src={src} alt="ALAN" draggable={false} style={imgStyle} />
+  }
+  // Theme-aware: ink mark on light surfaces, brass on dark. Both render and
+  // tokens.css toggles visibility off :root[data-theme] — theme changes flip
+  // the attribute without re-rendering React, so a JS-picked src would go stale.
   return (
-    <img src={src} alt="ALAN" draggable={false}
-      style={{ height: size, width: size * 1.2, objectFit: 'contain', flexShrink: 0 }} />
+    <span className="alan-mono" style={{ display: 'inline-flex', flexShrink: 0 }}>
+      <img className="mono-ink" src={INK} alt="ALAN" draggable={false} style={imgStyle} />
+      <img className="mono-brass" src={BRASS} alt="" aria-hidden draggable={false} style={imgStyle} />
+    </span>
   )
 }
 

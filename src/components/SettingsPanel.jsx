@@ -25,6 +25,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [models, setModels] = useState([])
   const [autostart, setAutostart] = useState(false)
   const [hasMultilingualModel, setHasMultilingualModel] = useState(true)
+  const [modelDownload, setModelDownload] = useState(null) // null | {stage, percent, ...}
   const pollRef = useRef(null)
 
   const LANGUAGES = [
@@ -81,7 +82,20 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
       } catch (e) { console.error('Settings error:', e) }
     }
     load()
-    return () => clearInterval(pollRef.current)
+    const unlisten = listen('model_download_progress', (event) => {
+      const d = event.payload
+      setModelDownload(d)
+      if (d.stage === 'done') {
+        setHasMultilingualModel(true)
+        setModelDownload(null)
+        setModelError(null)
+      }
+      if (d.stage === 'error') {
+        setModelError(d.error || 'Download failed')
+        setModelDownload(null)
+      }
+    })
+    return () => { clearInterval(pollRef.current); unlisten.then(fn => fn()) }
   }, [open])
 
   const updateSetting = async (key, value) => {
@@ -185,7 +199,16 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
               onChange={async e => {
                 const lang = e.target.value
                 if (lang !== 'en' && !hasMultilingualModel) {
-                  setModelError('Non-English requires the multilingual model (~148 MB). Coming soon — please use English for now.')
+                  setModelError(null)
+                  setModelDownload({ stage: 'downloading', percent: 0 })
+                  try {
+                    await invoke('download_multilingual_model')
+                  } catch (err) {
+                    setModelError(String(err))
+                    setModelDownload(null)
+                    return
+                  }
+                  await updateSetting('language', lang)
                   return
                 }
                 setModelError(null)
@@ -207,6 +230,26 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
               ))}
             </select>
           </SettingsRow>
+          {modelDownload && modelDownload.stage === 'downloading' && (
+            <div style={{
+              margin: '4px 0 8px', padding: '8px 10px',
+              background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+              borderRadius: 'var(--echo-radius-sm)', fontSize: 11,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span style={{ color: 'var(--echo-accent)', fontWeight: 600 }}>Downloading multilingual model</span>
+                <span style={{ color: 'var(--text-faint)', fontVariantNumeric: 'tabular-nums' }}>
+                  {modelDownload.downloaded_mb || 0} / {modelDownload.total_mb || '~148'} MB
+                </span>
+              </div>
+              <div style={{ width: '100%', height: 4, background: 'var(--bg-tertiary)', borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{
+                  width: `${modelDownload.percent || 0}%`, height: '100%',
+                  background: 'var(--echo-accent)', borderRadius: 2, transition: 'width 0.3s',
+                }} />
+              </div>
+            </div>
+          )}
 
           <GpuTestRow savedResult={settings.gpu_test} />
 

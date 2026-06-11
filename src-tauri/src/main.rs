@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod activation;
 mod audio;
 mod db;
 mod license;
@@ -154,6 +155,9 @@ fn require_license(state: &AppState) -> Result<(), String> {
     if state.license.lock().is_licensed() {
         return Ok(());
     }
+    if activation::is_activated(&state.data_dir) {
+        return Ok(());
+    }
     let s = state.settings.lock();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let trial_date = s.get_str("trial_date").unwrap_or_default();
@@ -212,7 +216,28 @@ fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
     if cfg!(debug_assertions) {
         return Ok(true);
     }
-    Ok(state.license.lock().is_licensed())
+    if state.license.lock().is_licensed() {
+        return Ok(true);
+    }
+    Ok(activation::is_activated(&state.data_dir))
+}
+
+#[tauri::command]
+fn activate_online(state: State<Arc<AppState>>, key: String) -> Result<serde_json::Value, String> {
+    let token = activation::activate_online(&key, &state.data_dir)?;
+    Ok(serde_json::json!({ "activated": true, "token_length": token.len() }))
+}
+
+#[tauri::command]
+fn get_activation_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let licensed = state.license.lock().is_licensed();
+    let activated = activation::is_activated(&state.data_dir);
+    let fingerprint = activation::machine_fingerprint();
+    Ok(serde_json::json!({
+        "licensed": licensed,
+        "activated": activated,
+        "fingerprint": fingerprint,
+    }))
 }
 
 // ── Audio commands ───────────────────────────────────────────────────
@@ -516,6 +541,87 @@ async fn read_wav_base64(wav_path: String) -> Result<String, String> {
 #[tauri::command]
 fn has_multilingual_model(state: State<Arc<AppState>>) -> bool {
     state.whisper.has_multilingual_model()
+}
+
+#[tauri::command]
+fn download_multilingual_model(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<(), String> {
+    if state.whisper.has_multilingual_model() {
+        return Ok(());
+    }
+    let data_dir = state.data_dir.clone();
+    std::thread::Builder::new()
+        .name("multilingual-model-download".into())
+        .spawn(move || {
+            if let Err(e) = download_model_file(&app, &data_dir) {
+                let _ = app.emit("model_download_progress", serde_json::json!({
+                    "stage": "error", "error": e
+                }));
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn download_model_file(app: &tauri::AppHandle, data_dir: &std::path::Path) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+
+    let models_dir = data_dir.join("models");
+    std::fs::create_dir_all(&models_dir).map_err(|e| format!("Couldn't create models dir: {}", e))?;
+
+    let dest = models_dir.join("ggml-base.bin");
+    let partial = models_dir.join("ggml-base.bin.partial");
+
+    let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+    app.emit("model_download_progress", serde_json::json!({
+        "stage": "downloading", "percent": 0
+    })).ok();
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout_read(std::time::Duration::from_secs(60))
+        .build();
+    let resp = agent.get(url).call()
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    let total: u64 = resp.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut reader = resp.into_reader();
+    let mut file = std::fs::File::create(&partial)
+        .map_err(|e| format!("Couldn't create file: {}", e))?;
+
+    let mut downloaded: u64 = 0;
+    let mut buf = [0u8; 65536];
+    let mut last_pct: u32 = 0;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("Download interrupted: {}", e))?;
+        if n == 0 { break; }
+        file.write_all(&buf[..n]).map_err(|e| format!("Write error: {}", e))?;
+        downloaded += n as u64;
+        if total > 0 {
+            let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
+            if pct > last_pct {
+                last_pct = pct;
+                app.emit("model_download_progress", serde_json::json!({
+                    "stage": "downloading", "percent": pct,
+                    "downloaded_mb": downloaded / (1024 * 1024),
+                    "total_mb": total / (1024 * 1024),
+                })).ok();
+            }
+        }
+    }
+    file.flush().map_err(|e| format!("Flush error: {}", e))?;
+    drop(file);
+
+    if downloaded < 50_000_000 {
+        std::fs::remove_file(&partial).ok();
+        return Err("Download too small — try again".into());
+    }
+
+    std::fs::rename(&partial, &dest)
+        .map_err(|e| format!("Couldn't finalize model file: {}", e))?;
+
+    app.emit("model_download_progress", serde_json::json!({ "stage": "done" })).ok();
+    log::info!("Multilingual model downloaded ({} MB)", downloaded / (1024 * 1024));
+    Ok(())
 }
 
 // ── Text cleanup ─────────────────────────────────────────────────────
@@ -835,6 +941,8 @@ fn main() {
             validate_license,
             check_license,
             get_trial_status,
+            activate_online,
+            get_activation_status,
             list_audio_devices,
             start_recording,
             stop_recording,
@@ -846,6 +954,7 @@ fn main() {
             check_whisper_ready,
             get_engine_info,
             has_multilingual_model,
+            download_multilingual_model,
             list_models,
             get_hotkey_info,
             clean_text,

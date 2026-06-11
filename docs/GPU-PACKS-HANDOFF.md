@@ -174,6 +174,9 @@ queued for 1.2:
       disable + fall back + message).
 - [ ] Release asset + checksums + stable redirect + envs live; site copy
       updated with beta wording; VirusTotal scanned.
+      ^ ALL LIVE + verified 2026-06-10 (live download SHA matches release).
+      ONLY VirusTotal upload remains — manual (no API key on this machine):
+      drag the zip + installer onto virustotal.com, keep both permalinks.
 - [ ] Tier 2 evidence recorded in this file before "beta" is ever removed.
 
 ## §8. Parked — and the triggers that un-park them

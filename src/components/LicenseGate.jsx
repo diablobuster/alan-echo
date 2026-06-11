@@ -183,6 +183,24 @@ export default function LicenseGate({ onActivated }) {
           {loading ? 'Validating...' : success ? 'Activated' : 'Activate License'}
         </button>
 
+        {/* Try for free */}
+        <button
+          onClick={onActivated}
+          disabled={loading || success}
+          style={{
+            width: '100%', marginTop: 10, padding: '9px 0',
+            background: 'none',
+            color: 'var(--text-secondary)',
+            border: '1px solid var(--border-primary)',
+            borderRadius: 'var(--echo-radius)',
+            fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            fontFamily: 'var(--font-sans)',
+            transition: 'border-color 0.15s',
+          }}
+        >
+          Try for free &mdash; 5 dictations/day
+        </button>
+
         {/* Buy + recover links */}
         <div style={{ marginTop: 16, textAlign: 'center' }}>
           <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>

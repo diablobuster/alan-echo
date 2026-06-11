@@ -39,6 +39,8 @@ pub struct AppState {
     pub data_dir: std::path::PathBuf,
 }
 
+const TRIAL_DAILY_LIMIT: u32 = 5;
+
 // ── Transcript commands ──────────────────────────────────────────────
 
 #[tauri::command]
@@ -144,20 +146,69 @@ fn validate_license(state: State<Arc<AppState>>, key: String) -> Result<serde_js
 /// Release-build license check for the dictation-path commands. The frontend
 /// gate (LicenseGate) is the UX layer; this is the second, backend layer so
 /// enforcement never depends on which React component happens to be mounted.
+/// Trial mode: allow through if daily count < TRIAL_DAILY_LIMIT.
 fn require_license(state: &AppState) -> Result<(), String> {
     if cfg!(debug_assertions) {
         return Ok(());
     }
     if state.license.lock().is_licensed() {
+        return Ok(());
+    }
+    let s = state.settings.lock();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let trial_date = s.get_str("trial_date").unwrap_or_default();
+    let count: u32 = if trial_date == today {
+        s.get("trial_dictations_today")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    } else {
+        0
+    };
+    if count < TRIAL_DAILY_LIMIT {
         Ok(())
     } else {
-        Err("ALAN Echo isn't activated — enter your license key first".into())
+        Err("Trial limit reached — activate your license for unlimited dictation".into())
     }
+}
+
+fn increment_trial_count(state: &AppState) {
+    let mut s = state.settings.lock();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let trial_date = s.get_str("trial_date").unwrap_or_default();
+    let count: u32 = if trial_date == today {
+        s.get("trial_dictations_today").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1
+    } else {
+        1
+    };
+    s.set("trial_date", serde_json::Value::String(today));
+    s.set("trial_dictations_today", serde_json::json!(count));
+    s.save().ok();
+}
+
+#[tauri::command]
+fn get_trial_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, String> {
+    if state.license.lock().is_licensed() {
+        return Ok(serde_json::json!({ "licensed": true }));
+    }
+    let s = state.settings.lock();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let trial_date = s.get_str("trial_date").unwrap_or_default();
+    let used: u32 = if trial_date == today {
+        s.get("trial_dictations_today").and_then(|v| v.as_u64()).unwrap_or(0) as u32
+    } else {
+        0
+    };
+    Ok(serde_json::json!({
+        "licensed": false,
+        "trial": true,
+        "used": used,
+        "limit": TRIAL_DAILY_LIMIT,
+        "remaining": TRIAL_DAILY_LIMIT.saturating_sub(used),
+    }))
 }
 
 #[tauri::command]
 fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
-    // Debug builds skip the gate so development isn't blocked by keygen access.
     if cfg!(debug_assertions) {
         return Ok(true);
     }
@@ -331,6 +382,10 @@ async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_
         }
 
         let id = state.db.lock().save(&cleaned, Some(&result.text), result.duration_seconds).map_err(|e| e.to_string())?;
+
+        if !state.license.lock().is_licensed() {
+            increment_trial_count(&state);
+        }
 
         let pasted = deliver_text(&app, &state, &cleaned);
 
@@ -779,6 +834,7 @@ fn main() {
             set_setting,
             validate_license,
             check_license,
+            get_trial_status,
             list_audio_devices,
             start_recording,
             stop_recording,

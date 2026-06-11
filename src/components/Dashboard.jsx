@@ -28,6 +28,7 @@ export default function Dashboard() {
   const [toast, setToast] = useState(null)
   const [error, setError] = useState(null)
   const [hotkeys, setHotkeys] = useState({})
+  const [trial, setTrial] = useState(null)
   const timerRef = useRef(null)
   const statusRef = useRef(status)
   statusRef.current = status
@@ -62,6 +63,7 @@ export default function Dashboard() {
     loadStats()
     loadSettings()
     invoke('get_hotkey_info').then(h => setHotkeys(h || {})).catch(() => {})
+    invoke('get_trial_status').then(t => setTrial(t)).catch(() => {})
   }, [loadTranscripts, loadStats, loadSettings])
 
   // ── Audio beeps ─────────────────────────────────────────────────────
@@ -192,6 +194,7 @@ export default function Dashboard() {
             setTimeout(() => setFlashId(null), 1500)
             fireToast(result.pasted ? 'Pasted into your app' : 'Copied to clipboard')
           }
+          invoke('get_trial_status').then(t => setTrial(t)).catch(() => {})
         } catch (e) {
           setError('Transcription failed — ' + (e || 'unknown error'))
           console.error('Transcription error:', e)
@@ -319,6 +322,9 @@ export default function Dashboard() {
       <TitleBar status={status} elapsed={elapsed} onSettings={() => setShowSettings(!showSettings)} onMinimize={handleMinimize} onMaximize={handleMaximize} onClose={handleClose} />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 16px', gap: 12, overflow: 'hidden' }}>
+        {trial && !trial.licensed && (
+          <TrialBanner used={trial.used} limit={trial.limit} remaining={trial.remaining} />
+        )}
         <QuickStats total={stats.total} words={stats.words} duration={stats.duration} />
 
         <StatusPanel status={status} elapsed={elapsed} cap={MAX_RECORDING_SECONDS} hotkeys={hotkeys} onToggle={handleToggle} onCancel={handleCancel} />
@@ -375,6 +381,37 @@ export default function Dashboard() {
           <Icon name="check" size={13} color="var(--accent-green)" /> {toast}
         </div>
       )}
+    </div>
+  )
+}
+
+function TrialBanner({ used, limit, remaining }) {
+  const atLimit = remaining <= 0
+  return (
+    <div style={{
+      padding: '7px 12px', fontSize: 11, display: 'flex', alignItems: 'center', gap: 8,
+      background: atLimit
+        ? 'color-mix(in srgb, var(--accent-red) 8%, var(--bg-card))'
+        : 'color-mix(in srgb, var(--brass) 8%, var(--bg-card))',
+      border: `1px solid color-mix(in srgb, ${atLimit ? 'var(--accent-red)' : 'var(--brass)'} 25%, transparent)`,
+      borderRadius: 'var(--echo-radius-sm)',
+    }}>
+      <span style={{ color: atLimit ? 'var(--accent-red)' : 'var(--brass)', fontWeight: 600 }}>
+        {atLimit ? 'Trial limit reached' : `Trial · ${remaining} of ${limit} remaining today`}
+      </span>
+      <span style={{ flex: 1 }} />
+      <a
+        href="https://alanglobalintelligence.com/echo"
+        onClick={e => {
+          e.preventDefault()
+          invoke('plugin:shell|open', { path: 'https://alanglobalintelligence.com/echo' }).catch(() => {
+            window.open('https://alanglobalintelligence.com/echo', '_blank', 'noopener')
+          })
+        }}
+        style={{ color: 'var(--echo-accent)', fontSize: 11, textDecoration: 'none', fontWeight: 600 }}
+      >
+        {atLimit ? 'Get unlimited' : 'Upgrade'}
+      </a>
     </div>
   )
 }

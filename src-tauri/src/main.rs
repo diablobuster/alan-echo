@@ -7,6 +7,7 @@ mod packs;
 mod paste;
 mod settings;
 mod text_cleanup;
+mod updater;
 mod whisper;
 
 use audio::{DeviceInfo, RecordingResult, RecorderHandle};
@@ -455,6 +456,25 @@ fn clean_text(state: State<Arc<AppState>>, text: String) -> Result<String, Strin
     Ok(state.cleanup.lock().clean(&text))
 }
 
+// ── Auto-updater ────────────────────────────────────────────────────
+
+#[tauri::command]
+fn check_for_update(app: tauri::AppHandle) -> Result<updater::UpdateInfo, String> {
+    let version = app.config().version.clone().unwrap_or_else(|| "0.0.0".to_string());
+    updater::check_for_update(&version)
+}
+
+#[tauri::command]
+fn download_update(app: tauri::AppHandle, state: State<Arc<AppState>>, download_url: String) -> Result<(), String> {
+    let data_dir = state.data_dir.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = updater::download_and_launch_update(&app, &download_url, &data_dir) {
+            let _ = app.emit("update_progress", serde_json::json!({ "stage": "error", "error": e }));
+        }
+    });
+    Ok(())
+}
+
 // ── Hotkeys ──────────────────────────────────────────────────────────
 
 fn register_emit_hotkey(app: &tauri::AppHandle, accel: &str, event: &'static str) -> bool {
@@ -740,6 +760,8 @@ fn main() {
             packs::get_gpu_pack_status,
             packs::download_gpu_pack,
             packs::test_gpu,
+            check_for_update,
+            download_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ALAN Echo");

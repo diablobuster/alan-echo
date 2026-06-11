@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import Splash from './components/Splash'
 import Dashboard from './components/Dashboard'
 import LicenseGate from './components/LicenseGate'
+import UpdateBanner from './components/UpdateBanner'
 import { invoke } from '@tauri-apps/api/core'
 import { applyTheme } from './theme'
 
@@ -77,7 +78,7 @@ function App() {
   if (phase === 'checking') return <Splash progress={0} modelLabel={engineLabel} />
   if (phase === 'license') return <LicenseGate onActivated={handleLicenseActivated} />
   if (phase === 'splash') return <Splash progress={Math.min(progress, 100)} modelLabel={engineLabel} />
-  return <Dashboard />
+  return <><UpdateBanner /><Dashboard /></>
 }
 
 createRoot(document.getElementById('root')).render(<App />)

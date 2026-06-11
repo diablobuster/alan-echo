@@ -233,7 +233,7 @@ export default function LicenseGate({ onActivated }) {
       {/* Footer */}
       <div style={{ position: 'absolute', bottom: 24, textAlign: 'center' }}>
         <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-          ALAN Global Intelligence &middot; Echo v1.2
+          ALAN Global Intelligence &middot; Echo v1.2.1
         </span>
       </div>
     </div>

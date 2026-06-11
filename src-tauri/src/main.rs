@@ -664,9 +664,20 @@ fn clean_text(state: State<Arc<AppState>>, text: String) -> Result<String, Strin
 // ── Auto-updater ────────────────────────────────────────────────────
 
 #[tauri::command]
-fn check_for_update(app: tauri::AppHandle) -> Result<updater::UpdateInfo, String> {
+fn check_for_update(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<updater::UpdateInfo, String> {
     let version = app.config().version.clone().unwrap_or_else(|| "0.0.0".to_string());
-    updater::check_for_update(&version)
+    let mut info = updater::check_for_update(&version)?;
+    // Construct authenticated download URL from stored key
+    if info.download_url.is_none() && info.available {
+        let key = state.settings.lock().get_str("license_key");
+        if let Some(k) = key {
+            info.download_url = Some(format!(
+                "https://alanglobalintelligence.com/api/echo/download?key={}",
+                k
+            ));
+        }
+    }
+    Ok(info)
 }
 
 #[tauri::command]

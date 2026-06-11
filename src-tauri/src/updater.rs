@@ -101,22 +101,25 @@ pub fn download_and_launch_update(
     file.flush().map_err(|e| format!("Flush error: {}", e))?;
     drop(file);
 
-    if let Some(expected) = expected_sha256 {
-        app.emit("update_progress", serde_json::json!({ "stage": "verifying" })).ok();
-        let mut hasher = Sha256::new();
-        let mut f = std::fs::File::open(&installer_path)
-            .map_err(|e| format!("Could not open installer for verification: {}", e))?;
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = f.read(&mut buf).map_err(|e| format!("Read error during verification: {}", e))?;
-            if n == 0 { break; }
-            hasher.update(&buf[..n]);
-        }
-        let hash = format!("{:x}", hasher.finalize());
-        if !hash.eq_ignore_ascii_case(expected) {
-            let _ = std::fs::remove_file(&installer_path);
-            return Err(format!("Download integrity check failed: expected {} got {}", expected, hash));
-        }
+    let expected = expected_sha256.ok_or_else(|| {
+        let _ = std::fs::remove_file(&installer_path);
+        "Update verification unavailable — download from the website instead".to_string()
+    })?;
+
+    app.emit("update_progress", serde_json::json!({ "stage": "verifying" })).ok();
+    let mut hasher = Sha256::new();
+    let mut f = std::fs::File::open(&installer_path)
+        .map_err(|e| format!("Could not open installer for verification: {}", e))?;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("Read error during verification: {}", e))?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    if !hash.eq_ignore_ascii_case(expected) {
+        let _ = std::fs::remove_file(&installer_path);
+        return Err(format!("Download integrity check failed: expected {} got {}", expected, hash));
     }
 
     app.emit("update_progress", serde_json::json!({ "stage": "launching" })).ok();

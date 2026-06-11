@@ -7,7 +7,7 @@ import { applyTheme } from '../theme'
 // Must contain aggressive-only tokens ("gonna", "in order to") so the preview
 // visibly differs between standard and aggressive — pinned by the
 // levels_visibly_differ_on_settings_sample test in text_cleanup.rs.
-const CLEANUP_SAMPLE = "um so basically we're gonna need to move the the meeting to friday in order to hit the api deadline"
+const CLEANUP_SAMPLE = "um so basically we're gonna need to uh move the the meeting to friday in order to hit the api deadline you know"
 const MODEL_LABELS = { base: 'Basic', small: 'Standard', medium: 'Enhanced', 'large-v3': 'Ultra' }
 const LABEL_TO_MODEL = { Basic: 'base', Standard: 'small', Enhanced: 'medium', Ultra: 'large-v3' }
 
@@ -154,7 +154,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
       {/* Panel */}
       <div style={{
-        position: 'fixed', top: 0, right: 0, bottom: 0, width: 380,
+        position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(380px, 85vw)',
         background: 'var(--bg-primary)', borderLeft: '1px solid var(--border-primary)',
         zIndex: 101, display: 'flex', flexDirection: 'column',
         animation: 'echo-slide-in 0.22s ease-out both',
@@ -415,9 +415,9 @@ function EngineStatus({ engine }) {
       </SettingsRow>
       {computeText && (
         <SettingsRow label="Compute" hint="">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Icon name="cpu" size={12} color="var(--text-muted)" />
-            <span className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <Icon name="cpu" size={12} color="var(--text-muted)" style={{ flexShrink: 0 }} />
+            <span className="echo-mono" style={{ fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-word' }}>
               {computeText}
             </span>
           </div>
@@ -637,13 +637,13 @@ function SettingsRow({ label, hint, children }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '8px 0', gap: 12,
+      padding: '8px 0', gap: 10, minWidth: 0,
     }}>
-      <div>
+      <div style={{ minWidth: 0, flexShrink: 1 }}>
         <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{label}</div>
         {hint && <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>{hint}</div>}
       </div>
-      <div style={{ flexShrink: 0 }}>{children}</div>
+      <div style={{ flexShrink: 0, minWidth: 0 }}>{children}</div>
     </div>
   )
 }
@@ -660,7 +660,7 @@ function Seg({ options, value, onChange, disabled = [] }) {
           <button
             key={opt}
             onClick={() => { if (!isDisabled) onChange(opt) }}
-            title={isDisabled ? 'Not installed' : undefined}
+            title={isDisabled ? 'Model not installed — place the model file in the models folder' : undefined}
             style={{
               padding: '3px 10px', fontSize: 10, fontFamily: 'var(--font-mono)',
               border: 'none', borderRadius: 'var(--echo-radius-sm)',

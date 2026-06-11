@@ -20,7 +20,7 @@
         "minWidth": 640,
         "minHeight": 500,
         "center": true,
-        "decorations": true,
+        "decorations": false,
         "transparent": false,
         "visible": true,
         "focus": true

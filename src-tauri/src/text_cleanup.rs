@@ -300,6 +300,7 @@ impl TextCleanupEngine {
 
     fn final_cleanup(&self, text: &str) -> String {
         let mut t = RE_MULTI_SPACE.replace_all(text, " ").trim().to_string();
+        t = RE_SPACE_BEFORE_PUNCT.replace_all(&t, "$1").to_string();
         if !t.is_empty() && !t.ends_with('.') && !t.ends_with('!') && !t.ends_with('?') {
             t.push('.');
         }
@@ -355,7 +356,7 @@ mod tests {
     fn levels_visibly_differ_on_settings_sample() {
         // Keep in sync with CLEANUP_SAMPLE in SettingsPanel.jsx — the settings
         // preview must show a visible difference between the two levels.
-        let sample = "um so basically we're gonna need to move the the meeting to friday in order to hit the api deadline";
+        let sample = "um so basically we're gonna need to uh move the the meeting to friday in order to hit the api deadline you know";
         let std_out = TextCleanupEngine::new("standard").clean(sample);
         let agg_out = TextCleanupEngine::new("aggressive").clean(sample);
         assert_ne!(std_out, agg_out);

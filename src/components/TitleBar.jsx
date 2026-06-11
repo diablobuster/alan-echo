@@ -28,10 +28,11 @@ export default function TitleBar({ status = 'ready', elapsed = 0, onSettings, on
   const s = STATUS[status] || STATUS.ready
   return (
     <div data-tauri-drag-region style={{
-      height: 46, display: 'flex', alignItems: 'center', padding: '0 12px',
+      height: 42, display: 'flex', alignItems: 'center', padding: '0 12px',
       background: 'linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%)',
       borderBottom: '1px solid var(--border-primary)',
       userSelect: 'none', WebkitAppRegion: 'drag',
+      borderRadius: '7px 7px 0 0', flexShrink: 0,
     }}>
       {/* Wordmark */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

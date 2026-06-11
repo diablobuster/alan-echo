@@ -60,23 +60,16 @@ export default function DetailPanel({ transcript, onCopy, onDelete, onSaveEdit }
     }}>
       {/* Metadata */}
       <div style={{
-        padding: '10px 16px', borderBottom: '1px solid var(--border-primary)',
-        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '10px 14px', borderBottom: '1px solid var(--border-primary)',
+        display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+        minHeight: 42,
       }}>
-        <span className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        <span className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
           {formatTimestamp(timestamp)}
+          {duration_seconds > 0 && ` · ${formatDuration(duration_seconds)}`}
+          {word_count > 0 && ` · ${word_count}w`}
         </span>
-        {duration_seconds > 0 && (
-          <span className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>
-            &middot; {formatDuration(duration_seconds)}
-          </span>
-        )}
-        {word_count > 0 && (
-          <span className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>
-            &middot; {word_count} words
-          </span>
-        )}
-        <div style={{ flex: 1 }} />
+        <div style={{ flex: 1, minWidth: 8 }} />
         {editing ? (
           <>
             <Btn kind="ghost" size="sm" onClick={() => { setEditing(false); setDraft(text) }}>Cancel</Btn>

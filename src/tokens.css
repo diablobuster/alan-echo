@@ -90,6 +90,9 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 /* Utility classes */

@@ -343,12 +343,12 @@ export default function Dashboard() {
         <SearchBar query={query} onChange={setQuery} count={query ? displayList.length : undefined} total={transcripts.length} onExport={handleExport} />
 
         <div style={{ flex: 1, display: 'flex', gap: 12, overflow: 'hidden', minHeight: 0 }}>
-          <div style={{ flex: 1.05, display: 'flex', flexDirection: 'column', gap: 'var(--echo-list-gap)', overflow: 'auto', paddingRight: 4 }}>
+          <div style={{ flex: 1, minWidth: 200, display: 'flex', flexDirection: 'column', gap: 'var(--echo-list-gap)', overflow: 'auto', paddingRight: 4 }}>
             {displayList.length === 0 ? <EmptyState query={query} hotkeys={hotkeys} /> : displayList.map(t => (
               <TranscriptCard key={t.id} transcript={t} selected={t.id === selectedId} isNew={t.id === flashId} onClick={() => setSelectedId(t.id)} />
             ))}
           </div>
-          <div style={{ flex: 0.95, minWidth: 0 }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
             <DetailPanel transcript={selected} onCopy={handleCopy} onDelete={handleDelete} onSaveEdit={handleSaveEdit} />
           </div>
         </div>

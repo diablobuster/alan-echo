@@ -769,6 +769,27 @@ fn setup_logging(data_dir: &std::path::Path) {
     dispatch.apply().ok();
 }
 
+fn show_fatal_error(message: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        let wide_msg: Vec<u16> = OsStr::new(message).encode_wide().chain(Some(0)).collect();
+        let wide_title: Vec<u16> = OsStr::new("ALAN Echo").encode_wide().chain(Some(0)).collect();
+        unsafe {
+            #[link(name = "user32")]
+            extern "system" {
+                fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, typ: u32) -> i32;
+            }
+            MessageBoxW(std::ptr::null_mut(), wide_msg.as_ptr(), wide_title.as_ptr(), 0x10);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprintln!("[ALAN Echo FATAL] {}", message);
+    }
+}
+
 fn main() {
     // A corrupt engine binary (e.g. a damaged GPU pack) must make CreateProcess
     // FAIL, not hang the spawn behind a modal "Unsupported 16-Bit Application"
@@ -827,7 +848,11 @@ fn main() {
     whisper_engine.start(model_pref.as_deref());
 
     let app_state = Arc::new(AppState {
-        db: Mutex::new(TranscriptDB::open(&db_path).expect("Failed to open database")),
+        db: Mutex::new(TranscriptDB::open(&db_path).unwrap_or_else(|e| {
+            log::error!("Failed to open database: {}", e);
+            show_fatal_error(&format!("ALAN Echo could not open its database.\n\n{}\n\nTry deleting:\n{}", e, db_path.display()));
+            std::process::exit(1);
+        })),
         settings: Mutex::new(settings),
         license: Mutex::new(LicenseManager::new(license_key)),
         cleanup: Mutex::new(TextCleanupEngine::new(&cleanup_level)),
@@ -1000,6 +1025,12 @@ fn main() {
                 }
             }
 
+            // Ensure the window is visible on startup
+            if let Some(window) = app.get_webview_window("main") {
+                window.show().ok();
+                window.set_focus().ok();
+            }
+
             // Daily backup
             let state = app.state::<Arc<AppState>>();
             state.db.lock().maybe_daily_backup();
@@ -1047,7 +1078,11 @@ fn main() {
             set_autostart,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building ALAN Echo");
+        .unwrap_or_else(|e| {
+            log::error!("Failed to build ALAN Echo: {}", e);
+            show_fatal_error(&format!("ALAN Echo failed to start.\n\n{}\n\nThis usually means WebView2 is missing or corrupted.\nReinstall WebView2 from Microsoft, then try again.", e));
+            std::process::exit(1);
+        });
 
     app.run(move |_app_handle, event| {
         if let tauri::RunEvent::Exit = event {

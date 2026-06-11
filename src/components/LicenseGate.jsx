@@ -33,17 +33,20 @@ export default function LicenseGate({ onActivated }) {
     try {
       const result = await invoke('validate_license', { key })
       if (result.valid) {
-        setSuccess(true)
-        setLoading(false)
-        if (result.persisted === false) {
-          // Activated for this session, but the key couldn't be written to
-          // disk — warn instead of silently re-gating on next launch.
-          setPersistWarning(true)
-          setTimeout(() => onActivated(), 3500)
-        } else {
-          setTimeout(() => onActivated(), 800)
+        if (result.activated) {
+          setSuccess(true)
+          setLoading(false)
+          if (result.persisted === false) {
+            setPersistWarning(true)
+            setTimeout(() => onActivated(), 3500)
+          } else {
+            setTimeout(() => onActivated(), 800)
+          }
+          return
         }
-        return
+        // Key format valid but online activation failed (offline)
+        setError(result.message || 'Connect to the internet to activate')
+        setHint('Your key is saved — connect to the internet and try again.')
       } else {
         setError(result.message || 'Invalid license key')
         const body = key.startsWith('ECHO-') ? key.slice(5) : key
@@ -52,7 +55,6 @@ export default function LicenseGate({ onActivated }) {
         }
       }
     } catch (e) {
-      // An IPC failure is NOT a valid activation.
       console.error('License validation error:', e)
       setError('Could not validate the key — please restart the app and try again')
     }
@@ -218,11 +220,11 @@ export default function LicenseGate({ onActivated }) {
           <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
             Lost your key?{' '}
             <a
-              href="https://alanglobalintelligence.com/echo/recover"
-              onClick={openExternal('https://alanglobalintelligence.com/echo/recover')}
+              href="https://alanglobalintelligence.com/echo/keys"
+              onClick={openExternal('https://alanglobalintelligence.com/echo/keys')}
               style={{ color: 'var(--echo-accent)', textDecoration: 'none' }}
             >
-              Recover it
+              Sign in to view your keys
             </a>
           </span>
         </div>
@@ -231,7 +233,7 @@ export default function LicenseGate({ onActivated }) {
       {/* Footer */}
       <div style={{ position: 'absolute', bottom: 24, textAlign: 'center' }}>
         <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-          ALAN Global Intelligence &middot; Echo v1.1
+          ALAN Global Intelligence &middot; Echo v1.2
         </span>
       </div>
     </div>

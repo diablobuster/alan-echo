@@ -79,11 +79,13 @@ export default function DetailPanel({ transcript, onCopy, onDelete, onSaveEdit }
           </>
         ) : (
           <>
-            <Btn kind="ghost" size="sm" onClick={startEdit}>Edit</Btn>
+            <Btn kind="ghost" size="sm" onClick={startEdit} aria-label="Edit transcription">Edit</Btn>
             <Btn kind="brass" size="sm" onClick={onCopy}>
               <Icon name="copy" size={12} color="#fff" /> Copy
             </Btn>
-            <Btn kind="danger" size="sm" onClick={onDelete}>
+            <Btn kind="danger" size="sm" onClick={() => {
+              if (confirm('Delete this transcription? This cannot be undone.')) onDelete()
+            }}>
               <Icon name="trash" size={12} /> Delete
             </Btn>
           </>

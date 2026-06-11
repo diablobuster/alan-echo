@@ -131,14 +131,31 @@ fn validate_license(state: State<Arc<AppState>>, key: String) -> Result<serde_js
     let (valid, msg) = lm.activate(&key);
     let mut persisted = true;
     if valid {
+        let normalized = key.trim().to_uppercase().replace(' ', "");
         let mut s = state.settings.lock();
-        s.set("license_key", serde_json::Value::String(key.trim().to_uppercase().replace(' ', "")));
-        // A failed write (disk full, AV blocking %APPDATA%) means the key
-        // works THIS session but the gate reappears next launch — the UI
-        // must warn instead of celebrating.
+        s.set("license_key", serde_json::Value::String(normalized.clone()));
         if let Err(e) = s.save() {
             log::error!("License accepted but could not be saved: {}", e);
             persisted = false;
+        }
+        drop(s);
+        drop(lm);
+        // Auto-attempt Ed25519 online activation
+        match activation::activate_online(&normalized, &state.data_dir) {
+            Ok(_) => {
+                return Ok(serde_json::json!({
+                    "valid": true, "activated": true,
+                    "message": "License activated", "persisted": persisted
+                }));
+            }
+            Err(e) => {
+                log::warn!("Online activation failed (key stored for retry): {}", e);
+                return Ok(serde_json::json!({
+                    "valid": true, "activated": false,
+                    "message": "Key accepted — connect to the internet to complete activation",
+                    "persisted": persisted
+                }));
+            }
         }
     }
     Ok(serde_json::json!({ "valid": valid, "message": msg, "persisted": persisted }))
@@ -710,9 +727,38 @@ fn display_accel(accel: &str) -> String {
 
 // ── Main ─────────────────────────────────────────────────────────────
 
-fn main() {
-    env_logger::init();
+fn setup_logging(data_dir: &std::path::Path) {
+    let log_path = data_dir.join("echo.log");
 
+    // Rotate: if the log file exceeds 5 MB, truncate it before opening.
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 5 * 1024 * 1024 {
+            let _ = std::fs::write(&log_path, "");
+        }
+    }
+
+    let mut dispatch = fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{} [{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                message,
+            ))
+        })
+        .level(log::LevelFilter::Info);
+
+    if let Ok(file) = fern::log_file(&log_path) {
+        dispatch = dispatch.chain(file);
+    }
+    #[cfg(debug_assertions)]
+    {
+        dispatch = dispatch.chain(std::io::stderr());
+    }
+    dispatch.apply().ok();
+}
+
+fn main() {
     // A corrupt engine binary (e.g. a damaged GPU pack) must make CreateProcess
     // FAIL, not hang the spawn behind a modal "Unsupported 16-Bit Application"
     // system dialog. Error mode is per-process and inherited by children.
@@ -729,6 +775,7 @@ fn main() {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("ALAN Echo");
     std::fs::create_dir_all(&data_dir).ok();
+    setup_logging(&data_dir);
     std::fs::create_dir_all(data_dir.join("backups")).ok();
     std::fs::create_dir_all(data_dir.join("models")).ok();
 

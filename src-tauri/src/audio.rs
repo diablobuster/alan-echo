@@ -281,7 +281,7 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
                 drop(stream.take());
                 recording = false;
 
-                let raw = samples.lock().clone();
+                let raw = std::mem::take(&mut *samples.lock());
                 let speech = *has_speech.lock();
 
                 if raw.is_empty() {

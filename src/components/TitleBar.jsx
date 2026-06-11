@@ -66,7 +66,7 @@ export default function TitleBar({ status = 'ready', elapsed = 0, onSettings, on
       <div style={{ flex: 1 }} />
 
       {/* Settings */}
-      <button onClick={onSettings} style={{
+      <button onClick={onSettings} aria-label="Settings" style={{
         background: 'none', border: 'none', cursor: 'pointer', padding: 6,
         color: 'var(--text-muted)', borderRadius: 4, WebkitAppRegion: 'no-drag',
       }}
@@ -78,17 +78,17 @@ export default function TitleBar({ status = 'ready', elapsed = 0, onSettings, on
 
       {/* Window controls */}
       <div style={{ display: 'flex', marginLeft: 8, gap: 2, WebkitAppRegion: 'no-drag' }}>
-        <WinBtn icon="minimize" onClick={onMinimize} />
-        <WinBtn icon="maximize" onClick={onMaximize} />
-        <WinBtn icon="close" onClick={onClose} danger />
+        <WinBtn icon="minimize" onClick={onMinimize} label="Minimize" />
+        <WinBtn icon="maximize" onClick={onMaximize} label="Maximize" />
+        <WinBtn icon="close" onClick={onClose} danger label="Close" />
       </div>
     </div>
   )
 }
 
-function WinBtn({ icon, onClick, danger }) {
+function WinBtn({ icon, onClick, danger, label }) {
   return (
-    <button onClick={onClick} style={{
+    <button onClick={onClick} aria-label={label} style={{
       width: 32, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: 'none', border: 'none', cursor: 'pointer', borderRadius: 3,
       color: danger ? 'var(--text-muted)' : 'var(--text-muted)',

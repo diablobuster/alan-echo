@@ -29,18 +29,44 @@ export default function Dashboard() {
   const [error, setError] = useState(null)
   const [hotkeys, setHotkeys] = useState({})
   const [trial, setTrial] = useState(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const pageRef = useRef(0)
   const timerRef = useRef(null)
   const statusRef = useRef(status)
   statusRef.current = status
   const settingsRef = useRef({})
 
   // ── Load data ──────────────────────────────────────────────────────
+  const PAGE_SIZE = 100
+
   const loadTranscripts = useCallback(async () => {
     try {
-      const result = await invoke('get_transcripts', { page: 0, pageSize: 100 })
-      if (result?.transcripts) setTranscripts(result.transcripts)
+      pageRef.current = 0
+      const result = await invoke('get_transcripts', { page: 0, pageSize: PAGE_SIZE })
+      if (result?.transcripts) {
+        setTranscripts(result.transcripts)
+        setHasMore(result.transcripts.length >= PAGE_SIZE)
+      }
     } catch (e) { console.error('Failed to load transcripts:', e) }
   }, [])
+
+  const loadMoreTranscripts = useCallback(async () => {
+    if (loadingMore) return
+    setLoadingMore(true)
+    try {
+      const nextPage = pageRef.current + 1
+      const result = await invoke('get_transcripts', { page: nextPage, pageSize: PAGE_SIZE })
+      if (result?.transcripts?.length) {
+        pageRef.current = nextPage
+        setTranscripts(prev => [...prev, ...result.transcripts])
+        setHasMore(result.transcripts.length >= PAGE_SIZE)
+      } else {
+        setHasMore(false)
+      }
+    } catch (e) { console.error('Failed to load more:', e) }
+    setLoadingMore(false)
+  }, [loadingMore])
 
   const loadStats = useCallback(async () => {
     try {
@@ -347,6 +373,20 @@ export default function Dashboard() {
             {displayList.length === 0 ? <EmptyState query={query} hotkeys={hotkeys} /> : displayList.map(t => (
               <TranscriptCard key={t.id} transcript={t} selected={t.id === selectedId} isNew={t.id === flashId} onClick={() => setSelectedId(t.id)} />
             ))}
+            {hasMore && !query && (
+              <button
+                onClick={loadMoreTranscripts}
+                disabled={loadingMore}
+                style={{
+                  padding: '8px 0', fontSize: 11, fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-muted)', background: 'none',
+                  border: '1px solid var(--border-primary)', borderRadius: 'var(--echo-radius-sm)',
+                  cursor: loadingMore ? 'default' : 'pointer', marginTop: 4,
+                }}
+              >
+                {loadingMore ? 'Loading...' : 'Load more'}
+              </button>
+            )}
           </div>
           <div style={{ flex: 1, minWidth: 200 }}>
             <DetailPanel transcript={selected} onCopy={handleCopy} onDelete={handleDelete} onSaveEdit={handleSaveEdit} />

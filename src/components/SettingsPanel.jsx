@@ -176,7 +176,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
         }}>
           <span style={{ fontSize: 14, fontWeight: 600 }}>Settings</span>
           <div style={{ flex: 1 }} />
-          <button onClick={onClose} style={{
+          <button onClick={onClose} aria-label="Close settings" style={{
             background: 'none', border: 'none', cursor: 'pointer', padding: 4,
             color: 'var(--text-muted)', borderRadius: 4,
           }}>
@@ -376,14 +376,37 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           )}
         </div>
 
-        {/* Footer */}
+        {/* ALAN Platform links */}
         <div style={{
           padding: '12px 16px', borderTop: '1px solid var(--border-primary)',
-          textAlign: 'center',
         }}>
-          <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-            Part of ALAN Global Intelligence &middot; v1.2
-          </span>
+          <div className="echo-eyebrow" style={{ marginBottom: 8 }}>ALAN Platform</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {[
+              { label: 'Research Terminal', path: '/research' },
+              { label: 'Global Dashboard', path: '/dashboard' },
+              { label: 'Support', path: '/contact' },
+            ].map(link => (
+              <a
+                key={link.path}
+                href={`https://alanglobalintelligence.com${link.path}`}
+                onClick={e => {
+                  e.preventDefault()
+                  invoke('plugin:shell|open', { path: `https://alanglobalintelligence.com${link.path}` }).catch(() => {
+                    window.open(`https://alanglobalintelligence.com${link.path}`, '_blank', 'noopener')
+                  })
+                }}
+                style={{ fontSize: 11, color: 'var(--text-secondary)', textDecoration: 'none', padding: '3px 0' }}
+              >
+                {link.label} <span style={{ color: 'var(--text-faint)', fontSize: 9 }}>&rarr;</span>
+              </a>
+            ))}
+          </div>
+          <div style={{ marginTop: 10, textAlign: 'center' }}>
+            <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
+              Part of ALAN Global Intelligence &middot; v1.2
+            </span>
+          </div>
         </div>
       </div>
     </>

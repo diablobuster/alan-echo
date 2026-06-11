@@ -33,7 +33,9 @@ export default function Icon({ name, size = 16, stroke = 1.6, color = 'currentCo
   )
 }
 
-import { BRASS, INK, NAVY } from './logoData.js'
+const BRASS = '/logo-brass.png'
+const INK = '/logo-ink.png'
+const NAVY = '/logo-navy.png'
 
 const LOGO_MAP = { brass: BRASS, ink: INK, navy: NAVY }
 

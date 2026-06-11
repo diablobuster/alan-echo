@@ -16,6 +16,7 @@ export default function Onboarding({ hotkeys = {}, onDone }) {
     { title: 'Choose your microphone', body: <StepMic /> },
     { title: 'Try a test dictation', body: <StepTest /> },
     { title: 'Your hotkeys', body: <StepHotkeys hotkeys={hotkeys} /> },
+    { title: 'You\'re all set', body: <StepDone /> },
   ]
   const last = step === steps.length - 1
 
@@ -253,6 +254,36 @@ function StepTest() {
       {state === 'error' && (
         <div style={{ marginTop: 12, fontSize: 11, color: 'var(--accent-red)' }}>{result}</div>
       )}
+    </div>
+  )
+}
+
+function StepDone() {
+  const openLink = (path) => (e) => {
+    e.preventDefault()
+    invoke('plugin:shell|open', { path: `https://alanglobalintelligence.com${path}` }).catch(() => {
+      window.open(`https://alanglobalintelligence.com${path}`, '_blank', 'noopener')
+    })
+  }
+  return (
+    <div>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 14px', lineHeight: 1.6 }}>
+        Your ALAN account also gives you access to our research platform.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <a href="#" onClick={openLink('/research')} style={{ fontSize: 12, color: 'var(--echo-accent)', textDecoration: 'none' }}>
+          Research Terminal — AI-powered equity research
+        </a>
+        <a href="#" onClick={openLink('/dashboard')} style={{ fontSize: 12, color: 'var(--echo-accent)', textDecoration: 'none' }}>
+          Global Dashboard — real-time market intelligence
+        </a>
+        <a href="#" onClick={openLink('/manage')} style={{ fontSize: 12, color: 'var(--echo-accent)', textDecoration: 'none' }}>
+          Portfolio Manager — track and optimize your investments
+        </a>
+      </div>
+      <p style={{ fontSize: 11, color: 'var(--text-faint)', margin: '14px 0 0', lineHeight: 1.5 }}>
+        Sign in at alanglobalintelligence.com to explore.
+      </p>
     </div>
   )
 }

@@ -33,6 +33,7 @@ image = "0.25"
 base64 = "0.22"
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 num_cpus = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }

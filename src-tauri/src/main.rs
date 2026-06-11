@@ -486,6 +486,18 @@ fn display_accel(accel: &str) -> String {
 fn main() {
     env_logger::init();
 
+    // A corrupt engine binary (e.g. a damaged GPU pack) must make CreateProcess
+    // FAIL, not hang the spawn behind a modal "Unsupported 16-Bit Application"
+    // system dialog. Error mode is per-process and inherited by children.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetErrorMode(mode: u32) -> u32;
+        }
+        SetErrorMode(0x0001 | 0x8000); // SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
+    }
+
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("ALAN Echo");

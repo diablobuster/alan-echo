@@ -262,7 +262,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           textAlign: 'center',
         }}>
           <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-            Part of ALAN Global Intelligence &middot; v1.1
+            Part of ALAN Global Intelligence &middot; v1.2
           </span>
         </div>
       </div>
@@ -284,7 +284,7 @@ function EngineStatus({ engine }) {
     ? (engine.engine_kind === 'cuda'
         ? `GPU: ${engine.gpu_name}${engine.vram_mb ? ` (${Math.round(engine.vram_mb / 1024)} GB)` : ''} · CUDA active`
         : engine.engine_kind === 'vulkan'
-        ? `GPU acceleration · Vulkan active`
+        ? `GPU acceleration · Vulkan active (beta)`
         : engine.cuda
         ? `CPU engine · ${engine.cpu_cores} cores (${engine.gpu_name} idle)`
         : `CPU only · ${engine.cpu_cores} cores`)
@@ -326,10 +326,18 @@ function gpuVerdictText(r) {
   if (r.verdict === 'cuda_available') {
     return `${r.nvidia_gpu}${vram} found — but Echo is using the CPU engine right now. Enable GPU acceleration below to transcribe several times faster.`
   }
-  // cpu_only: name what we DID find so AMD/Intel owners get a real answer.
   const other = (r.display_gpus || []).filter(n => !/nvidia/i.test(n))
+  if (r.verdict === 'vulkan_ready') {
+    const active = r.engine_kind === 'vulkan'
+    return `${other[0] || 'Your GPU'} — the Vulkan GPU pack (beta) is installed${active ? ' and active. Short dictations transcribe in well under a second' : ''}. If anything ever looks wrong, email support@alanglobalintelligence.com.`
+  }
+  if (r.verdict === 'vulkan_available') {
+    return `We see your ${other[0] || 'graphics card'} — enable the beta Vulkan GPU pack below to transcribe several times faster than on CPU.`
+  }
+  // cpu_only: name what we DID find so owners of unrecognized cards get a
+  // real answer.
   if (other.length > 0) {
-    return `No NVIDIA GPU found. We see ${other.join(', ')} — support for AMD and Intel graphics is on the roadmap. Until then Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU.`
+    return `We see ${other.join(', ')}, but Echo can't accelerate on it yet. Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU.`
   }
   return `No dedicated GPU found. Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU; very long clips take proportionally longer.`
 }
@@ -384,7 +392,7 @@ function GpuTestRow({ savedResult }) {
           <Icon
             name={result.verdict === 'cpu_only' ? 'cpu' : 'check'}
             size={12}
-            color={result.verdict === 'cuda_ready' ? 'var(--accent-green)' : result.verdict === 'cuda_available' ? 'var(--brass)' : 'var(--text-muted)'}
+            color={result.verdict.endsWith('_ready') ? 'var(--accent-green)' : result.verdict.endsWith('_available') ? 'var(--brass)' : 'var(--text-muted)'}
             style={{ flexShrink: 0, marginTop: 2 }}
           />
           <span>{gpuVerdictText(result)}</span>
@@ -397,12 +405,12 @@ function GpuTestRow({ savedResult }) {
   )
 }
 
-/** One-click GPU acceleration: shows nothing without an NVIDIA GPU; offers
- *  the free pack download when the GPU is idle on the CPU engine; renders
- *  progress while the ~440 MB pack streams in; hands off to the engine poll
- *  once the CUDA build restarts. */
+/** One-click GPU acceleration. The backend decides what to offer: the CUDA
+ *  pack on NVIDIA machines, the beta Vulkan pack on AMD/Intel machines,
+ *  nothing otherwise. Renders progress while the pack streams in; hands off
+ *  to the engine poll once the accelerated build restarts. */
 function GpuPackRow({ onEngineRestart }) {
-  const [status, setStatus] = useState(null) // { gpu_name, installed, engine_kind, progress }
+  const [status, setStatus] = useState(null) // { gpu_name, installed, engine_kind, offer, offer_gpu, beta, progress }
   const [progress, setProgress] = useState(null)
   const [error, setError] = useState(null)
   const doneRef = useRef(false)
@@ -422,7 +430,10 @@ function GpuPackRow({ onEngineRestart }) {
     listen('gpu-pack-progress', (event) => {
       const p = event.payload
       setProgress(p)
-      if (p.state === 'failed') setError(p.error || 'Download failed — try again')
+      if (p.state === 'failed') {
+        setError(p.error || 'Download failed — try again')
+        refresh() // a rollback may have disabled the pack — re-read reality
+      }
       if (p.state === 'done' && !doneRef.current) {
         doneRef.current = true
         refresh()
@@ -437,23 +448,25 @@ function GpuPackRow({ onEngineRestart }) {
     setError(null)
     doneRef.current = false
     try {
-      await invoke('download_gpu_pack')
+      await invoke('download_gpu_pack', { kind: status.offer })
       setProgress({ state: 'downloading', downloaded_mb: 0, total_mb: null })
     } catch (e) {
       setError(String(e))
     }
   }
 
-  // No NVIDIA GPU → nothing to offer (Vulkan pack for AMD/Intel is a separate
-  // future drop-in; the engine already probes for it).
-  if (!status?.gpu_name) return null
+  // Nothing to offer on this hardware.
+  if (!status?.offer) return null
 
+  const beta = !!status.beta
+  const gpuLabel = status.offer_gpu || status.gpu_name || 'your GPU'
+  const sizeText = status.offer === 'cuda' ? '~440 MB' : '~18 MB'
   const busy = progress && ['downloading', 'extracting', 'restarting'].includes(progress.state)
   const active = status.installed && !busy
 
   if (active && !progress) {
     // Pack on disk and no install in flight — the Compute row already says
-    // "CUDA active"; stay quiet.
+    // which engine is active; stay quiet.
     return null
   }
 
@@ -461,7 +474,9 @@ function GpuPackRow({ onEngineRestart }) {
     <div style={{ padding: '8px 0' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>GPU acceleration</div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>
+            GPU acceleration{beta ? ' (beta)' : ''}
+          </div>
           <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>
             {busy
               ? progress.state === 'downloading'
@@ -470,9 +485,15 @@ function GpuPackRow({ onEngineRestart }) {
                 ? 'Installing…'
                 : 'Restarting the speech engine…'
               : progress?.state === 'done'
-              ? `Active — transcribing on your ${status.gpu_name}`
-              : `Free one-time download (~440 MB) — uses your ${status.gpu_name}`}
+              ? `Active — transcribing on your ${gpuLabel}`
+              : `Free one-time download (${sizeText}) — uses your ${gpuLabel}`}
           </div>
+          {beta && !busy && progress?.state !== 'done' && (
+            <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>
+              Beta — works on most AMD and Intel GPUs. If the driver can't run it, Echo
+              switches back to the CPU engine automatically. Problems? support@alanglobalintelligence.com
+            </div>
+          )}
         </div>
         {!busy && progress?.state !== 'done' && (
           <button type="button" onClick={start} style={{

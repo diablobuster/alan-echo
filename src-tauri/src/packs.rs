@@ -1,10 +1,13 @@
 //! ALAN Echo — optional acceleration pack download + install.
 //!
 //! The retail installer ships the CPU engine only (NSIS hard-fails at 2 GB).
-//! GPU packs live on the release host behind the site-owned stable URL
-//! /api/echo/download/gpu; this module turns "extract a zip into %APPDATA%"
-//! into one click: stream the zip with progress, extract to a temp dir,
-//! verify, atomically swap into models/, and hot-restart the engine.
+//! GPU packs live on the release host behind site-owned stable URLs —
+//! /api/echo/download/gpu (CUDA, NVIDIA) and /api/echo/download/vulkan
+//! (Vulkan, AMD/Intel, beta); this module turns "extract a zip into
+//! %APPDATA%" into one click: stream the zip with progress, extract to a
+//! temp dir, verify, atomically swap into models/, and hot-restart the
+//! engine. The Vulkan pack additionally gets a post-install health watch
+//! that disables it and falls back to CPU if the driver can't run it.
 //!
 //! Privacy note: this is the ONLY user-initiated network call in the app —
 //! it downloads engine binaries and sends nothing. Dictation never touches
@@ -17,7 +20,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, State};
 
 #[cfg(target_os = "windows")]
@@ -27,9 +30,100 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use crate::AppState;
 
-const GPU_PACK_URL: &str = "https://alanglobalintelligence.com/api/echo/download/gpu";
-/// Anything smaller is an error page or a truncated transfer, not the pack.
-const MIN_PACK_BYTES: u64 = 50 * 1024 * 1024;
+/// Acceleration pack kinds the app can install. CUDA is the proven default
+/// for NVIDIA machines; Vulkan (beta) covers AMD/Intel and gets a post-install
+/// health watch + rollback because consumer Vulkan driver quality varies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackKind {
+    Cuda,
+    Vulkan,
+}
+
+impl PackKind {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "cuda" => Some(Self::Cuda),
+            "vulkan" => Some(Self::Vulkan),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda",
+            Self::Vulkan => "vulkan",
+        }
+    }
+
+    /// Directory under models/ — must match what whisper.rs probes.
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda_release",
+            Self::Vulkan => "vulkan_release",
+        }
+    }
+
+    /// Site-owned stable URLs — the host behind them can move without an app
+    /// update (same rule as the installer download).
+    fn url(self) -> String {
+        // Debug-only test seam (forced-failure rollback test §5.3): point an
+        // install at a local server. Compiled out of retail builds so a
+        // shipped binary can never be redirected.
+        #[cfg(debug_assertions)]
+        if let Ok(u) = std::env::var(match self {
+            Self::Cuda => "ECHO_CUDA_PACK_URL",
+            Self::Vulkan => "ECHO_VULKAN_PACK_URL",
+        }) {
+            return u;
+        }
+        match self {
+            Self::Cuda => "https://alanglobalintelligence.com/api/echo/download/gpu".to_string(),
+            Self::Vulkan => "https://alanglobalintelligence.com/api/echo/download/vulkan".to_string(),
+        }
+    }
+
+    /// Anything smaller is an error page or a truncated transfer, not the
+    /// pack (CUDA ships cuBLAS blobs at ~440 MB; Vulkan is lean).
+    fn min_bytes(self) -> u64 {
+        match self {
+            Self::Cuda => 50 * 1024 * 1024,
+            Self::Vulkan => 5 * 1024 * 1024,
+        }
+    }
+}
+
+fn pack_server_exe(data_dir: &Path, kind: PackKind) -> std::path::PathBuf {
+    data_dir
+        .join("models")
+        .join(kind.dir_name())
+        .join("Release")
+        .join("whisper-server.exe")
+}
+
+/// Installed AND not disabled by a rollback — what "installed" means to the
+/// UI (a disabled pack must re-offer the install button, not hide it).
+fn pack_usable(data_dir: &Path, kind: PackKind) -> bool {
+    if kind == PackKind::Vulkan
+        && data_dir.join("models").join(kind.dir_name()).join("DISABLED").exists()
+    {
+        return false;
+    }
+    pack_server_exe(data_dir, kind).exists()
+}
+
+/// First non-NVIDIA adapter that plausibly runs Vulkan (§5.2: all AMD/Intel
+/// names match on purpose — the beta label and post-install rollback are the
+/// guardrails, not a curated allowlist).
+fn vulkan_candidate(adapters: &[String]) -> Option<String> {
+    adapters
+        .iter()
+        .find(|n| {
+            let l = n.to_lowercase();
+            !l.contains("nvidia")
+                && ["radeon", "arc", "iris", "intel", "amd"].iter().any(|k| l.contains(k))
+        })
+        .cloned()
+}
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct PackProgress {
@@ -52,18 +146,26 @@ fn set_progress(app: &tauri::AppHandle, p: PackProgress) {
 
 #[tauri::command]
 pub fn get_gpu_pack_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, String> {
-    let installed = state
-        .data_dir
-        .join("models")
-        .join("cuda_release")
-        .join("Release")
-        .join("whisper-server.exe")
-        .exists();
     let info = state.whisper.info();
+    // §5.2 offer logic: NVIDIA → CUDA pack (proven); otherwise any AMD/Intel
+    // adapter → Vulkan pack, beta-labeled. No matching hardware → no offer.
+    let (offer, offer_gpu, beta) = if info.gpu_name.is_some() {
+        (Some(PackKind::Cuda), info.gpu_name.clone(), false)
+    } else if let Some(name) = vulkan_candidate(&probe_display_adapters()) {
+        (Some(PackKind::Vulkan), Some(name), true)
+    } else {
+        (None, None, false)
+    };
+    let installed = offer
+        .map(|k| pack_usable(&state.data_dir, k))
+        .unwrap_or(false);
     Ok(serde_json::json!({
         "gpu_name": info.gpu_name,
         "installed": installed,
         "engine_kind": info.engine_kind,
+        "offer": offer.map(PackKind::as_str),
+        "offer_gpu": offer_gpu,
+        "beta": beta,
         "progress": PROGRESS.lock().clone(),
     }))
 }
@@ -79,9 +181,11 @@ pub struct GpuTestResult {
     /// concrete answer instead of silence.
     pub display_gpus: Vec<String>,
     pub pack_installed: bool,
+    pub vulkan_pack_installed: bool,
     pub engine_kind: Option<String>,
     pub cpu_cores: usize,
-    /// cuda_ready | cuda_available | cpu_only — the consequence in one word.
+    /// cuda_ready | cuda_available | vulkan_ready | vulkan_available |
+    /// cpu_only — the consequence in one word.
     pub verdict: String,
 }
 
@@ -92,19 +196,19 @@ pub struct GpuTestResult {
 pub fn test_gpu(state: State<Arc<AppState>>) -> Result<GpuTestResult, String> {
     let (nvidia_gpu, vram_mb) = probe_nvidia();
     let display_gpus = probe_display_adapters();
-    let pack_installed = state
-        .data_dir
-        .join("models")
-        .join("cuda_release")
-        .join("Release")
-        .join("whisper-server.exe")
-        .exists();
+    let pack_installed = pack_usable(&state.data_dir, PackKind::Cuda);
+    let vulkan_pack_installed = pack_usable(&state.data_dir, PackKind::Vulkan);
     let info = state.whisper.info();
 
+    let vulkan_gpu = vulkan_candidate(&display_gpus);
     let verdict = if nvidia_gpu.is_some() && pack_installed {
         "cuda_ready"
     } else if nvidia_gpu.is_some() {
         "cuda_available"
+    } else if vulkan_gpu.is_some() && vulkan_pack_installed {
+        "vulkan_ready"
+    } else if vulkan_gpu.is_some() {
+        "vulkan_available"
     } else {
         "cpu_only"
     };
@@ -115,6 +219,7 @@ pub fn test_gpu(state: State<Arc<AppState>>) -> Result<GpuTestResult, String> {
         vram_mb,
         display_gpus,
         pack_installed,
+        vulkan_pack_installed,
         engine_kind: info.engine_kind,
         cpu_cores: info.cpu_cores,
         verdict: verdict.to_string(),
@@ -163,8 +268,8 @@ fn probe_nvidia() -> (Option<String>, Option<u64>) {
 }
 
 /// All display adapters via CIM — names AMD/Intel hardware so the verdict can
-/// say "we see your Radeon; Vulkan support is on the roadmap" instead of
-/// pretending the machine has no GPU. (wmic is deprecated on Win11 24H2+.)
+/// offer the beta Vulkan pack ("we see your Radeon …") instead of pretending
+/// the machine has no GPU. (wmic is deprecated on Win11 24H2+.)
 fn probe_display_adapters() -> Vec<String> {
     let mut cmd = Command::new("powershell");
     cmd.args([
@@ -187,9 +292,17 @@ fn probe_display_adapters() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn download_gpu_pack(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<(), String> {
+pub fn download_gpu_pack(
+    app: tauri::AppHandle,
+    state: State<Arc<AppState>>,
+    kind: Option<String>,
+) -> Result<(), String> {
+    // No kind = CUDA, the original pack (pre-1.2 UI sent no argument).
+    let kind = PackKind::parse(kind.as_deref().unwrap_or("cuda"))
+        .ok_or_else(|| "Unknown acceleration pack".to_string())?;
     {
         let mut prog = PROGRESS.lock();
+        // ONE progress channel — a second concurrent install stays refused.
         if matches!(prog.state.as_str(), "downloading" | "extracting" | "restarting") {
             return Err("The GPU pack is already downloading".into());
         }
@@ -200,8 +313,8 @@ pub fn download_gpu_pack(app: tauri::AppHandle, state: State<Arc<AppState>>) -> 
     std::thread::Builder::new()
         .name("gpu-pack-install".into())
         .spawn(move || {
-            if let Err(e) = run_install(&app, &state) {
-                log::error!("GPU pack install failed: {}", e);
+            if let Err(e) = run_install(&app, &state, kind) {
+                log::error!("{} pack install failed: {}", kind.as_str(), e);
                 set_progress(
                     &app,
                     PackProgress { state: "failed".into(), error: Some(e), ..Default::default() },
@@ -212,13 +325,13 @@ pub fn download_gpu_pack(app: tauri::AppHandle, state: State<Arc<AppState>>) -> 
     Ok(())
 }
 
-fn run_install(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), String> {
+fn run_install(app: &tauri::AppHandle, state: &Arc<AppState>, kind: PackKind) -> Result<(), String> {
     let models = state.data_dir.join("models");
     std::fs::create_dir_all(&models).map_err(|e| format!("Couldn't open the models folder: {}", e))?;
     let zip_path = models.join("gpu-pack.zip.partial");
     let tmp_dir = models.join(".gpu-pack-tmp");
 
-    download_to(app, GPU_PACK_URL, &zip_path)?;
+    download_to(app, &kind.url(), &zip_path, kind.min_bytes())?;
 
     set_progress(app, PackProgress { state: "extracting".into(), ..Default::default() });
     if tmp_dir.exists() {
@@ -229,15 +342,15 @@ fn run_install(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), Stri
     std::fs::remove_file(&zip_path).ok();
     extract_result?;
 
-    // The pack zip contains cuda_release/Release/whisper-server.exe — verify
-    // BEFORE touching the live models/ contents, then swap via rename so a
-    // failure can never leave a half-installed engine in place.
-    let extracted = tmp_dir.join("cuda_release");
+    // The pack zip contains <dir>/Release/whisper-server.exe — verify BEFORE
+    // touching the live models/ contents, then swap via rename so a failure
+    // can never leave a half-installed engine in place.
+    let extracted = tmp_dir.join(kind.dir_name());
     if !extracted.join("Release").join("whisper-server.exe").exists() {
         std::fs::remove_dir_all(&tmp_dir).ok();
         return Err("The downloaded pack is incomplete — try again, or email support".into());
     }
-    let dest = models.join("cuda_release");
+    let dest = models.join(kind.dir_name());
     if dest.exists() {
         std::fs::remove_dir_all(&dest)
             .map_err(|e| format!("Couldn't replace the previous pack: {}", e))?;
@@ -245,17 +358,93 @@ fn run_install(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), Stri
     std::fs::rename(&extracted, &dest)
         .map_err(|e| format!("Couldn't move the pack into place: {}", e))?;
     std::fs::remove_dir_all(&tmp_dir).ok();
+    // A fresh install supersedes any pack disabled by an earlier rollback.
+    std::fs::remove_dir_all(models.join(format!("{}.disabled", kind.dir_name()))).ok();
 
     set_progress(app, PackProgress { state: "restarting".into(), ..Default::default() });
     let model_pref = state.settings.lock().get_str("whisper_model");
     state.whisper.reload(model_pref.as_deref());
 
+    if kind == PackKind::Vulkan {
+        // §5.3: consumer Vulkan drivers can crash the engine outright. Watch
+        // the restart; a failure here must not re-fail on every launch with
+        // no user-visible escape.
+        confirm_vulkan_engine(state, &models)?;
+    }
+
     set_progress(app, PackProgress { state: "done".into(), ..Default::default() });
-    log::info!("GPU pack installed; engine restarting on the CUDA build");
+    log::info!("{} pack installed; engine restarted", kind.as_str());
     Ok(())
 }
 
-fn download_to(app: &tauri::AppHandle, url: &str, dest: &Path) -> Result<(), String> {
+const VULKAN_ROLLBACK_MSG: &str = "Your GPU's Vulkan driver couldn't run the engine — Echo is back on the CPU engine. Nothing is broken; email support@alanglobalintelligence.com with your GPU model.";
+
+/// Wait for the engine restarted on the freshly installed Vulkan pack to come
+/// up. Success = Ready on ANY binary (on a CUDA machine the new pack is
+/// simply not the chosen engine — that's fine). If the engine fails (or never
+/// becomes ready) while running the Vulkan binary, disable the pack and fall
+/// back to CPU.
+fn confirm_vulkan_engine(state: &Arc<AppState>, models: &Path) -> Result<(), String> {
+    // whisper.rs kills a non-starting server at 120 s — 150 s covers that
+    // with margin, so the child is dead (and the exe renameable) by then.
+    let deadline = Instant::now() + Duration::from_secs(150);
+    loop {
+        let info = state.whisper.info();
+        if info.ready {
+            return Ok(());
+        }
+        if info.status == "stopped" || info.status == "idle" {
+            // App shutdown raced the install (or the engine never started) —
+            // that's not a driver verdict; leave the pack alone.
+            return Err("The engine restart was interrupted — reopen Echo and try again".into());
+        }
+        let failed = info.status.starts_with("failed");
+        if failed || Instant::now() > deadline {
+            if info.engine_kind.as_deref() == Some("vulkan") {
+                disable_vulkan_pack(state, models);
+                return Err(VULKAN_ROLLBACK_MSG.into());
+            }
+            return Err(format!("The engine didn't restart cleanly ({})", info.status));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Rename the pack aside (NOT delete — support may want it) and restart the
+/// engine, which falls back to the CPU build.
+fn disable_vulkan_pack(state: &Arc<AppState>, models: &Path) {
+    let live = models.join("vulkan_release");
+    let disabled = models.join("vulkan_release.disabled");
+    std::fs::remove_dir_all(&disabled).ok();
+    // A failed spawn can hold the exe open for a surprising while (Defender
+    // scans unknown binaries on first execution) — retry briefly, then fall
+    // back to a DISABLED marker inside the pack. find_server_binary honors
+    // the marker, and creating a new file can't be blocked by the exe lock,
+    // so the broken pack can never re-fail on every launch.
+    let mut renamed = false;
+    for _ in 0..10 {
+        match std::fs::rename(&live, &disabled) {
+            Ok(()) => {
+                renamed = true;
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_secs(1)),
+        }
+    }
+    if !renamed {
+        if let Err(e) = std::fs::write(
+            live.join("DISABLED"),
+            b"Disabled by ALAN Echo after the engine failed on this Vulkan driver.",
+        ) {
+            log::error!("Couldn't disable the failed Vulkan pack: {}", e);
+        }
+    }
+    let model_pref = state.settings.lock().get_str("whisper_model");
+    state.whisper.reload(model_pref.as_deref());
+    log::warn!("Vulkan engine failed on this driver — pack disabled, engine back on CPU");
+}
+
+fn download_to(app: &tauri::AppHandle, url: &str, dest: &Path, min_bytes: u64) -> Result<(), String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         // Per-read timeout, NOT overall — a 440 MB download on a slow link is
@@ -302,7 +491,7 @@ fn download_to(app: &tauri::AppHandle, url: &str, dest: &Path) -> Result<(), Str
     }
     drop(file);
 
-    if downloaded < MIN_PACK_BYTES {
+    if downloaded < min_bytes {
         std::fs::remove_file(dest).ok();
         return Err("The download was unexpectedly small — the server may be busy; try again in a minute".into());
     }

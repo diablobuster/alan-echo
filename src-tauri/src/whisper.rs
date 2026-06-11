@@ -351,7 +351,15 @@ impl WhisperEngine {
         let models = self.data_dir.join("models");
         let mut candidates: Vec<PathBuf> = Vec::new();
 
-        let vulkan = models.join("vulkan_release").join("Release").join("whisper-server.exe");
+        // A DISABLED marker (written by the packs.rs rollback when the
+        // directory rename is blocked by an open file handle) takes the
+        // Vulkan build out of rotation without touching its files.
+        let vulkan_dir = models.join("vulkan_release");
+        let vulkan = if vulkan_dir.join("DISABLED").exists() {
+            PathBuf::new() // never exists → never selected
+        } else {
+            vulkan_dir.join("Release").join("whisper-server.exe")
+        };
         if self.hw.gpu_name.is_some() {
             candidates.push(models.join("cuda_release").join("Release").join("whisper-server.exe"));
             candidates.push(vulkan.clone());

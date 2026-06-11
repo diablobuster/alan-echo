@@ -1,6 +1,6 @@
 [package]
 name = "alan-echo"
-version = "1.1.0"
+version = "1.2.0"
 description = "ALAN Echo — Voice-to-text dictation by ALAN Global Intelligence"
 authors = ["ALAN Global Intelligence"]
 edition = "2021"

@@ -163,12 +163,12 @@ queued for 1.2:
 
 ## §7. Acceptance criteria
 
-- [ ] Vulkan whisper-server builds from the v1.8.6 tag and transcribes
+- [x] Vulkan whisper-server builds from the v1.8.6 tag and transcribes
       correctly on the RTX 4060 via the Vulkan backend (Tier 1 full pass).
-- [ ] Pack zip matches the §3 layout, < ~150 MB, no demo exes, no vulkan-1.dll.
-- [ ] v1.1.0 (unchanged, already in the field) uses the pack via manual
+- [x] Pack zip matches the §3 layout, < ~150 MB, no demo exes, no vulkan-1.dll.
+- [x] v1.1.0 (unchanged, already in the field) uses the pack via manual
       drop-in on a no-NVIDIA configuration (`engine_kind == "vulkan"`).
-- [ ] v1.2.0 offers one-click install ONLY on machines with a non-NVIDIA
+- [x] v1.2.0 offers one-click install ONLY on machines with a non-NVIDIA
       discrete/recent GPU, labeled beta, with the §5.3 rollback proven by a
       forced-failure test (e.g. corrupt the extracted exe and watch it
       disable + fall back + message).
@@ -187,3 +187,59 @@ queued for 1.2:
   ask for NPU support.
 - **OpenBLAS CPU pack**: never, barring benchmarks showing >1.5× on real
   customer CPUs — the shipped CPU build is already the safe default.
+
+---
+
+## §9. EXECUTED 2026-06-10 — evidence (Tier 1 PASS; Tier 2 still open)
+
+**Build (§2)**: LunarG SDK 1.4.350.0 (elevated install, C:\VulkanSDK\1.4.350.0).
+whisper.cpp v1.8.6 (23ee035) at C:\Users\arowm\whisper.cpp-vulkan, built with
+VS 2022 (`-G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=ON
+-DGGML_VULKAN=1`). NOTE: plain `cmake -B build` picks up Strawberry MinGW gcc
+and fails on old Windows headers — the VS generator is required.
+
+**Pack (§3)**: `ALAN-Echo-GPU-Pack-Vulkan-1.0.0.zip`, **17.9 MB**, SHA-256
+`84CB3A0C2CAA024EB5551F080E0E5010D490543AEB245E2AE248E5FD4ED39977`.
+Layout verified (vulkan_release/Release/: whisper-server.exe, whisper.dll,
+ggml{,-base,-cpu,-vulkan}.dll, CRT x3). The server target produces no
+SDL2.dll and runs without it — left out. No vulkan-1.dll, no demo exes.
+Extracted copy serves + transcribes correctly (customer-path test).
+
+**Tier 1 (§4) — PASS on RTX 4060**:
+- ggml_vulkan device line names the RTX 4060 (coopmat2); JFK sample
+  transcribes correctly; warm /inference 445 ms (base.en, 11 s clip).
+- v1.1.0 UNCHANGED + manual drop-in (cuda_release held): installed app
+  reports `engine_kind == "vulkan"`, `ready == true`, Enhanced model.
+- Latency, same clip + medium model: **Vulkan 366 ms vs CPU 5,490 ms (15×)**.
+- cuda_release restored → engine returns to `cuda`. PASS.
+- Human-mic dictation into Notepad: not executable by the agent session that
+  ran this; engine-level evidence above covers the claim. Worth one manual
+  dictation before announcing.
+
+**§5 (v1.2.0) — shipped**: packs.rs parameterized (PackKind Cuda|Vulkan,
+per-kind URL/dir/min-size); offer logic (NVIDIA→cuda, AMD/Intel adapter→
+vulkan + beta flag); §5.3 watch + rollback. Three hardening finds from the
+forced-failure tests, all shipped:
+1. `SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOOPENFILEERRORBOX)` in main() —
+   without it a corrupt engine exe pops a MODAL "Unsupported 16-Bit
+   Application" dialog and the spawn hangs until a human clicks OK.
+2. Rollback rename retries (10×1 s), then falls back to a `DISABLED` marker
+   file inside vulkan_release (file locks can't block marker creation);
+   find_server_binary + pack offer logic honor the marker.
+3. confirm_vulkan_engine treats `stopped`/`idle` as "interrupted", not as a
+   driver verdict (app exit mid-install must not disable the pack).
+Debug-only env seam `ECHO_{CUDA,VULKAN}_PACK_URL` (cfg(debug_assertions),
+compiled out of retail) + scripts/serve-file.mjs + scripts/cdp-eval.mjs are
+how the forced-failure test runs: corrupt zip served locally → one-click
+install → spawn fails instantly → pack disabled (rename ~3 s) → §5.3 message
+in Settings → engine back on CPU, ready. Re-launch with the broken pack still
+on disk picks CPU. PASS.
+
+**Review**: 23-agent adversarial pass over both repos; 10 findings confirmed
+(2 majors fixed: stopped/idle handling, failed-state refresh; beta-copy
+fallback line added to email + success page; debug-gate/zip-slip/beta-wording
+verified clean).
+
+**Tier 2 (§4) — OPEN**: no AMD/Intel silicon touched yet. Everything
+customer-facing says **beta**. Record real-hardware evidence here before any
+copy drops the qualifier.

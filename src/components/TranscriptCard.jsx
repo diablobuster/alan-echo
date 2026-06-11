@@ -16,9 +16,10 @@ function formatTimestamp(iso) {
   const isYesterday = d.toDateString() === yesterday.toDateString()
 
   const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-  if (isToday) return `Today, ${time}`
-  if (isYesterday) return `Yesterday, ${time}`
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + `, ${time}`
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  if (isToday) return `Today, ${date} · ${time}`
+  if (isYesterday) return `Yesterday, ${date} · ${time}`
+  return `${date} · ${time}`
 }
 
 function formatDuration(sec) {
@@ -60,7 +61,7 @@ export default function TranscriptCard({ transcript, selected, isNew, onClick })
         )}
         <span style={{ flex: 1 }} />
         <span className="echo-mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>
-          {formatDuration(duration_seconds)}{duration_seconds && word_count ? ' · ' : ''}{word_count ? `${word_count}w` : ''}
+          {formatDuration(duration_seconds)}{duration_seconds && word_count ? ' · ' : ''}{word_count ? `${word_count} words` : ''}
         </span>
       </div>
       {/* Preview */}

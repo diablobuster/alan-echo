@@ -25,6 +25,10 @@
     "shell:default",
     "shell:allow-open",
     "dialog:default",
-    "notification:default"
+    "notification:default",
+    "autostart:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
   ]
 }

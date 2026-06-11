@@ -31,7 +31,8 @@ env_logger = "0.11"
 rand = "0.9"
 image = "0.25"
 base64 = "0.22"
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+tauri-plugin-autostart = "2"
 num_cpus = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

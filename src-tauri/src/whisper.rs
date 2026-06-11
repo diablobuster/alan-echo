@@ -17,9 +17,13 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-/// Hide the console window of spawned children (whisper-server, nvidia-smi).
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+const SERVER_BINARY_NAME: &str = "whisper-server.exe";
+#[cfg(not(target_os = "windows"))]
+const SERVER_BINARY_NAME: &str = "whisper-server";
 
 const HOST: &str = "127.0.0.1";
 const BASE_PORT: u16 = 8178;
@@ -82,7 +86,7 @@ pub struct WhisperEngine {
     inner: Arc<Mutex<Inner>>,
     hw: Hardware,
     data_dir: PathBuf,
-    language: String,
+    language: Mutex<String>,
 }
 
 impl WhisperEngine {
@@ -103,7 +107,7 @@ impl WhisperEngine {
             })),
             hw,
             data_dir: data_dir.to_path_buf(),
-            language: "en".to_string(),
+            language: Mutex::new("en".to_string()),
         }
     }
 
@@ -157,7 +161,7 @@ impl WhisperEngine {
 
         let inner = Arc::clone(&self.inner);
         let threads = self.hw.physical_cores.max(1);
-        let language = self.language.clone();
+        let language = self.language.lock().clone();
 
         std::thread::Builder::new()
             .name("whisper-server-init".into())
@@ -230,6 +234,14 @@ impl WhisperEngine {
     /// Kill the current server and start a fresh one (e.g. after a model change).
     pub fn reload(&self, model_pref: Option<&str>) {
         self.start(model_pref);
+    }
+
+    pub fn set_language(&self, lang: &str) {
+        *self.language.lock() = lang.to_string();
+    }
+
+    pub fn language(&self) -> String {
+        self.language.lock().clone()
     }
 
     pub fn shutdown(&self) {
@@ -319,7 +331,7 @@ impl WhisperEngine {
         Ok(TranscriptionResult {
             text: text.trim().to_string(),
             duration_seconds: duration,
-            language: self.language.clone(),
+            language: self.language.lock().clone(),
         })
     }
 
@@ -349,6 +361,7 @@ impl WhisperEngine {
     /// its own directory with matching DLLs.
     fn find_server_binary(&self) -> Result<PathBuf, String> {
         let models = self.data_dir.join("models");
+        let bin = SERVER_BINARY_NAME;
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         // A DISABLED marker (written by the packs.rs rollback when the
@@ -356,34 +369,35 @@ impl WhisperEngine {
         // Vulkan build out of rotation without touching its files.
         let vulkan_dir = models.join("vulkan_release");
         let vulkan = if vulkan_dir.join("DISABLED").exists() {
-            PathBuf::new() // never exists → never selected
+            PathBuf::new()
         } else {
-            vulkan_dir.join("Release").join("whisper-server.exe")
+            vulkan_dir.join("Release").join(bin)
         };
         if self.hw.gpu_name.is_some() {
-            candidates.push(models.join("cuda_release").join("Release").join("whisper-server.exe"));
+            candidates.push(models.join("cuda_release").join("Release").join(bin));
             candidates.push(vulkan.clone());
-            candidates.push(models.join("whisper-server.exe"));
-            candidates.push(models.join("Release").join("whisper-server.exe"));
+            candidates.push(models.join(bin));
+            candidates.push(models.join("Release").join(bin));
         } else {
             candidates.push(vulkan.clone());
-            candidates.push(models.join("Release").join("whisper-server.exe"));
+            candidates.push(models.join("Release").join(bin));
+            #[cfg(target_os = "windows")]
             candidates.push(models.join("whisper-server-cpu.exe"));
-            candidates.push(models.join("whisper-server.exe"));
-            candidates.push(models.join("cuda_release").join("Release").join("whisper-server.exe"));
+            candidates.push(models.join(bin));
+            candidates.push(models.join("cuda_release").join("Release").join(bin));
         }
 
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                candidates.push(dir.join("whisper-server.exe"));
-                candidates.push(dir.join("models").join("whisper-server.exe"));
+                candidates.push(dir.join(bin));
+                candidates.push(dir.join("models").join(bin));
             }
         }
 
         candidates
             .into_iter()
             .find(|p| p.exists())
-            .ok_or_else(|| "whisper-server.exe not found in the models directory".to_string())
+            .ok_or_else(|| format!("{} not found in the models directory", bin))
     }
 
     fn model_dirs(&self) -> Vec<PathBuf> {
@@ -403,6 +417,16 @@ impl WhisperEngine {
         model_file_candidates(name)
             .iter()
             .any(|v| dirs.iter().any(|d| d.join(v).exists()))
+    }
+
+    /// Check if any multilingual model exists on disk (needed for non-English).
+    pub fn has_multilingual_model(&self) -> bool {
+        let dirs = self.model_dirs();
+        let names = ["base", "small", "medium", "large-v3", "large-v3-turbo", "tiny"];
+        names.iter().any(|name| {
+            model_file_candidates_for_lang(name, "auto").iter()
+                .any(|variant| dirs.iter().any(|d| d.join(variant).exists()))
+        })
     }
 
     /// Honor the user's model preference; fall back to the best model that
@@ -432,8 +456,9 @@ impl WhisperEngine {
 
         let dirs = self.model_dirs();
 
+        let lang = self.language.lock().clone();
         for name in &order {
-            for variant in model_file_candidates(name) {
+            for variant in model_file_candidates_for_lang(name, &lang) {
                 for dir in &dirs {
                     let p = dir.join(&variant);
                     if p.exists() {
@@ -528,14 +553,20 @@ fn binary_kind(path: &Path) -> String {
 
 fn detect_hardware() -> Hardware {
     let physical_cores = num_cpus::get_physical().max(1);
+    let (gpu_name, vram_mb) = detect_nvidia_gpu();
+    Hardware { gpu_name, vram_mb, physical_cores }
+}
 
+/// Probe for an NVIDIA GPU via nvidia-smi. Returns (None, None) on Macs
+/// (no NVIDIA GPUs since 2019) and on machines without NVIDIA drivers.
+#[cfg(target_os = "windows")]
+fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
     let mut cmd = Command::new("nvidia-smi");
     cmd.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
     cmd.stdin(Stdio::null());
-    #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let (gpu_name, vram_mb) = match cmd.output() {
+    match cmd.output() {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             match stdout.lines().next() {
@@ -549,19 +580,31 @@ fn detect_hardware() -> Hardware {
             }
         }
         _ => (None, None),
-    };
-
-    Hardware { gpu_name, vram_mb, physical_cores }
+    }
 }
 
-/// Filename candidates for a model name, in preference order. English-only
-/// (.en) variants outrank multilingual at equal size — the app always dictates
-/// with `-l en` and the retail installer bundles ggml-base.en.bin. Quantized
-/// variants outrank f16 (smaller, ~equal accuracy). Nonexistent combinations
-/// (e.g. large-v3.en) are harmless — they simply never match a file.
+#[cfg(not(target_os = "windows"))]
+fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
+    // macOS hasn't shipped NVIDIA drivers since Mojave (2019).
+    // Metal/CoreML acceleration is a v2 item.
+    (None, None)
+}
+
+/// Filename candidates for a model name, in preference order. For English,
+/// .en variants outrank multilingual at equal size. For other languages,
+/// only multilingual variants work. Quantized variants outrank f16.
 fn model_file_candidates(name: &str) -> Vec<String> {
+    model_file_candidates_for_lang(name, "en")
+}
+
+fn model_file_candidates_for_lang(name: &str, lang: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(8);
-    for stem in [format!("{}.en", name), name.to_string()] {
+    let stems: Vec<String> = if lang == "en" {
+        vec![format!("{}.en", name), name.to_string()]
+    } else {
+        vec![name.to_string()]
+    };
+    for stem in &stems {
         for quant in ["-q5_0", "-q5_1", "-q8_0", ""] {
             out.push(format!("ggml-{}{}.bin", stem, quant));
         }

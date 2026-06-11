@@ -97,6 +97,17 @@ function StepMic() {
       <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 10px', lineHeight: 1.5 }}>
         ALAN Echo listens through this device. The system default works for most setups.
       </p>
+      {devices.length === 0 && (
+        <div style={{
+          padding: '10px 12px', marginBottom: 10, fontSize: 12, lineHeight: 1.5,
+          background: 'color-mix(in srgb, var(--accent-yellow) 8%, var(--bg-card))',
+          border: '1px solid color-mix(in srgb, var(--accent-yellow) 30%, transparent)',
+          borderRadius: 'var(--echo-radius-sm)', color: 'var(--text-primary)',
+        }}>
+          <Icon name="alert" size={12} color="var(--accent-yellow)" style={{ marginRight: 6, verticalAlign: '-2px' }} />
+          No microphone detected. Make sure a microphone is connected and that Windows allows this app to access it (Settings &rarr; Privacy &amp; Security &rarr; Microphone).
+        </div>
+      )}
       <select
         value={selected}
         onChange={e => choose(e.target.value)}
@@ -119,10 +130,39 @@ function StepMic() {
 }
 
 function StepTest() {
-  const [state, setState] = useState('idle') // idle | recording | processing | done | error
+  const [state, setState] = useState('idle') // idle | recording | processing | done | error | warming
   const [result, setResult] = useState('')
+  const [engineReady, setEngineReady] = useState(false)
   const stateRef = useRef(state)
   stateRef.current = state
+
+  // Poll for engine readiness — transcription requires the whisper server to
+  // have finished loading the model. Without this check the user hits Record,
+  // waits through a long backend block, and eventually gets a cryptic timeout.
+  useEffect(() => {
+    let cancelled = false
+    async function poll() {
+      for (let i = 0; i < 120; i++) {
+        if (cancelled) return
+        try {
+          const info = await invoke('get_engine_info')
+          if (info?.ready) { setEngineReady(true); return }
+          if (info?.status?.startsWith('failed')) {
+            // Let the user try — transcribe() has its own restart logic.
+            setEngineReady(true)
+            return
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 500))
+      }
+      if (!cancelled) setEngineReady(true) // timed out — unlock anyway
+    }
+    invoke('get_engine_info').then(info => {
+      if (info?.ready || info?.status?.startsWith('failed')) setEngineReady(true)
+      else poll()
+    }).catch(() => setEngineReady(true))
+    return () => { cancelled = true }
+  }, [])
 
   // Discard an in-flight recording if the user clicks Next/Back/Skip mid-test —
   // an abandoned recording would otherwise block dictation until restart.
@@ -170,10 +210,15 @@ function StepTest() {
     }
   }
 
+  const warming = !engineReady
+
   return (
     <div>
       <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
-        Press Record, say a sentence — for example <em>"This is my first ALAN Echo dictation"</em> — then press Stop.
+        {warming
+          ? 'The speech engine is still warming up — this usually takes a few seconds...'
+          : <>Press Record, say a sentence — for example <em>"This is my first ALAN Echo dictation"</em> — then press Stop.</>
+        }
       </p>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         {state === 'recording' ? (
@@ -181,8 +226,10 @@ function StepTest() {
             <Icon name="x" size={12} color="#fff" /> Stop
           </Btn>
         ) : (
-          <Btn size="sm" onClick={start} style={{ background: 'var(--accent-green)' }}>
-            <Icon name="mic" size={12} color="#fff" /> {state === 'done' ? 'Record again' : 'Record'}
+          <Btn size="sm" onClick={start} disabled={warming}
+            style={{ background: warming ? 'var(--bg-tertiary)' : 'var(--accent-green)' }}>
+            <Icon name="mic" size={12} color={warming ? 'var(--text-faint)' : '#fff'} />
+            {' '}{warming ? 'Warming up...' : state === 'done' ? 'Record again' : 'Record'}
           </Btn>
         )}
         {state === 'recording' && (

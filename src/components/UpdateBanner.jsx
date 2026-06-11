@@ -50,7 +50,7 @@ export default function UpdateBanner() {
             onClick={() => {
               if (update.download_url) {
                 setStage('downloading')
-                invoke('download_update', { downloadUrl: update.download_url }).catch(e => {
+                invoke('download_update', { downloadUrl: update.download_url, expectedSha256: update.sha256 || null }).catch(e => {
                   setStage('error')
                   console.error('[update]', e)
                 })
@@ -100,6 +100,12 @@ export default function UpdateBanner() {
             {percent}%
           </span>
         </div>
+      )}
+
+      {stage === 'verifying' && (
+        <span style={{ fontSize: 11, color: 'var(--echo-accent)' }}>
+          Verifying download...
+        </span>
       )}
 
       {stage === 'launching' && (

@@ -27,12 +27,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' http://localhost:*; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' asset: https://asset.localhost http://localhost:* data: blob:"
+      "csp": "default-src 'self' http://localhost:*; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' asset: https://asset.localhost http://localhost:* data: blob:; media-src 'self' data: blob:"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "dmg"],
     "resources": {
       "resources/models": "models"
     },
@@ -52,8 +52,12 @@
         "installerIcon": "icons/icon.ico",
         "installMode": "currentUser"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     }
   },
-  "plugins": {}
-
+  "plugins": {
+    "autostart": {}
+  }
 }

@@ -92,12 +92,21 @@ impl PackKind {
     }
 }
 
+#[cfg(target_os = "windows")]
+const PACK_BINARY_NAME: &str = "whisper-server.exe";
+#[cfg(not(target_os = "windows"))]
+const PACK_BINARY_NAME: &str = "whisper-server";
+
 fn pack_server_exe(data_dir: &Path, kind: PackKind) -> std::path::PathBuf {
     data_dir
         .join("models")
         .join(kind.dir_name())
         .join("Release")
-        .join("whisper-server.exe")
+        .join(PACK_BINARY_NAME)
+}
+
+fn pack_server_exe_relative(extracted: &Path) -> std::path::PathBuf {
+    extracted.join("Release").join(PACK_BINARY_NAME)
 }
 
 /// Installed AND not disabled by a rollback — what "installed" means to the
@@ -244,50 +253,86 @@ pub fn test_gpu(state: State<Arc<AppState>>) -> Result<GpuTestResult, String> {
 /// purpose: that one is launch-time-cached engine state, this one is a live
 /// user-initiated test).
 fn probe_nvidia() -> (Option<String>, Option<u64>) {
-    let mut cmd = Command::new("nvidia-smi");
-    cmd.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
-    cmd.stdin(Stdio::null());
+    #[cfg(not(target_os = "windows"))]
+    {
+        return (None, None);
+    }
     #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    {
+        let mut cmd = Command::new("nvidia-smi");
+        cmd.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
+        cmd.stdin(Stdio::null());
+        cmd.creation_flags(CREATE_NO_WINDOW);
 
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            match stdout.lines().next() {
-                Some(line) if line.contains(',') => {
-                    let mut parts = line.rsplitn(2, ',');
-                    let vram = parts.next().and_then(|v| v.trim().parse::<u64>().ok());
-                    let name = parts.next().map(|n| n.trim().to_string());
-                    (name, vram)
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                match stdout.lines().next() {
+                    Some(line) if line.contains(',') => {
+                        let mut parts = line.rsplitn(2, ',');
+                        let vram = parts.next().and_then(|v| v.trim().parse::<u64>().ok());
+                        let name = parts.next().map(|n| n.trim().to_string());
+                        (name, vram)
+                    }
+                    _ => (None, None),
                 }
-                _ => (None, None),
             }
+            _ => (None, None),
         }
-        _ => (None, None),
     }
 }
 
-/// All display adapters via CIM — names AMD/Intel hardware so the verdict can
-/// offer the beta Vulkan pack ("we see your Radeon …") instead of pretending
-/// the machine has no GPU. (wmic is deprecated on Win11 24H2+.)
+/// All display adapters reported by the OS. On Windows uses CIM; on macOS
+/// uses system_profiler. The names feed the Vulkan offer logic and the
+/// test_gpu result.
 fn probe_display_adapters() -> Vec<String> {
-    let mut cmd = Command::new("powershell");
-    cmd.args([
-        "-NoProfile",
-        "-Command",
-        "(Get-CimInstance Win32_VideoController | Where-Object { $_.Name }).Name",
-    ]);
-    cmd.stdin(Stdio::null());
     #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    {
+        let mut cmd = Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "(Get-CimInstance Win32_VideoController | Where-Object { $_.Name }).Name",
+        ]);
+        cmd.stdin(Stdio::null());
+        cmd.creation_flags(CREATE_NO_WINDOW);
 
-    match cmd.output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-        _ => Vec::new(),
+        match cmd.output() {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("system_profiler");
+        cmd.args(["SPDisplaysDataType", "-detailLevel", "mini"]);
+        cmd.stdin(Stdio::null());
+
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                stdout
+                    .lines()
+                    .filter_map(|l| {
+                        let trimmed = l.trim();
+                        if trimmed.starts_with("Chipset Model:") {
+                            Some(trimmed.trim_start_matches("Chipset Model:").trim().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Vec::new()
     }
 }
 
@@ -342,11 +387,8 @@ fn run_install(app: &tauri::AppHandle, state: &Arc<AppState>, kind: PackKind) ->
     std::fs::remove_file(&zip_path).ok();
     extract_result?;
 
-    // The pack zip contains <dir>/Release/whisper-server.exe — verify BEFORE
-    // touching the live models/ contents, then swap via rename so a failure
-    // can never leave a half-installed engine in place.
     let extracted = tmp_dir.join(kind.dir_name());
-    if !extracted.join("Release").join("whisper-server.exe").exists() {
+    if !pack_server_exe_relative(&extracted).exists() {
         std::fs::remove_dir_all(&tmp_dir).ok();
         return Err("The downloaded pack is incomplete — try again, or email support".into());
     }

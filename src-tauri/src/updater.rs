@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::PathBuf;
+use sha2::{Sha256, Digest};
+use std::io::{Read as _, Write};
 use tauri::{Emitter, AppHandle};
 
 const VERSION_URL: &str = "https://alanglobalintelligence.com/api/echo/version";
+
+fn current_platform() -> &'static str {
+    if cfg!(target_os = "macos") { "mac" } else { "windows" }
+}
 
 #[derive(Debug, Deserialize)]
 struct VersionResponse {
@@ -23,17 +27,18 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub latest_version: String,
     pub download_url: Option<String>,
+    pub sha256: Option<String>,
     pub size_mb: Option<String>,
     pub release_date: Option<String>,
 }
 
 pub fn check_for_update(current_version: &str) -> Result<UpdateInfo, String> {
-    let resp: VersionResponse = ureq::get(VERSION_URL)
+    let url = format!("{}?platform={}", VERSION_URL, current_platform());
+    let resp: VersionResponse = ureq::get(&url)
         .timeout(std::time::Duration::from_secs(10))
         .call()
         .map_err(|e| format!("Version check failed: {}", e))?
-        .body_mut()
-        .read_json()
+        .into_json()
         .map_err(|e| format!("Version parse failed: {}", e))?;
 
     let available = version_gt(&resp.version, current_version);
@@ -43,6 +48,7 @@ pub fn check_for_update(current_version: &str) -> Result<UpdateInfo, String> {
         current_version: current_version.to_string(),
         latest_version: resp.version,
         download_url: resp.download_url,
+        sha256: resp.sha256,
         size_mb: resp.size_mb,
         release_date: resp.release_date,
     })
@@ -51,9 +57,14 @@ pub fn check_for_update(current_version: &str) -> Result<UpdateInfo, String> {
 pub fn download_and_launch_update(
     app: &AppHandle,
     download_url: &str,
+    expected_sha256: Option<&str>,
     data_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let installer_path = data_dir.join("ALAN-Echo-Update.exe");
+    let installer_path = if cfg!(target_os = "macos") {
+        data_dir.join("ALAN-Echo-Update.dmg")
+    } else {
+        data_dir.join("ALAN-Echo-Update.exe")
+    };
 
     app.emit("update_progress", serde_json::json!({ "stage": "downloading", "percent": 0 }))
         .ok();
@@ -64,16 +75,14 @@ pub fn download_and_launch_update(
         .map_err(|e| format!("Download failed: {}", e))?;
 
     let total_size: u64 = resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
+        .header("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
     let mut file = std::fs::File::create(&installer_path)
         .map_err(|e| format!("Could not create installer file: {}", e))?;
 
-    let mut reader = resp.into_body().into_reader();
+    let mut reader = resp.into_reader();
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 65536];
 
@@ -92,14 +101,57 @@ pub fn download_and_launch_update(
     file.flush().map_err(|e| format!("Flush error: {}", e))?;
     drop(file);
 
+    if let Some(expected) = expected_sha256 {
+        app.emit("update_progress", serde_json::json!({ "stage": "verifying" })).ok();
+        let mut hasher = Sha256::new();
+        let mut f = std::fs::File::open(&installer_path)
+            .map_err(|e| format!("Could not open installer for verification: {}", e))?;
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = f.read(&mut buf).map_err(|e| format!("Read error during verification: {}", e))?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        if !hash.eq_ignore_ascii_case(expected) {
+            let _ = std::fs::remove_file(&installer_path);
+            return Err(format!("Download integrity check failed: expected {} got {}", expected, hash));
+        }
+    }
+
     app.emit("update_progress", serde_json::json!({ "stage": "launching" })).ok();
 
-    // Launch the installer and exit the app so it can upgrade in place
-    std::process::Command::new(&installer_path)
+    launch_installer(app, &installer_path)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_installer(app: &AppHandle, dmg_path: &std::path::Path) -> Result<(), String> {
+    // Mount the DMG — the user drags ALAN Echo to Applications from the Finder
+    // window that opens. We don't exit: the user keeps the current version
+    // running until they relaunch.
+    std::process::Command::new("open")
+        .arg(dmg_path)
+        .spawn()
+        .map_err(|e| format!("Could not open update DMG: {}", e))?;
+
+    app.emit(
+        "update_progress",
+        serde_json::json!({
+            "stage": "mac_drag_install",
+            "message": "Drag the new ALAN Echo to your Applications folder to complete the update, then relaunch."
+        }),
+    )
+    .ok();
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launch_installer(_app: &AppHandle, exe_path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new(exe_path)
         .spawn()
         .map_err(|e| format!("Could not launch installer: {}", e))?;
 
-    // Give the installer a moment to start, then exit
     std::thread::sleep(std::time::Duration::from_millis(500));
     std::process::exit(0);
 }

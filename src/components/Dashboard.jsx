@@ -357,6 +357,7 @@ export default function Dashboard() {
           onDone={async () => {
             setShowOnboarding(false)
             try { await invoke('set_setting', { key: 'onboarding_complete', value: true }) } catch {}
+            try { await invoke('set_autostart', { enabled: true }) } catch {}
             loadTranscripts()
             loadStats()
           }}

@@ -107,8 +107,13 @@ fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Valu
             }
         }
         "whisper_model" => {
-            // Restart whisper-server with the newly selected model (async).
             state.whisper.reload(value.as_str());
+        }
+        "language" => {
+            if let Some(lang) = value.as_str() {
+                state.whisper.set_language(lang);
+                state.whisper.reload(None);
+            }
         }
         _ => {}
     }
@@ -364,8 +369,6 @@ fn deliver_text(app: &tauri::AppHandle, state: &AppState, text: &str) -> bool {
         return false;
     }
 
-    // Never paste into our own dashboard (e.g. recording started via the
-    // in-app button) — the clipboard copy is enough there.
     #[cfg(target_os = "windows")]
     {
         let own_window = app
@@ -374,6 +377,12 @@ fn deliver_text(app: &tauri::AppHandle, state: &AppState, text: &str) -> bool {
             .map(|h| h.0 as isize == hwnd)
             .unwrap_or(false);
         if own_window {
+            return false;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if hwnd == std::process::id() as isize {
             return false;
         }
     }
@@ -449,6 +458,11 @@ async fn read_wav_base64(wav_path: String) -> Result<String, String> {
     }).await.map_err(|e| format!("Task failed: {}", e))?
 }
 
+#[tauri::command]
+fn has_multilingual_model(state: State<Arc<AppState>>) -> bool {
+    state.whisper.has_multilingual_model()
+}
+
 // ── Text cleanup ─────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -465,14 +479,33 @@ fn check_for_update(app: tauri::AppHandle) -> Result<updater::UpdateInfo, String
 }
 
 #[tauri::command]
-fn download_update(app: tauri::AppHandle, state: State<Arc<AppState>>, download_url: String) -> Result<(), String> {
+fn download_update(app: tauri::AppHandle, state: State<Arc<AppState>>, download_url: String, expected_sha256: Option<String>) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
     std::thread::spawn(move || {
-        if let Err(e) = updater::download_and_launch_update(&app, &download_url, &data_dir) {
+        if let Err(e) = updater::download_and_launch_update(&app, &download_url, expected_sha256.as_deref(), &data_dir) {
             let _ = app.emit("update_progress", serde_json::json!({ "stage": "error", "error": e }));
         }
     });
     Ok(())
+}
+
+// ── Autostart ───────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
 }
 
 // ── Hotkeys ──────────────────────────────────────────────────────────
@@ -555,10 +588,10 @@ fn main() {
     let license_key = settings.get_str("license_key");
     let cleanup_level = settings.get_str("text_cleanup_level").unwrap_or_else(|| "standard".into());
     let model_pref = settings.get_str("whisper_model");
+    let language = settings.get_str("language").unwrap_or_else(|| "en".into());
 
-    // Spawn whisper-server immediately so the model is warm by the time the
-    // user dictates. Loading happens on a background thread.
     let whisper_engine = Arc::new(WhisperEngine::new(&data_dir));
+    whisper_engine.set_language(&language);
     whisper_engine.start(model_pref.as_deref());
 
     let app_state = Arc::new(AppState {
@@ -599,6 +632,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(app_state.clone())
         .on_window_event(|window, event| {
             // X closes to tray; only the tray menu's Quit exits the app.
@@ -752,6 +789,7 @@ fn main() {
             transcribe,
             check_whisper_ready,
             get_engine_info,
+            has_multilingual_model,
             list_models,
             get_hotkey_info,
             clean_text,
@@ -762,6 +800,8 @@ fn main() {
             packs::test_gpu,
             check_for_update,
             download_update,
+            get_autostart,
+            set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ALAN Echo");

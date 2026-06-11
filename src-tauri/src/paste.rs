@@ -134,12 +134,78 @@ mod win {
 #[cfg(target_os = "windows")]
 pub use win::{foreground_window, paste_into};
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::process::Command;
+
+    /// Capture the PID of the frontmost application (the one receiving keystrokes).
+    pub fn foreground_window() -> isize {
+        let output = Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to unix id of first process whose frontmost is true",
+            ])
+            .output()
+            .ok();
+        match output {
+            Some(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<isize>()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// Re-focus the application that was frontmost when recording started,
+    /// then simulate Cmd+V via System Events. Requires Accessibility access.
+    pub fn paste_into(pid: isize) -> Result<(), String> {
+        if pid <= 0 {
+            return Err("No target application captured".into());
+        }
+
+        let script = format!(
+            "tell application \"System Events\"\n\
+             set targetProc to first process whose unix id is {}\n\
+             set frontmost of targetProc to true\n\
+             delay 0.15\n\
+             keystroke \"v\" using command down\n\
+             end tell",
+            pid
+        );
+
+        let result = Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .map_err(|e| format!("Auto-paste failed: {}", e))?;
+
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            if stderr.contains("not allowed assistive access")
+                || stderr.contains("osascript is not allowed")
+            {
+                return Err(
+                    "Auto-paste requires Accessibility access. \
+                     Open System Settings \u{2192} Privacy & Security \u{2192} Accessibility, \
+                     and enable ALAN Echo."
+                        .into(),
+                );
+            }
+            return Err(format!("Auto-paste failed: {}", stderr.trim()));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use mac::{foreground_window, paste_into};
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn foreground_window() -> isize {
     0
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn paste_into(_hwnd: isize) -> Result<(), String> {
-    Err("Auto-paste is only supported on Windows".into())
+    Err("Auto-paste is not supported on this platform".into())
 }

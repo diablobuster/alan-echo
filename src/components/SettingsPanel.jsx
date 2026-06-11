@@ -23,7 +23,23 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [preview, setPreview] = useState(null)
   const [modelError, setModelError] = useState(null)
   const [models, setModels] = useState([])
+  const [autostart, setAutostart] = useState(false)
+  const [hasMultilingualModel, setHasMultilingualModel] = useState(true)
   const pollRef = useRef(null)
+
+  const LANGUAGES = [
+    { value: 'en', label: 'English' },
+    { value: 'es', label: 'Spanish', beta: true },
+    { value: 'fr', label: 'French', beta: true },
+    { value: 'de', label: 'German', beta: true },
+    { value: 'pt', label: 'Portuguese', beta: true },
+    { value: 'ja', label: 'Japanese', beta: true },
+    { value: 'zh', label: 'Chinese', beta: true },
+    { value: 'ko', label: 'Korean', beta: true },
+    { value: 'it', label: 'Italian', beta: true },
+    { value: 'nl', label: 'Dutch', beta: true },
+    { value: 'auto', label: 'Auto-detect', beta: true },
+  ]
 
   const loadEngineInfo = async () => {
     try {
@@ -55,6 +71,8 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
         const devs = await invoke('list_audio_devices')
         setDevices(devs || [])
         try { setModels(await invoke('list_models') || []) } catch {}
+        try { setAutostart(await invoke('get_autostart')) } catch {}
+        try { setHasMultilingualModel(await invoke('has_multilingual_model')) } catch {}
         const info = await loadEngineInfo()
         // Resume polling if the panel reopens while a model is still loading.
         if (info && !info.ready && !info.status?.startsWith('failed')) startEnginePoll()
@@ -161,12 +179,51 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
           <EngineStatus engine={engine} />
 
+          <SettingsRow label="Language" hint="Which language you'll dictate in">
+            <select
+              value={settings.language || 'en'}
+              onChange={async e => {
+                const lang = e.target.value
+                if (lang !== 'en' && !hasMultilingualModel) {
+                  setModelError('Non-English requires the multilingual model (~148 MB). Coming soon — please use English for now.')
+                  return
+                }
+                setModelError(null)
+                await updateSetting('language', lang)
+                loadEngineInfo()
+                startEnginePoll()
+              }}
+              style={{
+                background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+                borderRadius: 'var(--echo-radius-sm)', padding: '4px 8px',
+                fontSize: 11, fontFamily: 'var(--font-sans)', color: 'var(--text-primary)',
+                width: '100%',
+              }}
+            >
+              {LANGUAGES.map(l => (
+                <option key={l.value} value={l.value}>
+                  {l.label}{l.beta ? ' (beta)' : ''}
+                </option>
+              ))}
+            </select>
+          </SettingsRow>
+
           <GpuTestRow savedResult={settings.gpu_test} />
 
           <GpuPackRow onEngineRestart={() => { loadEngineInfo(); startEnginePoll() }} />
 
           {/* Microphone */}
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Microphone</div>
+          {devices.length === 0 && (
+            <div style={{
+              padding: '8px 10px', marginBottom: 8, fontSize: 11, lineHeight: 1.5,
+              background: 'color-mix(in srgb, var(--accent-yellow) 8%, var(--bg-card))',
+              border: '1px solid color-mix(in srgb, var(--accent-yellow) 30%, transparent)',
+              borderRadius: 'var(--echo-radius-sm)', color: 'var(--text-primary)',
+            }}>
+              No microphone detected. Make sure a microphone is connected and that Windows allows this app to access it (Settings &rarr; Privacy &amp; Security &rarr; Microphone).
+            </div>
+          )}
           <SettingsRow label="Input device">
             <select
               value={selectedDevice || ''}
@@ -197,6 +254,13 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
           <SettingsRow label="Auto-paste" hint="Automatically paste transcription into focused app">
             <Toggle checked={settings.auto_paste !== false} onChange={v => updateSetting('auto_paste', v)} />
+          </SettingsRow>
+
+          <SettingsRow label="Launch at startup" hint="Start ALAN Echo when you log in">
+            <Toggle checked={autostart} onChange={async v => {
+              setAutostart(v)
+              try { await invoke('set_autostart', { enabled: v }) } catch (e) { console.error('Autostart error:', e); setAutostart(!v) }
+            }} />
           </SettingsRow>
 
           <SettingsRow label="Sound feedback" hint="Play beeps when recording starts and stops">
@@ -607,9 +671,35 @@ export function MicTest() {
   const [state, setState] = useState('idle') // idle | recording | playing
   const [audioUrl, setAudioUrl] = useState(null)
   const [error, setError] = useState(null)
+  const [engineReady, setEngineReady] = useState(null) // null = checking, true/false
   const audioRef = useRef(null)
   const stateRef = useRef(state)
   stateRef.current = state
+
+  // Check engine readiness on mount — the mic test itself doesn't need the
+  // engine, but recording requires the backend to be fully initialised and
+  // the license to be validated. Poll briefly so we know when to enable.
+  useEffect(() => {
+    let cancelled = false
+    async function check() {
+      for (let i = 0; i < 60; i++) {
+        if (cancelled) return
+        try {
+          const info = await invoke('get_engine_info')
+          if (info?.ready) { setEngineReady(true); return }
+          if (info?.status?.startsWith('failed')) { setEngineReady(true); return } // let recording attempt surface its own error
+        } catch {}
+        await new Promise(r => setTimeout(r, 500))
+      }
+      // Timed out — enable anyway so the user isn't stuck
+      if (!cancelled) setEngineReady(true)
+    }
+    invoke('get_engine_info').then(info => {
+      if (info?.ready || info?.status?.startsWith('failed')) setEngineReady(true)
+      else check()
+    }).catch(() => setEngineReady(true))
+    return () => { cancelled = true }
+  }, [])
 
   // Discard an in-flight recording if the panel unmounts mid-test — an
   // abandoned recording would otherwise block dictation until restart.
@@ -640,33 +730,51 @@ export function MicTest() {
         const url = `data:audio/wav;base64,${b64}`
         setAudioUrl(url)
         setState('playing')
-        setTimeout(() => { if (audioRef.current) audioRef.current.play().catch(() => {}) }, 100)
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.play().catch((e) => {
+              console.error('Audio playback failed:', e)
+              setError('Playback failed — your mic is working, but the browser could not play the audio back.')
+            })
+          }
+        }, 100)
       } else {
+        setError('No audio was captured — check that your microphone is connected.')
         setState('idle')
       }
     } catch (e) {
       console.error('Stop failed:', e)
+      setError('Recording failed — ' + String(e))
       setState('idle')
     }
   }
 
   const reset = () => {
     setAudioUrl(null)
+    setError(null)
     setState('idle')
   }
+
+  const warming = engineReady === null || engineReady === false
 
   return (
     <div style={{ padding: '8px 0' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
         <div>
           <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>Test microphone</div>
-          <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>Record and play back to verify</div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>
+            {warming ? 'Warming up the speech engine...' : 'Record and play back to verify'}
+          </div>
         </div>
         {state === 'idle' && (
-          <button type="button" onClick={startTest} style={{
-            padding: '4px 14px', fontSize: 11, background: 'var(--accent-green)', color: '#fff',
-            border: 'none', borderRadius: 'var(--echo-radius-sm)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontWeight: 500,
-          }}>Record</button>
+          <button type="button" onClick={startTest} disabled={warming} style={{
+            padding: '4px 14px', fontSize: 11,
+            background: warming ? 'var(--bg-tertiary)' : 'var(--accent-green)',
+            color: warming ? 'var(--text-faint)' : '#fff',
+            border: 'none', borderRadius: 'var(--echo-radius-sm)',
+            cursor: warming ? 'default' : 'pointer',
+            fontFamily: 'var(--font-sans)', fontWeight: 500,
+          }}>{warming ? 'Warming up...' : 'Record'}</button>
         )}
         {state === 'recording' && (
           <button type="button" onClick={stopTest} style={{

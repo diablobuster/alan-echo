@@ -1,0 +1,75 @@
+name: Build macOS
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Prepare macOS resources
+        run: |
+          mkdir -p src-tauri/resources/models
+          # The macOS build bundles the CPU whisper-server binary.
+          # For CI, download or compile it here. Skip if not available
+          # (the app works without it — it just shows "engine not found").
+          echo "Whisper binary must be placed at src-tauri/resources/models/whisper-server"
+          echo "and the model at src-tauri/resources/models/ggml-base.en.bin"
+          echo "These are fetched separately — see release checklist."
+
+      # Build for Apple Silicon (arm64) — the primary Mac target
+      - name: Build (aarch64)
+        run: npx tauri build --target aarch64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
+
+      # Build for Intel Macs (x86_64) — secondary target
+      - name: Build (x86_64)
+        run: npx tauri build --target x86_64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
+
+      - name: Upload arm64 DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: alan-echo-macos-arm64
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+      - name: Upload x86_64 DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: alan-echo-macos-x86_64
+          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+
+      - name: Create release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          draft: true

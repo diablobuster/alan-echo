@@ -983,7 +983,10 @@ fn main() {
             if let Some(icon) = tray_icon {
                 tray_builder = tray_builder.icon(icon);
             }
-            tray_builder.build(app)?;
+            match tray_builder.build(app) {
+                Ok(_) => {},
+                Err(e) => log::warn!("Failed to create tray icon: {}", e),
+            }
 
             // Global shortcuts. Ctrl+Shift+Escape is reserved by Windows
             // (Task Manager), so cancel uses X with a Backspace fallback.

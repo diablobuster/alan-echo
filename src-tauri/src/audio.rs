@@ -75,12 +75,16 @@ impl RecorderHandle {
     pub fn new() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("audio-recorder".into())
             .spawn(move || {
                 recorder_thread(cmd_rx);
-            })
-            .expect("Failed to spawn recorder thread");
+            });
+
+        match handle {
+            Ok(_) => {},
+            Err(e) => log::error!("Failed to spawn recorder thread: {}", e),
+        }
 
         Self { cmd_tx: Mutex::new(cmd_tx) }
     }

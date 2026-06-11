@@ -29,7 +29,7 @@ export default function FooterBar({ hotkeys = {} }) {
       </div>
 
       <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>
-        Echo v1.2
+        Echo v1.2.1
       </span>
     </div>
   )

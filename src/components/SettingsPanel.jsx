@@ -472,7 +472,7 @@ function gpuVerdictText(r) {
   const other = (r.display_gpus || []).filter(n => !/nvidia/i.test(n))
   if (r.verdict === 'vulkan_ready') {
     const active = r.engine_kind === 'vulkan'
-    return `${other[0] || 'Your GPU'} — the Vulkan GPU pack (beta) is installed${active ? ' and active. Short dictations transcribe in well under a second' : ''}. If anything ever looks wrong, email support@alanglobalintelligence.com.`
+    return `${other[0] || 'Your GPU'} — the Vulkan GPU pack (beta) is installed${active ? ' and active. Short dictations transcribe in well under a second' : ''}. If anything ever looks wrong, visit alanglobalintelligence.com/echo for support.`
   }
   if (r.verdict === 'vulkan_available') {
     return `We see your ${other[0] || 'graphics card'} — enable the beta Vulkan GPU pack below to transcribe several times faster than on CPU.`

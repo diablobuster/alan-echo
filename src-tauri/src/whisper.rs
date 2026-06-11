@@ -192,8 +192,15 @@ impl WhisperEngine {
                 // so a successful TCP connect means it's ready to serve.
                 let deadline = Instant::now() + STARTUP_TIMEOUT;
                 loop {
+                    let addr = match format!("{}:{}", HOST, port).parse() {
+                        Ok(a) => a,
+                        Err(e) => {
+                            log::error!("Bad address {}:{}: {}", HOST, port, e);
+                            return;
+                        }
+                    };
                     if std::net::TcpStream::connect_timeout(
-                        &format!("{}:{}", HOST, port).parse().expect("static addr"),
+                        &addr,
                         Duration::from_millis(500),
                     ).is_ok() {
                         let mut guard = inner.lock();

@@ -76,7 +76,9 @@
 
 ## 3. Commits and PRs
 
-No commits created this session (not requested). All changes are unstaged in both repos.
+- **alan-echo** `f980532` — Ship-ready polish: cross-sell, UX, logging, performance (pushed to main)
+- **stock-analyzer** `7616d6fc` — Echo SEO, cross-sell, error boundaries, OG image (pushed to main)
+- **stock-analyzer** `1badd616` — Echo blockers + security hardening for mass distribution (T1 work, pushed to main)
 
 ---
 

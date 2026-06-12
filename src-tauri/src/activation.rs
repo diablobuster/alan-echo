@@ -10,7 +10,7 @@ const PUB_KEY: [u8; 32] = [
     63,141,40,65,38,142,224,1,97,49,136,45,70,190,132,151
 ];
 
-const ACTIVATE_URL: &str = "https://alanglobalintelligence.com/api/echo/activate";
+const ACTIVATE_URL: &str = "https://www.alanglobalintelligence.com/api/echo/activate";
 
 pub fn token_path(data_dir: &Path) -> PathBuf {
     data_dir.join("activation.jwt")

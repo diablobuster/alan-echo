@@ -1,0 +1,2 @@
+[build]
+rustflags = ["--remap-path-prefix", "C:\\Users\\arowm=", "--remap-path-prefix", "C:\\Users\\arowm\\.cargo\\registry\\src=deps"]

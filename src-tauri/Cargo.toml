@@ -50,6 +50,13 @@ windows = { version = "0.58", features = [
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

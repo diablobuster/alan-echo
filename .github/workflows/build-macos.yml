@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -21,55 +21,54 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
+      - name: Cache whisper model
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/resources/models/ggml-base.en.bin
+          key: whisper-model-base-en
+
+      - name: Cache whisper.cpp build
+        uses: actions/cache@v4
+        with:
+          path: .build/whisper.cpp
+          key: whisper-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/prepare-resources-macos.sh') }}
+
       - name: Install frontend dependencies
         run: npm ci
 
       - name: Prepare macOS resources
         run: |
-          mkdir -p src-tauri/resources/models
-          # The macOS build bundles the CPU whisper-server binary.
-          # For CI, download or compile it here. Skip if not available
-          # (the app works without it — it just shows "engine not found").
-          echo "Whisper binary must be placed at src-tauri/resources/models/whisper-server"
-          echo "and the model at src-tauri/resources/models/ggml-base.en.bin"
-          echo "These are fetched separately — see release checklist."
+          chmod +x scripts/prepare-resources-macos.sh
+          ./scripts/prepare-resources-macos.sh
 
-      # Build for Apple Silicon (arm64) — the primary Mac target
-      - name: Build (aarch64)
+      - name: Build (aarch64 — Apple Silicon)
         run: npx tauri build --target aarch64-apple-darwin
         env:
           TAURI_SIGNING_PRIVATE_KEY: ""
 
-      # Build for Intel Macs (x86_64) — secondary target
-      - name: Build (x86_64)
-        run: npx tauri build --target x86_64-apple-darwin
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
-
-      - name: Upload arm64 DMG
+      - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: alan-echo-macos-arm64
           path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
 
-      - name: Upload x86_64 DMG
+      - name: Upload app bundle
         uses: actions/upload-artifact@v4
         with:
-          name: alan-echo-macos-x86_64
-          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          name: alan-echo-macos-arm64-app
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
 
-      - name: Create release (on tag push)
+      - name: Create draft release (on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
           draft: true

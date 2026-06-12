@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "gen:legal": "node scripts/gen-eula-txt.mjs && node scripts/gen-notices.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
@@ -26,6 +27,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
+    "license-checker-rseidelsohn": "^5.0.1",
     "vite": "^8.0.12"
   }
 }

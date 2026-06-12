@@ -206,6 +206,12 @@ fn get_trial_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, St
 }
 
 #[tauri::command]
+fn quit_app() {
+    // EULA declined — exit cleanly before any engine/tray initialization matters.
+    std::process::exit(0);
+}
+
+#[tauri::command]
 fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
     if cfg!(debug_assertions) {
         return Ok(true);
@@ -1054,6 +1060,7 @@ fn main() {
             export_transcripts,
             get_settings,
             set_setting,
+            quit_app,
             validate_license,
             check_license,
             get_trial_status,

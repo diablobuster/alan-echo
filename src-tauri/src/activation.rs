@@ -99,8 +99,11 @@ pub fn activate_online(key: &str, data_dir: &Path) -> Result<String, String> {
     verify_token(token, &mfp)?;
 
     let path = token_path(data_dir);
-    std::fs::write(&path, token)
+    let tmp = path.with_extension("jwt.tmp");
+    std::fs::write(&tmp, token)
         .map_err(|e| format!("Could not save activation token: {}", e))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("Could not finalize activation token: {}", e))?;
 
     Ok(token.to_string())
 }

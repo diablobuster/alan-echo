@@ -73,6 +73,10 @@ fn update_transcript(state: State<Arc<AppState>>, id: i64, text: String) -> Resu
 
 #[tauri::command]
 fn export_transcripts(state: State<Arc<AppState>>, path: String, format: String) -> Result<bool, String> {
+    let p = std::path::Path::new(&path);
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("Export path must not contain '..'".into());
+    }
     state.db.lock().export(&path, &format).map_err(|e| e.to_string())
 }
 

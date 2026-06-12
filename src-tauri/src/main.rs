@@ -8,6 +8,7 @@ mod packs;
 mod paste;
 mod settings;
 mod text_cleanup;
+mod trial;
 mod updater;
 mod whisper;
 
@@ -37,10 +38,9 @@ pub struct AppState {
     pub paste_target: Mutex<Option<isize>>,
     pub hotkeys: Mutex<serde_json::Value>,
     pub cancel_accel: Mutex<Option<String>>,
+    pub trial_state: Mutex<trial::TrialState>,
     pub data_dir: std::path::PathBuf,
 }
-
-const TRIAL_DAILY_LIMIT: u32 = 5;
 
 // ── Transcript commands ──────────────────────────────────────────────
 
@@ -166,10 +166,6 @@ fn validate_license(state: State<Arc<AppState>>, key: String) -> Result<serde_js
     Ok(serde_json::json!({ "valid": valid, "message": msg, "persisted": persisted }))
 }
 
-/// Release-build license check for the dictation-path commands. The frontend
-/// gate (LicenseGate) is the UX layer; this is the second, backend layer so
-/// enforcement never depends on which React component happens to be mounted.
-/// Trial mode: allow through if daily count < TRIAL_DAILY_LIMIT.
 fn require_license(state: &AppState) -> Result<(), String> {
     if cfg!(debug_assertions) {
         return Ok(());
@@ -180,35 +176,22 @@ fn require_license(state: &AppState) -> Result<(), String> {
     if activation::is_activated(&state.data_dir) {
         return Ok(());
     }
-    let s = state.settings.lock();
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let trial_date = s.get_str("trial_date").unwrap_or_default();
-    let count: u32 = if trial_date == today {
-        s.get("trial_dictations_today")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32
-    } else {
-        0
-    };
-    if count < TRIAL_DAILY_LIMIT {
-        Ok(())
-    } else {
-        Err("Trial limit reached — activate your license for unlimited dictation".into())
+    match trial::check_trial(&state.trial_state.lock()) {
+        trial::TrialStatus::Allowed => Ok(()),
+        trial::TrialStatus::DailyLimitReached => {
+            Err("Daily trial limit reached — resets tomorrow, or activate your license for unlimited dictation".into())
+        }
+        trial::TrialStatus::LifetimeExpired => {
+            Err("Trial ended — 50 free dictations used. Purchase a license for unlimited dictation".into())
+        }
     }
 }
 
 fn increment_trial_count(state: &AppState) {
+    let mut ts = state.trial_state.lock();
+    trial::increment(&mut ts);
     let mut s = state.settings.lock();
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let trial_date = s.get_str("trial_date").unwrap_or_default();
-    let count: u32 = if trial_date == today {
-        s.get("trial_dictations_today").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1
-    } else {
-        1
-    };
-    s.set("trial_date", serde_json::Value::String(today));
-    s.set("trial_dictations_today", serde_json::json!(count));
-    s.save().ok();
+    trial::save(&ts, &mut s, &state.data_dir);
 }
 
 #[tauri::command]
@@ -216,21 +199,10 @@ fn get_trial_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, St
     if state.license.lock().is_licensed() {
         return Ok(serde_json::json!({ "licensed": true }));
     }
-    let s = state.settings.lock();
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let trial_date = s.get_str("trial_date").unwrap_or_default();
-    let used: u32 = if trial_date == today {
-        s.get("trial_dictations_today").and_then(|v| v.as_u64()).unwrap_or(0) as u32
-    } else {
-        0
-    };
-    Ok(serde_json::json!({
-        "licensed": false,
-        "trial": true,
-        "used": used,
-        "limit": TRIAL_DAILY_LIMIT,
-        "remaining": TRIAL_DAILY_LIMIT.saturating_sub(used),
-    }))
+    if activation::is_activated(&state.data_dir) {
+        return Ok(serde_json::json!({ "licensed": true }));
+    }
+    Ok(trial::get_status_json(&state.trial_state.lock()))
 }
 
 #[tauri::command]
@@ -853,6 +825,8 @@ fn main() {
     whisper_engine.set_language(&language);
     whisper_engine.start(model_pref.as_deref());
 
+    let initial_trial = trial::load(&settings, &data_dir);
+
     let app_state = Arc::new(AppState {
         db: Mutex::new(TranscriptDB::open(&db_path).unwrap_or_else(|e| {
             log::error!("Failed to open database: {}", e);
@@ -867,8 +841,22 @@ fn main() {
         paste_target: Mutex::new(None),
         hotkeys: Mutex::new(serde_json::Value::Null),
         cancel_accel: Mutex::new(None),
+        trial_state: Mutex::new(initial_trial),
         data_dir: data_dir.clone(),
     });
+
+    // Migrate old trial keys to signed blob on first run
+    {
+        let state_ref = &app_state;
+        let s = state_ref.settings.lock();
+        if s.get_str("trial_date").is_some() && s.get_str(trial::SETTINGS_KEY).is_none() {
+            drop(s);
+            let ts = state_ref.trial_state.lock().clone();
+            let mut s = state_ref.settings.lock();
+            trial::save(&ts, &mut s, &data_dir);
+            trial::cleanup_old_keys(&mut s);
+        }
+    }
 
     // Sweep recordings orphaned by a crash or force-kill. Age-gated so a
     // second running instance's in-flight recording is left alone.

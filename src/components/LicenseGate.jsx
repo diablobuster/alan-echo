@@ -200,7 +200,7 @@ export default function LicenseGate({ onActivated }) {
             transition: 'border-color 0.15s',
           }}
         >
-          Try for free &mdash; 5 dictations/day
+          Try for free &mdash; 5/day, 50 total
         </button>
 
         {/* Buy + recover links */}

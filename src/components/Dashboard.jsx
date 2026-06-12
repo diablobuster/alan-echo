@@ -349,7 +349,7 @@ export default function Dashboard() {
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 16px', gap: 12, overflow: 'hidden' }}>
         {trial && !trial.licensed && (
-          <TrialBanner used={trial.used} limit={trial.limit} remaining={trial.remaining} />
+          <TrialBanner used={trial.used} limit={trial.limit} remaining={trial.remaining} lifetime_used={trial.lifetime_used} lifetime_limit={trial.lifetime_limit} lifetime_remaining={trial.lifetime_remaining} />
         )}
         <QuickStats total={stats.total} words={stats.words} duration={stats.duration} />
 
@@ -425,8 +425,10 @@ export default function Dashboard() {
   )
 }
 
-function TrialBanner({ used, limit, remaining }) {
-  const atLimit = remaining <= 0
+function TrialBanner({ used, limit, remaining, lifetime_used, lifetime_limit, lifetime_remaining }) {
+  const expired = lifetime_remaining != null && lifetime_remaining <= 0
+  const atLimit = expired || remaining <= 0
+  const lifetimeNote = lifetime_used != null ? ` (${lifetime_used} of ${lifetime_limit} total)` : ''
   return (
     <div style={{
       padding: '7px 12px', fontSize: 11, display: 'flex', alignItems: 'center', gap: 8,
@@ -437,7 +439,7 @@ function TrialBanner({ used, limit, remaining }) {
       borderRadius: 'var(--echo-radius-sm)',
     }}>
       <span style={{ color: atLimit ? 'var(--accent-red)' : 'var(--brass)', fontWeight: 600 }}>
-        {atLimit ? 'Trial limit reached' : `Trial · ${remaining} of ${limit} remaining today`}
+        {expired ? 'Trial ended' : atLimit ? 'Daily limit reached' : `Trial · ${remaining} of ${limit} remaining today`}{lifetimeNote}
       </span>
       <span style={{ flex: 1 }} />
       <a
@@ -450,7 +452,7 @@ function TrialBanner({ used, limit, remaining }) {
         }}
         style={{ color: 'var(--echo-accent)', fontSize: 11, textDecoration: 'none', fontWeight: 600 }}
       >
-        {atLimit ? 'Get unlimited' : 'Upgrade'}
+        {atLimit ? 'Get unlimited — $89' : 'Upgrade'}
       </a>
     </div>
   )

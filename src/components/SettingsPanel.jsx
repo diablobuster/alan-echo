@@ -3,6 +3,8 @@ import Icon from './Icons'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { applyTheme } from '../theme'
+import pkg from '../../package.json'
+import notices from '../legal/third-party-notices.txt?raw'
 
 // Must contain aggressive-only tokens ("gonna", "in order to") so the preview
 // visibly differs between standard and aggressive — pinned by the
@@ -26,6 +28,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [autostart, setAutostart] = useState(false)
   const [hasMultilingualModel, setHasMultilingualModel] = useState(true)
   const [modelDownload, setModelDownload] = useState(null) // null | {stage, percent, ...}
+  const [showNotices, setShowNotices] = useState(false)
   const pollRef = useRef(null)
 
   const LANGUAGES = [
@@ -372,6 +375,68 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           {!hotkeys.cancel && (
             <div style={{ fontSize: 10, color: 'var(--accent-yellow)', marginTop: 4 }}>
               Cancel hotkey could not be registered — another app may be using it. Press Esc in the dashboard instead.
+            </div>
+          )}
+
+          {/* About & legal */}
+          <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>About</div>
+
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+            <div>ALAN Echo v{pkg.version}</div>
+            <div>© 2026 ALAN Global Intelligence. All rights reserved.</div>
+            <div style={{ marginTop: 6 }}>
+              {[
+                { label: 'License Agreement', url: 'https://www.alanglobalintelligence.com/legal/echo-license' },
+                { label: 'Privacy Policy', url: 'https://www.alanglobalintelligence.com/privacy' },
+              ].map((link, i) => (
+                <span key={link.url}>
+                  {i > 0 && <span style={{ color: 'var(--text-faint)' }}> · </span>}
+                  <a
+                    href={link.url}
+                    onClick={e => {
+                      e.preventDefault()
+                      invoke('plugin:shell|open', { path: link.url }).catch(() => {
+                        window.open(link.url, '_blank', 'noopener')
+                      })
+                    }}
+                    style={{ color: 'var(--echo-accent)', textDecoration: 'none' }}
+                  >
+                    {link.label}
+                  </a>
+                </span>
+              ))}
+              <span style={{ color: 'var(--text-faint)' }}> · </span>
+              <button
+                onClick={() => setShowNotices(v => !v)}
+                style={{
+                  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                  fontSize: 11, fontFamily: 'inherit', color: 'var(--echo-accent)',
+                }}
+              >
+                Open-source licenses
+              </button>
+            </div>
+          </div>
+
+          {showNotices && (
+            <div style={{
+              marginTop: 8, maxHeight: '40vh', overflowY: 'auto',
+              background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+              borderRadius: 'var(--echo-radius-sm)', padding: '8px 10px',
+            }}>
+              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 9, lineHeight: 1.5, margin: 0, color: 'var(--text-secondary)' }}>
+                {notices}
+              </pre>
+              <button
+                onClick={() => setShowNotices(false)}
+                style={{
+                  marginTop: 8, padding: '5px 10px', background: 'none',
+                  border: '1px solid var(--border-primary)', borderRadius: 'var(--echo-radius-sm)',
+                  fontSize: 10, cursor: 'pointer', color: 'var(--text-secondary)', fontFamily: 'inherit',
+                }}
+              >
+                Close
+              </button>
             </div>
           )}
         </div>

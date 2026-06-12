@@ -103,5 +103,5 @@ findings ledger to the session log.
 ## Notes for the human
 
 - Wave 1 needs no decisions and no money — it can run tonight.
-- Your four parallel human tasks while it runs: (1) Stripe Dashboard → Settings → Business → set Terms URL to the EULA page; (2) Phase 0 decisions P0.1/P0.2 written into `stock-analyzer/docs/decisions/2026-06-legal-entity.md`; (3) engage counsel per P0.3 (the four-question memo); (4) start signing procurement per P0.4.
+- Your four parallel human tasks while it runs: (1) Stripe Dashboard → Settings → Business → Public details: confirm the Terms URL stays the site-wide `/terms` (account-wide setting — Echo EULA consent comes from checkout `custom_text` per B2) and set the Privacy Policy URL if empty; (2) Phase 0 decisions P0.1/P0.2 written into `stock-analyzer/docs/decisions/2026-06-legal-entity.md`; (3) engage counsel per P0.3 (the four-question memo); (4) start signing procurement per P0.4.
 - The copyright registration deadline (**2026-09-10**) is the only date that can't slip without losing rights (statutory damages retroactive to first publication).

@@ -9,6 +9,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "tauri": "tauri",
     "gen:legal": "node scripts/gen-eula-txt.mjs && node scripts/gen-notices.mjs"
   },
   "dependencies": {

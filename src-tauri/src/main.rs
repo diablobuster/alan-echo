@@ -217,6 +217,19 @@ fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
         return Ok(true);
     }
     if state.license.lock().is_licensed() {
+        // Housekeeping, never gating: if the activation token is missing or
+        // expired (tokens carry a 400-day exp), refresh it in the background
+        // with the saved key. Failures only log — a paying user always boots.
+        if !activation::is_activated(&state.data_dir) {
+            if let Some(key) = state.settings.lock().get_str("license_key") {
+                let data_dir = state.data_dir.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = activation::activate_online(&key, &data_dir) {
+                        log::info!("Silent re-activation failed (will retry next launch): {}", e);
+                    }
+                });
+            }
+        }
         return Ok(true);
     }
     Ok(activation::is_activated(&state.data_dir))

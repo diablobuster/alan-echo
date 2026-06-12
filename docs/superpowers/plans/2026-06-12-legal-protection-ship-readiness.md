@@ -76,7 +76,7 @@
 - Create: `src/legal/eula.md`
 - Create: `src/legal/eulaVersion.js`
 
-- [ ] **Step 1:** Create `src/legal/eula.md` by copying the EULA text **verbatim** from `C:\Users\arowm\stock-analyzer\app\legal\echo-license\page.tsx` (strip JSX, keep all 11 section texts in order). File must start with:
+- [x] **Step 1:** Create `src/legal/eula.md` by copying the EULA text **verbatim** from `C:\Users\arowm\stock-analyzer\app\legal\echo-license\page.tsx` (strip JSX, keep all 11 section texts in order). File must start with:
 
 ```markdown
 # ALAN Echo License Agreement
@@ -88,12 +88,12 @@ Effective: June 10, 2026
 
 …and contain all 11 headings in order: `1. License grant`, `2. What your license includes`, `3. Restrictions`, `4. Privacy — processing happens on your device`, `5. Refunds`, `6. Disclaimer of warranty`, `7. Limitation of liability`, `8. Termination`, `9. Export and encryption notice`, `10. Governing law and disputes`, `11. Contact`.
 
-- [ ] **Step 2:** Verify structure:
+- [x] **Step 2:** Verify structure:
 
 Run: `Select-String -Path src/legal/eula.md -Pattern '^## \d+\.' | Measure-Object | Select-Object -ExpandProperty Count`
 Expected: `11`
 
-- [ ] **Step 3:** Create `src/legal/eulaVersion.js`:
+- [x] **Step 3:** Create `src/legal/eulaVersion.js`:
 
 ```js
 // Single source of truth for which EULA revision this build embeds.
@@ -103,7 +103,7 @@ Expected: `11`
 export const EULA_VERSION = '2026-06-10'
 ```
 
-- [ ] **Step 4:** Commit:
+- [x] **Step 4:** Commit:
 
 ```bash
 git add src/legal/eula.md src/legal/eulaVersion.js
@@ -115,7 +115,7 @@ git commit -m "feat: bundle EULA text and version constant in app"
 **Files:**
 - Modify: `src-tauri/src/main.rs` (add command near `check_license` ~line 208; register in `generate_handler!` ~line 1048)
 
-- [ ] **Step 1:** Add the command above the existing `check_license` function:
+- [x] **Step 1:** Add the command above the existing `check_license` function:
 
 ```rust
 #[tauri::command]
@@ -125,14 +125,14 @@ fn quit_app() {
 }
 ```
 
-- [ ] **Step 2:** Register it: in the `tauri::generate_handler![` list (after `set_setting,`), add a line `quit_app,`.
+- [x] **Step 2:** Register it: in the `tauri::generate_handler![` list (after `set_setting,`), add a line `quit_app,`.
 
-- [ ] **Step 3:** Verify it compiles:
+- [x] **Step 3:** Verify it compiles:
 
 Run: `cd src-tauri; cargo check`
 Expected: `Finished` with no errors.
 
-- [ ] **Step 4:** Commit:
+- [x] **Step 4:** Commit:
 
 ```bash
 git add src-tauri/src/main.rs
@@ -144,7 +144,7 @@ git commit -m "feat: quit_app command for EULA decline path"
 **Files:**
 - Create: `src/components/EulaGate.jsx`
 
-- [ ] **Step 1:** Create `src/components/EulaGate.jsx`:
+- [x] **Step 1:** Create `src/components/EulaGate.jsx`:
 
 ```jsx
 import { useState } from 'react'
@@ -213,7 +213,7 @@ export default function EulaGate({ onAccepted }) {
 }
 ```
 
-- [ ] **Step 2:** Add styles to `src/tokens.css` (match existing card/button token usage — reuse the classes LicenseGate uses if `btn-primary`/`btn-secondary` already exist; otherwise append):
+- [x] **Step 2:** Add styles to `src/tokens.css` (match existing card/button token usage — reuse the classes LicenseGate uses if `btn-primary`/`btn-secondary` already exist; otherwise append):
 
 ```css
 .eula-gate { display: flex; align-items: center; justify-content: center; height: 100vh; }
@@ -226,12 +226,12 @@ export default function EulaGate({ onAccepted }) {
 
 (If `btn-primary`/`btn-secondary` don't exist in tokens.css, check what LicenseGate's buttons use — `Select-String -Path src/components/LicenseGate.jsx -Pattern 'className'` — and reuse those exact classes instead.)
 
-- [ ] **Step 3:** Verify the raw import builds:
+- [x] **Step 3:** Verify the raw import builds:
 
 Run: `npm run build`
 Expected: Vite build succeeds (`?raw` is native Vite).
 
-- [ ] **Step 4:** Commit:
+- [x] **Step 4:** Commit:
 
 ```bash
 git add src/components/EulaGate.jsx src/tokens.css
@@ -243,7 +243,7 @@ git commit -m "feat: first-launch EULA clickwrap gate component"
 **Files:**
 - Modify: `src/main.jsx` (full replacement below — current file is 85 lines)
 
-- [ ] **Step 1:** Replace `src/main.jsx` with:
+- [x] **Step 1:** Replace `src/main.jsx` with:
 
 ```jsx
 import './tokens.css'
@@ -359,7 +359,7 @@ Expected, in order: (1) EULA gate appears on first run; (2) "Decline & Quit" exi
 Run (after accepting, Windows): `Get-Content "$env:APPDATA\..\Local\com.alan.echo\settings.json" 2>$null | Select-String eula` (adjust path if the settings file lives elsewhere — find it with `Get-ChildItem $env:LOCALAPPDATA\com.alan.echo`).
 Expected: `eula_accepted_version` + `eula_accepted_at` present.
 
-- [ ] **Step 4:** Commit:
+- [x] **Step 4:** Commit:
 
 ```bash
 git add src/main.jsx
@@ -374,7 +374,7 @@ git commit -m "feat: gate app boot on EULA acceptance (clickwrap before trial/li
 - Create: `scripts/gen-eula-txt.mjs`
 - Modify: `src-tauri/Cargo.toml`, `package.json`
 
-- [ ] **Step 1:** Create `scripts/gen-eula-txt.mjs` (keeps installer text in sync with the bundled markdown):
+- [x] **Step 1:** Create `scripts/gen-eula-txt.mjs` (keeps installer text in sync with the bundled markdown):
 
 ```js
 // Generates legal/EULA.txt (plain text for the NSIS license page) from
@@ -391,9 +391,9 @@ writeFileSync('legal/EULA.txt', txt)
 console.log('Wrote legal/EULA.txt (%d chars)', txt.length)
 ```
 
-- [ ] **Step 2:** Run it: `node scripts/gen-eula-txt.mjs` — Expected: `Wrote legal/EULA.txt`.
+- [x] **Step 2:** Run it: `node scripts/gen-eula-txt.mjs` — Expected: `Wrote legal/EULA.txt`.
 
-- [ ] **Step 3:** Edit `src-tauri/tauri.conf.json` bundle section — add `copyright` and `licenseFile` (Tauri 2 renders `licenseFile` as the NSIS license page):
+- [x] **Step 3:** Edit `src-tauri/tauri.conf.json` bundle section — add `copyright` and `licenseFile` (Tauri 2 renders `licenseFile` as the NSIS license page):
 
 ```json
   "bundle": {
@@ -408,11 +408,11 @@ console.log('Wrote legal/EULA.txt (%d chars)', txt.length)
 
 (rest of the bundle section unchanged). If the bundler rejects `licenseFile` at this level on the pinned Tauri version, move it to `bundle.windows.nsis.license` — verify against the schema referenced at the top of the file.
 
-- [ ] **Step 4:** Add license metadata: in `src-tauri/Cargo.toml` `[package]` add `license = "LicenseRef-Proprietary"`; in `package.json` add `"license": "SEE LICENSE IN LICENSE"`.
+- [x] **Step 4:** Add license metadata: in `src-tauri/Cargo.toml` `[package]` add `license = "LicenseRef-Proprietary"`; in `package.json` add `"license": "SEE LICENSE IN LICENSE"`.
 
 - [ ] **Step 5:** Verify: `npm run tauri build` completes; run the produced NSIS installer in a VM/sandbox — Expected: a license agreement page appears before install, showing the EULA text.
 
-- [ ] **Step 6:** Commit:
+- [x] **Step 6:** Commit:
 
 ```bash
 git add src-tauri/tauri.conf.json legal/EULA.txt scripts/gen-eula-txt.mjs src-tauri/Cargo.toml package.json
@@ -426,14 +426,14 @@ git commit -m "feat: copyright metadata + NSIS installer license page"
 - Create: `src/legal/third-party-notices.txt` (generated)
 - Modify: `src/components/SettingsPanel.jsx` (About section, Task A7 hosts the button)
 
-- [ ] **Step 1:** Install the npm license tool as a dev dep and the cargo tool once:
+- [x] **Step 1:** Install the npm license tool as a dev dep and the cargo tool once:
 
 ```bash
 npm i -D license-checker-rseidelsohn
 cargo install cargo-license
 ```
 
-- [ ] **Step 2:** Create `scripts/gen-notices.mjs`:
+- [x] **Step 2:** Create `scripts/gen-notices.mjs`:
 
 ```js
 // Generates src/legal/third-party-notices.txt — MIT requires shipping the
@@ -463,14 +463,14 @@ writeFileSync('src/legal/third-party-notices.txt', out)
 console.log('Wrote src/legal/third-party-notices.txt (%d chars)', out.length)
 ```
 
-- [ ] **Step 3:** Run: `node scripts/gen-notices.mjs` — Expected: file written; spot-check it mentions `whisper`, `tauri`, `react`:
+- [x] **Step 3:** Run: `node scripts/gen-notices.mjs` — Expected: file written; spot-check it mentions `whisper`, `tauri`, `react`:
 
 Run: `Select-String -Path src/legal/third-party-notices.txt -Pattern 'whisper.cpp','tauri','react' | Select-Object -First 3`
 Expected: 3 matches.
 
-- [ ] **Step 4:** Add an npm script in `package.json` `"scripts"`: `"gen:legal": "node scripts/gen-eula-txt.mjs && node scripts/gen-notices.mjs"`.
+- [x] **Step 4:** Add an npm script in `package.json` `"scripts"`: `"gen:legal": "node scripts/gen-eula-txt.mjs && node scripts/gen-notices.mjs"`.
 
-- [ ] **Step 5:** Commit:
+- [x] **Step 5:** Commit:
 
 ```bash
 git add scripts/gen-notices.mjs src/legal/third-party-notices.txt package.json package-lock.json
@@ -482,7 +482,7 @@ git commit -m "feat: third-party license notices generation (MIT/Apache complian
 **Files:**
 - Modify: `src/components/SettingsPanel.jsx` (append a final section)
 
-- [ ] **Step 1:** At the top of `SettingsPanel.jsx` add imports:
+- [x] **Step 1:** At the top of `SettingsPanel.jsx` add imports:
 
 ```jsx
 import { useState } from 'react'   // merge with existing react imports
@@ -491,7 +491,7 @@ import pkg from '../../package.json'
 import notices from '../legal/third-party-notices.txt?raw'
 ```
 
-- [ ] **Step 2:** Append an About section at the end of the settings list (match the panel's existing section markup — copy the wrapper element pattern used by the "autostart" section; the snippet below shows the content):
+- [x] **Step 2:** Append an About section at the end of the settings list (match the panel's existing section markup — copy the wrapper element pattern used by the "autostart" section; the snippet below shows the content):
 
 ```jsx
 {/* About & legal */}
@@ -523,11 +523,11 @@ import notices from '../legal/third-party-notices.txt?raw'
 
 …and add the state hook near the component's other `useState` calls: `const [showNotices, setShowNotices] = useState(false)`.
 
-- [ ] **Step 3:** Update `src/components/FooterBar.jsx` line ~32: change the version text `Echo v1.2.1` to `© 2026 ALAN · Echo v{pkg.version}` (import `pkg` the same way), so a copyright notice is visible on every screen (defeats the §504(c)(2) innocent-infringer mitigation per §401(d)).
+- [x] **Step 3:** Update `src/components/FooterBar.jsx` line ~32: change the version text `Echo v1.2.1` to `© 2026 ALAN · Echo v{pkg.version}` (import `pkg` the same way), so a copyright notice is visible on every screen (defeats the §504(c)(2) innocent-infringer mitigation per §401(d)).
 
 - [ ] **Step 4:** Verify: `npm run tauri dev` → Settings shows About with version/©/links; "Open-source licenses" opens the notices; links open in the system browser.
 
-- [ ] **Step 5:** Commit:
+- [x] **Step 5:** Commit:
 
 ```bash
 git add src/components/SettingsPanel.jsx src/components/FooterBar.jsx
@@ -579,7 +579,7 @@ git commit -m "feat: Windows code signing + macOS notarization for release build
 - Create: `LICENSE`
 - Modify: `README.md` (replace Vite boilerplate)
 
-- [ ] **Step 1:** Create `LICENSE`:
+- [x] **Step 1:** Create `LICENSE`:
 
 ```
 ALAN Echo — Proprietary Software
@@ -593,7 +593,7 @@ Third-party open-source components are listed in
 src/legal/third-party-notices.txt and remain under their own licenses.
 ```
 
-- [ ] **Step 2:** Replace `README.md` body with a short product README: name, one-line description, `© 2026 ALAN Global Intelligence`, "Proprietary — see LICENSE", dev quickstart (`npm i && npm run tauri dev`), and a **Release legal checklist** section:
+- [x] **Step 2:** Replace `README.md` body with a short product README: name, one-line description, `© 2026 ALAN Global Intelligence`, "Proprietary — see LICENSE", dev quickstart (`npm i && npm run tauri dev`), and a **Release legal checklist** section:
 
 ```markdown
 ## Release legal checklist
@@ -603,7 +603,7 @@ src/legal/third-party-notices.txt and remain under their own licenses.
 - [ ] Binaries signed (Windows) + notarized (macOS); SHA256SUMS attached to release
 ```
 
-- [ ] **Step 3:** Commit:
+- [x] **Step 3:** Commit:
 
 ```bash
 git add LICENSE README.md
@@ -649,7 +649,7 @@ Expected: the new carve-out present; no remaining blanket "all fees non-refundab
 - Modify: `app/echo/DualCta.tsx`, `app/echo/CheckoutCta.tsx`
 - Modify: `app/echo/download/page.tsx` (trial CTA microcopy)
 
-- [ ] **Step 1 (prerequisite, manual):** In the Stripe Dashboard → Settings → Business → Public details, set the Terms of Service URL to `https://www.alanglobalintelligence.com/legal/echo-license` (Checkout's `consent_collection.terms_of_service` displays this). Record done.
+- [ ] **Step 1 (prerequisite, manual):** In the Stripe Dashboard → Settings → Business → Public details, confirm the Terms of Service URL is set to the **site-wide** `https://www.alanglobalintelligence.com/terms` and leave it there — this setting is account-wide and also covers ALAN platform subscription checkouts. Do NOT point it at the Echo EULA. The Echo-specific EULA consent comes from this session's `custom_text.terms_of_service_acceptance` message (Step 2), which links `/legal/echo-license` directly at the consent checkbox; Task B1 additionally makes `/terms` carve out Echo and point to the EULA. While in Public details, set the Privacy Policy URL to `https://www.alanglobalintelligence.com/privacy` if empty. Record done.
 
 - [ ] **Step 2:** In `app/api/echo/checkout/route.ts`, inside the `stripe.checkout.sessions.create({ ... })` object (alongside `automatic_tax`), add:
 

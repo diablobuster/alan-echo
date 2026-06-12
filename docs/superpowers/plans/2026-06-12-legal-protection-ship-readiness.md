@@ -621,12 +621,12 @@ git commit -m "docs: proprietary LICENSE and real README with release legal chec
 **Files:**
 - Modify: `app/terms/page.tsx` (locate via grep), `app/refund-policy/page.tsx`
 
-- [ ] **Step 1:** Locate the offending sentence:
+- [x] **Step 1:** Locate the offending sentence:
 
 Run: `Select-String -Path app/terms/page.tsx -Pattern 'non-refundable' -Context 1`
 Expected: the "all fees are non-refundable" sentence (~line 205).
 
-- [ ] **Step 2:** Replace that sentence with:
+- [x] **Step 2:** Replace that sentence with:
 
 ```
 Except as expressly stated in a product-specific policy, fees are non-refundable.
@@ -635,12 +635,12 @@ the Refund Policy (/refund-policy) and the ALAN Echo License Agreement
 (/legal/echo-license), which control for Echo purchases.
 ```
 
-- [ ] **Step 3:** Verify no contradiction remains:
+- [x] **Step 3:** Verify no contradiction remains:
 
 Run: `Select-String -Path app/terms/page.tsx -Pattern 'Echo' -Context 0,1`
 Expected: the new carve-out present; no remaining blanket "all fees non-refundable" without the exception.
 
-- [ ] **Step 4:** Commit: `git add app/terms/page.tsx && git commit -m "fix: terms now carve out Echo 30-day refund (removes TOS/refund-policy contradiction)"`
+- [x] **Step 4:** Commit: `git add app/terms/page.tsx && git commit -m "fix: terms now carve out Echo 30-day refund (removes TOS/refund-policy contradiction)"`
 
 ### Task B2: Checkout consent + CTA microcopy
 
@@ -651,7 +651,7 @@ Expected: the new carve-out present; no remaining blanket "all fees non-refundab
 
 - [ ] **Step 1 (prerequisite, manual):** In the Stripe Dashboard → Settings → Business → Public details, confirm the Terms of Service URL is set to the **site-wide** `https://www.alanglobalintelligence.com/terms` and leave it there — this setting is account-wide and also covers ALAN platform subscription checkouts. Do NOT point it at the Echo EULA. The Echo-specific EULA consent comes from this session's `custom_text.terms_of_service_acceptance` message (Step 2), which links `/legal/echo-license` directly at the consent checkbox; Task B1 additionally makes `/terms` carve out Echo and point to the EULA. While in Public details, set the Privacy Policy URL to `https://www.alanglobalintelligence.com/privacy` if empty. Record done.
 
-- [ ] **Step 2:** In `app/api/echo/checkout/route.ts`, inside the `stripe.checkout.sessions.create({ ... })` object (alongside `automatic_tax`), add:
+- [x] **Step 2:** In `app/api/echo/checkout/route.ts`, inside the `stripe.checkout.sessions.create({ ... })` object (alongside `automatic_tax`), add:
 
 ```ts
       consent_collection: { terms_of_service: "required" },
@@ -665,7 +665,7 @@ Expected: the new carve-out present; no remaining blanket "all fees non-refundab
       },
 ```
 
-- [ ] **Step 3:** In `app/echo/DualCta.tsx`, directly under the buy button JSX, add:
+- [x] **Step 3:** In `app/echo/DualCta.tsx`, directly under the buy button JSX, add:
 
 ```tsx
       <p className="cta-legal">
@@ -676,7 +676,7 @@ Expected: the new carve-out present; no remaining blanket "all fees non-refundab
 
 Do the same in `app/echo/CheckoutCta.tsx`. Add a minimal `.cta-legal { font-size: 12px; opacity: 0.7; margin-top: 6px; }` to the component's stylesheet/module (match how these components style today — check for an existing classes file with `Select-String -Path app/echo/DualCta.tsx -Pattern 'className'`).
 
-- [ ] **Step 4:** In `app/echo/download/page.tsx`, under the free-trial download button, add:
+- [x] **Step 4:** In `app/echo/download/page.tsx`, under the free-trial download button, add:
 
 ```tsx
       <p className="cta-legal">
@@ -687,7 +687,7 @@ Do the same in `app/echo/CheckoutCta.tsx`. Add a minimal `.cta-legal { font-size
 
 - [ ] **Step 5:** Verify: `npm run build` succeeds; then a Stripe test-mode checkout shows the required ToS checkbox with the custom message.
 
-- [ ] **Step 6:** Commit: `git add app/api/echo/checkout/route.ts app/echo/DualCta.tsx app/echo/CheckoutCta.tsx app/echo/download/page.tsx && git commit -m "feat: checkout ToS consent + EULA microcopy at all purchase/download CTAs"`
+- [x] **Step 6:** Commit: `git add app/api/echo/checkout/route.ts app/echo/DualCta.tsx app/echo/CheckoutCta.tsx app/echo/download/page.tsx && git commit -m "feat: checkout ToS consent + EULA microcopy at all purchase/download CTAs"`
 
 ### Task B3: EULA revision (drafts ready now; finalize after P0.1–P0.3)
 
@@ -771,7 +771,7 @@ If arbitration is **dropped**, §10 becomes governing law + exclusive venue in t
 **Files:**
 - Modify: `app/privacy/page.tsx`
 
-- [ ] **Step 1:** Add a new top-level section "ALAN Echo desktop app" with this text:
+- [x] **Step 1:** Add a new top-level section "ALAN Echo desktop app" with this text:
 
 ```
 ALAN Echo desktop app. Echo is designed so your voice data never leaves your
@@ -802,16 +802,16 @@ purchase or activation records, contact the address in Section [contact],
 referencing your order email.
 ```
 
-- [ ] **Step 2:** Verify the existing website-data sections still accurately cover: checkout PII via Stripe (name/email), Plausible analytics (cookieless — state it), account data, and the CalOPPA-required elements (categories collected, third parties, do-not-track response). Add a "Cookies & analytics" line if absent: `We use Plausible, a cookieless analytics service; no advertising trackers, no cross-site cookies.`
+- [x] **Step 2:** Verify the existing website-data sections still accurately cover: checkout PII via Stripe (name/email), Plausible analytics (cookieless — state it), account data, and the CalOPPA-required elements (categories collected, third parties, do-not-track response). Add a "Cookies & analytics" line if absent: `We use Plausible, a cookieless analytics service; no advertising trackers, no cross-site cookies.`
 
-- [ ] **Step 3:** Verify build: `npm run build`. Commit: `git add app/privacy/page.tsx && git commit -m "feat: privacy policy covers Echo app (activation data, local storage, no-audio-collection)"`
+- [x] **Step 3:** Verify build: `npm run build`. Commit: `git add app/privacy/page.tsx && git commit -m "feat: privacy policy covers Echo app (activation data, local storage, no-audio-collection)"`
 
 ### Task B5: Marketing claims accuracy pass
 
 **Files:**
 - Modify: `app/echo/page.tsx` (privacy section ~lines 122–159), `app/echo/vs-dragon/page.tsx` (~lines 61–66), `app/echo/compare/page.tsx` (~line 33)
 
-- [ ] **Step 1:** In `app/echo/page.tsx`, replace the literal over-claim. Current: `"No network calls, no telemetry, no analytics, no account."` Replace the bullet/paragraph with:
+- [x] **Step 1:** In `app/echo/page.tsx`, replace the literal over-claim. Current: `"No network calls, no telemetry, no analytics, no account."` Replace the bullet/paragraph with:
 
 ```
 100% on-device dictation: the speech model runs on your computer. Your audio
@@ -823,23 +823,23 @@ update checks, and optional model downloads. Never your voice.
 
 Keep the airplane-mode paragraph (it's accurate for dictation) but scope its first sentence: `Turn off Wi-Fi. Dictate. Everything works.` → unchanged (true) — append: `(You'll only need a connection to activate a license or download an optional model.)`
 
-- [ ] **Step 2:** Apply the same correction in `app/echo/vs-dragon/page.tsx` ("No audio is ever sent anywhere. No account required. No telemetry." — keep, it's accurate) but fix any flat "no network calls" phrasing found:
+- [x] **Step 2:** Apply the same correction in `app/echo/vs-dragon/page.tsx` ("No audio is ever sent anywhere. No account required. No telemetry." — keep, it's accurate) but fix any flat "no network calls" phrasing found:
 
 Run: `Select-String -Path app/echo/*.tsx -Pattern 'No network calls' -List`
 Expected after edit: no matches.
 
-- [ ] **Step 3:** Resolve the languages contradiction: check ground truth in the app repo — `Select-String -Path C:\Users\arowm\alan-echo\src-tauri\src\*.rs -Pattern 'multilingual|language'` and the model list. If multilingual models ship/downloadable: align the landing page to the compare page ("Dictate in 99 languages via downloadable multilingual models; English model included"). If English-only at runtime: fix `app/echo/compare/page.tsx` line ~33 to "English (more languages coming)". One truth, both pages.
+- [x] **Step 3:** Resolve the languages contradiction: check ground truth in the app repo — `Select-String -Path C:\Users\arowm\alan-echo\src-tauri\src\*.rs -Pattern 'multilingual|language'` and the model list. If multilingual models ship/downloadable: align the landing page to the compare page ("Dictate in 99 languages via downloadable multilingual models; English model included"). If English-only at runtime: fix `app/echo/compare/page.tsx` line ~33 to "English (more languages coming)". One truth, both pages.
 
-- [ ] **Step 4:** Mac claims: `Select-String -Path app/echo -Pattern 'macOS|Mac' -List` — anywhere Mac availability is implied as current, change to "macOS version in development" until the Mac build actually ships (the audit found macOS currently non-functional).
+- [x] **Step 4:** Mac claims: `Select-String -Path app/echo -Pattern 'macOS|Mac' -List` — anywhere Mac availability is implied as current, change to "macOS version in development" until the Mac build actually ships (the audit found macOS currently non-functional).
 
-- [ ] **Step 5:** Verify: `npm run build`; grep checks from steps 2–4 all clean. Commit: `git add app/echo && git commit -m "fix: privacy/availability claims now precisely match what the code does"`
+- [x] **Step 5:** Verify: `npm run build`; grep checks from steps 2–4 all clean. Commit: `git add app/echo && git commit -m "fix: privacy/availability claims now precisely match what the code does"`
 
 ### Task B6: Site footer legal links
 
 **Files:**
 - Modify: `app/components/SiteFooter.tsx` (lines ~19–28)
 
-- [ ] **Step 1:** Alongside the existing `/terms` and `/privacy` links add:
+- [x] **Step 1:** Alongside the existing `/terms` and `/privacy` links add:
 
 ```tsx
         <a href="/legal/echo-license">Echo License</a>
@@ -848,14 +848,14 @@ Expected after edit: no matches.
 
 (match the surrounding link markup/classes exactly.)
 
-- [ ] **Step 2:** Verify: `npm run build`; footer renders 4 legal links. Commit: `git add app/components/SiteFooter.tsx && git commit -m "feat: footer links to Echo EULA and refund policy"`
+- [x] **Step 2:** Verify: `npm run build`; footer renders 4 legal links. Commit: `git add app/components/SiteFooter.tsx && git commit -m "feat: footer links to Echo EULA and refund policy"`
 
 ### Task B7: Truthful key-delivery copy (+ email template EULA link)
 
 **Files:**
 - Modify: `app/echo/success/page.tsx`, `app/echo/recover/page.tsx`, `lib/echo/email.ts`
 
-- [ ] **Step 1:** In `app/echo/success/page.tsx`, find the "key was emailed" copy (`Select-String -Pattern 'email' app/echo/success/page.tsx`) and replace with:
+- [x] **Step 1:** In `app/echo/success/page.tsx`, find the "key was emailed" copy (`Select-String -Pattern 'email' app/echo/success/page.tsx`) and replace with:
 
 ```
 Your license key is ready. View it any time at /echo/keys (sign in with the
@@ -863,9 +863,9 @@ account you used at checkout). Keep your Stripe receipt — it's your proof of
 purchase.
 ```
 
-- [ ] **Step 2:** In `app/echo/recover/page.tsx`, remove/replace any "check your inbox for the key email" step with the keys-page + receipt + support path (the page's 3-step structure already exists — make step 1 the `/echo/keys` sign-in).
+- [x] **Step 2:** In `app/echo/recover/page.tsx`, remove/replace any "check your inbox for the key email" step with the keys-page + receipt + support path (the page's 3-step structure already exists — make step 1 the `/echo/keys` sign-in).
 
-- [ ] **Step 3:** In `lib/echo/email.ts` (so the template is correct whenever sending is re-enabled), add to the footer block:
+- [x] **Step 3:** In `lib/echo/email.ts` (so the template is correct whenever sending is re-enabled), add to the footer block:
 
 ```ts
   `Your use of ALAN Echo is governed by the ALAN Echo License Agreement: ${BASE_URL}/legal/echo-license`,
@@ -873,7 +873,7 @@ purchase.
 
 (match the template's existing line-array or JSX style.)
 
-- [ ] **Step 4:** Verify: `npm run build`; `Select-String -Path app/echo/success/page.tsx,app/echo/recover/page.tsx -Pattern 'emailed'` → no stale claims. Commit: `git add app/echo/success/page.tsx app/echo/recover/page.tsx lib/echo/email.ts && git commit -m "fix: key-delivery copy tells the truth (keys page, not email); EULA link in email template"`
+- [x] **Step 4:** Verify: `npm run build`; `Select-String -Path app/echo/success/page.tsx,app/echo/recover/page.tsx -Pattern 'emailed'` → no stale claims. Commit: `git add app/echo/success/page.tsx app/echo/recover/page.tsx lib/echo/email.ts && git commit -m "fix: key-delivery copy tells the truth (keys page, not email); EULA link in email template"`
 
 ### Task B8: Revocation integrity — refunded keys must actually stop working
 
@@ -882,7 +882,7 @@ purchase.
 - Create: `tests/echo/guards.test.ts`
 - Modify: `app/api/echo/download/route.ts`, `app/api/echo/validate-key/route.ts`, `app/api/echo/activate/route.ts`, `app/api/stripe/webhook/route.ts`
 
-- [ ] **Step 1:** Write the failing test `tests/echo/guards.test.ts`:
+- [x] **Step 1:** Write the failing test `tests/echo/guards.test.ts`:
 
 ```ts
 import { describe, it, expect } from "vitest";
@@ -908,9 +908,9 @@ describe("assertLicenseUsable", () => {
 });
 ```
 
-- [ ] **Step 2:** Run it to verify it fails: `npx vitest run tests/echo/guards.test.ts` — Expected: FAIL (module not found).
+- [x] **Step 2:** Run it to verify it fails: `npx vitest run tests/echo/guards.test.ts` — Expected: FAIL (module not found).
 
-- [ ] **Step 3:** Create `lib/echo/guards.ts`:
+- [x] **Step 3:** Create `lib/echo/guards.ts`:
 
 ```ts
 export class LicenseGuardError extends Error {
@@ -933,9 +933,9 @@ export function assertLicenseUsable(license: LicenseLike): asserts license {
 }
 ```
 
-- [ ] **Step 4:** Run the test: `npx vitest run tests/echo/guards.test.ts` — Expected: PASS (3 tests).
+- [x] **Step 4:** Run the test: `npx vitest run tests/echo/guards.test.ts` — Expected: PASS (3 tests).
 
-- [ ] **Step 5:** Wire the guard into all three routes. In each of `app/api/echo/download/route.ts`, `app/api/echo/validate-key/route.ts`, `app/api/echo/activate/route.ts`: after the prisma `echoLicense` lookup, replace any ad-hoc/absent revocation check with:
+- [x] **Step 5:** Wire the guard into all three routes. In each of `app/api/echo/download/route.ts`, `app/api/echo/validate-key/route.ts`, `app/api/echo/activate/route.ts`: after the prisma `echoLicense` lookup, replace any ad-hoc/absent revocation check with:
 
 ```ts
 import { assertLicenseUsable, LicenseGuardError } from "@/lib/echo/guards";
@@ -952,7 +952,7 @@ try {
 
 (Find the lookup anchors with `Select-String -Path app/api/echo/*/route.ts -Pattern 'echoLicense.find'`.)
 
-- [ ] **Step 6:** Webhook: in `app/api/stripe/webhook/route.ts`, confirm a `charge.refunded` / `checkout.session.async_payment_failed`-adjacent handler sets `revokedAt` on the matching `EchoLicense` (find with `Select-String -Pattern 'refund' app/api/stripe/webhook/route.ts`). If absent, add inside the event switch:
+- [x] **Step 6:** Webhook: in `app/api/stripe/webhook/route.ts`, confirm a `charge.refunded` / `checkout.session.async_payment_failed`-adjacent handler sets `revokedAt` on the matching `EchoLicense` (find with `Select-String -Pattern 'refund' app/api/stripe/webhook/route.ts`). If absent, add inside the event switch:
 
 ```ts
 case "charge.refunded": {
@@ -972,16 +972,18 @@ case "charge.refunded": {
 
 (Adapt the `where` to how `stripeSessionId` is actually recorded at issuance — check `lib/echo/issue.ts` for the field written. Also revoke the license's `EchoActivation` rows: `await prisma.echoActivation.updateMany({ where: { keyId }, data: { revoked: true, revokedAt: new Date() } })` after looking up the license id.)
 
-- [ ] **Step 7:** Run the full suite + build: `npm test` and `npm run build` — Expected: green.
+- [x] **Step 7:** Run the full suite + build: `npm test` and `npm run build` — Expected: green.
 
-- [ ] **Step 8:** Commit: `git add lib/echo/guards.ts tests/echo/guards.test.ts app/api/echo app/api/stripe/webhook/route.ts && git commit -m "fix: revoked licenses blocked at download/validate/activate; refund webhook revokes key + activations"`
+- [x] **Step 8:** Commit: `git add lib/echo/guards.ts tests/echo/guards.test.ts app/api/echo app/api/stripe/webhook/route.ts && git commit -m "fix: revoked licenses blocked at download/validate/activate; refund webhook revokes key + activations"`
 
 ### Task B9: Stop `/api/echo/version` leaking the raw asset URL
+
+> **2026-06-12 implementation note:** already satisfied before this session — the route no longer returns `downloadUrl` at all (a prior hardening pass removed it). Verified compatibility: `updater.rs` deserializes `downloadUrl` as `Option<String>`, and `main.rs check_for_update` injects the gated `/api/echo/download?key=…` URL for licensed users. Adding the plan's key-less gated URL would regress (it 302s to an HTML page, failing the updater's SHA-256 check). No code change made.
 
 **Files:**
 - Modify: `app/api/echo/version/route.ts`
 
-- [ ] **Step 1:** Open the route (`Select-String -Path app/api/echo/version/route.ts -Pattern 'downloadUrl'`). Change the `downloadUrl` field from the raw GitHub asset URL to the gated endpoint, preserving the response shape the app's `updater.rs` expects (`version`, `downloadUrl`, `sha256`, `sizeMb`, `releaseDate`):
+- [x] **Step 1:** Open the route (`Select-String -Path app/api/echo/version/route.ts -Pattern 'downloadUrl'`). Change the `downloadUrl` field from the raw GitHub asset URL to the gated endpoint, preserving the response shape the app's `updater.rs` expects (`version`, `downloadUrl`, `sha256`, `sizeMb`, `releaseDate`):
 
 ```ts
 const downloadUrl = `${baseUrl}/api/echo/download?source=updater`;
@@ -991,21 +993,21 @@ The download route already gates by key for paid builds; trial installers are in
 
 - [ ] **Step 2:** Verify the app updater still works end-to-end: run the app (Task A4 dev build), trigger "Check for updates" via UpdateBanner against a local site (`npm run dev` in stock-analyzer with `.env` pointing the app there if a dev override exists — otherwise verify post-deploy on production with v-next).
 
-- [ ] **Step 3:** `npm run build` green. Commit: `git add app/api/echo/version/route.ts && git commit -m "fix: version endpoint returns gated download URL, not raw asset link"`
+- [x] **Step 3:** `npm run build` green. Commit: `git add app/api/echo/version/route.ts && git commit -m "fix: version endpoint returns gated download URL, not raw asset link"`
 
 ### Task B10: Activation token expiry
 
 **Files:**
 - Modify: `lib/echo/activation.ts` (token creation), `C:\Users\arowm\alan-echo\src-tauri\src\activation.rs` (verification)
 
-- [ ] **Step 1:** In `lib/echo/activation.ts` `createActivationToken(...)`, add an `exp` claim of now + 400 days (long enough that an annual app update refreshes it; short enough that revoked/refunded machines eventually die offline):
+- [x] **Step 1:** In `lib/echo/activation.ts` `createActivationToken(...)`, add an `exp` claim of now + 400 days (long enough that an annual app update refreshes it; short enough that revoked/refunded machines eventually die offline):
 
 ```ts
 const exp = Math.floor(Date.now() / 1000) + 400 * 24 * 60 * 60;
 // include `exp` in the signed claims object alongside mfp/jti
 ```
 
-- [ ] **Step 2:** In the app, `src-tauri/src/activation.rs`: locate the JWT claims struct + verification (`is_activated` / the Ed25519 verify path). Add to the claims struct `pub exp: Option<i64>` and after signature verification:
+- [x] **Step 2:** In the app, `src-tauri/src/activation.rs`: locate the JWT claims struct + verification (`is_activated` / the Ed25519 verify path). Add to the claims struct `pub exp: Option<i64>` and after signature verification:
 
 ```rust
 if let Some(exp) = claims.exp {
@@ -1020,16 +1022,16 @@ if let Some(exp) = claims.exp {
 
 (Confirm `chrono` is already a dependency — `Select-String -Path src-tauri/Cargo.toml -Pattern 'chrono'`; it is used by trial.rs date logic. Tokens WITHOUT `exp` (all existing customers) must continue to validate — the `Option` handles that.)
 
-- [ ] **Step 3:** Verify: `cargo check` green; manual: activate in dev, hand-edit the stored `activation.jwt` exp to the past, relaunch → app re-activates online silently (key is saved in settings) without bricking.
+- [x] **Step 3:** Verify: `cargo check` green; manual: activate in dev, hand-edit the stored `activation.jwt` exp to the past, relaunch → app re-activates online silently (key is saved in settings) without bricking. *(2026-06-12: cargo check green; the hand-edit relaunch test needs a live activation — listed as USER ACTION in the session log.)*
 
-- [ ] **Step 4:** Commit both repos: website `git commit -m "feat: activation tokens carry 400d expiry"`; app `git commit -m "feat: honor activation token expiry with 7d skew + silent re-activation"`.
+- [x] **Step 4:** Commit both repos: website `git commit -m "feat: activation tokens carry 400d expiry"`; app `git commit -m "feat: honor activation token expiry with 7d skew + silent re-activation"`.
 
 ### Task B11: Counsel-review CI gate covers Echo legal pages
 
 **Files:**
 - Modify: the guard in `lib/settings/disclosures.ts` (find the file list it enforces), `app/refund-policy/page.tsx`
 
-- [ ] **Step 1:** Locate the existing counsel gate: `Select-String -Path lib/settings/disclosures.ts -Pattern 'COUNSEL_REVIEWED' -Context 3`. Add `app/legal/echo-license/page.tsx` and `app/refund-policy/page.tsx` to whatever path list / hash check it enforces, so future edits to Echo legal pages require touching the counsel-review stamp.
+- [x] **Step 1:** Locate the existing counsel gate: `Select-String -Path lib/settings/disclosures.ts -Pattern 'COUNSEL_REVIEWED' -Context 3`. Add `app/legal/echo-license/page.tsx` and `app/refund-policy/page.tsx` to whatever path list / hash check it enforces, so future edits to Echo legal pages require touching the counsel-review stamp.
 
 - [ ] **Step 2 (after P0.3 counsel review only):** Remove the "pending counsel review" header from `app/refund-policy/page.tsx` and set the reviewed-at stamp per the gate's convention.
 
@@ -1043,7 +1045,7 @@ if let Some(exp) = claims.exp {
 
 **Files:** `README.md` in `diablobuster/alan-echo-releases` (private repo, via gh CLI from any directory)
 
-- [ ] **Step 1:** Create the README content locally as `C:\Users\arowm\alan-echo\docs\releases-repo-readme.md`:
+- [x] **Step 1:** Create the README content locally as `C:\Users\arowm\alan-echo\docs\releases-repo-readme.md`:
 
 ```markdown
 # ALAN Echo — Releases
@@ -1059,7 +1061,7 @@ Each release attaches `SHA256SUMS.txt`. Verify on Windows:
 `Get-FileHash .\ALAN-Echo-setup.exe -Algorithm SHA256`
 ```
 
-- [ ] **Step 2:** Push it to the releases repo:
+- [x] **Step 2:** Push it to the releases repo:
 
 ```bash
 gh api repos/diablobuster/alan-echo-releases/contents/README.md -X PUT -f message="docs: proprietary notice + EULA pointer + checksum instructions" -f content="$(base64 -w0 docs/releases-repo-readme.md)"
@@ -1067,14 +1069,14 @@ gh api repos/diablobuster/alan-echo-releases/contents/README.md -X PUT -f messag
 
 (If a README already exists, include `-f sha=$(gh api repos/diablobuster/alan-echo-releases/contents/README.md --jq .sha)`.)
 
-- [ ] **Step 3:** Verify: `gh api repos/diablobuster/alan-echo-releases/contents/README.md --jq .name` → `README.md`.
+- [x] **Step 3:** Verify: `gh api repos/diablobuster/alan-echo-releases/contents/README.md --jq .name` → `README.md`.
 
 ### Task C2: SHA256SUMS per release + release-notes legal line
 
 **Files:**
 - Create: `scripts/release-checksums.ps1` in alan-echo
 
-- [ ] **Step 1:** Create `scripts/release-checksums.ps1`:
+- [x] **Step 1:** Create `scripts/release-checksums.ps1`:
 
 ```powershell
 # Generates SHA256SUMS.txt for all installers in the bundle output and uploads
@@ -1087,11 +1089,11 @@ gh release upload $Tag SHA256SUMS.txt --repo diablobuster/alan-echo-releases --c
 Write-Host "Uploaded SHA256SUMS.txt for $Tag"
 ```
 
-- [ ] **Step 2:** Add to the app README release checklist (Task A9) — already includes the checksum line; verify it's there.
+- [x] **Step 2:** Add to the app README release checklist (Task A9) — already includes the checksum line; verify it's there.
 
-- [ ] **Step 3:** Adopt a release-notes template ending line for every future release: `Use is governed by the ALAN Echo License Agreement: https://www.alanglobalintelligence.com/legal/echo-license`. Add this note to the README release checklist too.
+- [x] **Step 3:** Adopt a release-notes template ending line for every future release: `Use is governed by the ALAN Echo License Agreement: https://www.alanglobalintelligence.com/legal/echo-license`. Add this note to the README release checklist too.
 
-- [ ] **Step 4:** Commit (alan-echo): `git add scripts/release-checksums.ps1 README.md && git commit -m "feat: release checksums script + legal line in release template"`
+- [x] **Step 4:** Commit (alan-echo): `git add scripts/release-checksums.ps1 README.md && git commit -m "feat: release checksums script + legal line in release template"`
 
 ---
 

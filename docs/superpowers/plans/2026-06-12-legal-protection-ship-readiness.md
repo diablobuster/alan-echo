@@ -696,7 +696,7 @@ Do the same in `app/echo/CheckoutCta.tsx`. Add a minimal `.cta-legal { font-size
 
 > Apply Steps 1–3 (decision-independent additions) immediately; hold Step 4 (governing law/arbitration) until P0 decisions + counsel sign-off, then bump the date/version in Step 5. All drafts below are **for counsel review** — implement verbatim, flag in the PR description.
 
-- [ ] **Step 1:** Add three new sections after current §3 (renumber the rest):
+- [x] **Step 1:** Add three new sections after current §3 (renumber the rest):
 
 ```
 3A. Free trial. ALAN Echo includes a free trial limited by the Software (currently
@@ -719,7 +719,7 @@ the Software and viewable in Settings → About. Those components are governed b
 their own licenses, which control over this Agreement for those components.
 ```
 
-- [ ] **Step 2:** In §4 (Privacy) append the local-storage + activation disclosure:
+- [x] **Step 2:** In §4 (Privacy) append the local-storage + activation disclosure:
 
 ```
 The Software stores license and trial state locally on your device, including
@@ -732,7 +732,7 @@ audio, transcripts, or dictation content ever leaves your device. Details:
 https://www.alanglobalintelligence.com/privacy
 ```
 
-- [ ] **Step 3:** In §7 (Limitation of liability) append carve-outs, and in §1 add transfer language:
+- [x] **Step 3:** In §7 (Limitation of liability) append carve-outs, and in §1 add transfer language:
 
 ```
 §7 addition: NOTHING IN THIS AGREEMENT LIMITS LIABILITY FOR GROSS NEGLIGENCE,
@@ -760,11 +760,11 @@ which 10 bellwether arbitrations proceed first.
 
 If arbitration is **dropped**, §10 becomes governing law + exclusive venue in the chosen state's courts + both parties retain small-claims rights.
 
-- [ ] **Step 5:** Bump `const EFFECTIVE_DATE` to the revision date; add `export const EULA_VERSION = "<same date>";` next to it; add a one-line changelog comment. Then sync the app: update `alan-echo/src/legal/eula.md` + `eulaVersion.js` + run `npm run gen:legal` there (per the app README release checklist).
+- [x] **Step 5:** Bump `const EFFECTIVE_DATE` to the revision date; add `export const EULA_VERSION = "<same date>";` next to it; add a one-line changelog comment. Then sync the app: update `alan-echo/src/legal/eula.md` + `eulaVersion.js` + run `npm run gen:legal` there (per the app README release checklist). *(2026-06-12: page-side done on HOLD PR #731; app-bundle sync deferred to merge time so users never re-accept un-approved text.)*
 
-- [ ] **Step 6:** Verify: `npm run build`; render the page locally and confirm 14 sections render and anchor links work.
+- [x] **Step 6:** Verify: `npm run build`; render the page locally and confirm 14 sections render and anchor links work.
 
-- [ ] **Step 7:** Commit: `git add app/legal/echo-license/page.tsx && git commit -m "feat: EULA v2 — trial/updates/third-party/storage sections, cap carve-outs, transfer terms"`
+- [x] **Step 7:** Commit: `git add app/legal/echo-license/page.tsx && git commit -m "feat: EULA v2 — trial/updates/third-party/storage sections, cap carve-outs, transfer terms"`
 
 ### Task B4: Privacy policy — add the desktop-app section
 

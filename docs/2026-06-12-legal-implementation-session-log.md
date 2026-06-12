@@ -78,7 +78,23 @@
 
 **Releases repo:** README commit `518965a` via gh API.
 
-**Session still in progress at last log update:** stock-analyzer `next build` verification running in background; 3 read-only audit agents (lenses 1–8, 10) gathering evidence; B3 (EULA v2, HOLD branch) + PRs + audit ledger pending. Each completes/updates below as it lands.
+**stock-analyzer `legal/echo-eula-v2-HOLD`** (2 commits off the consent branch): `58aa9af9` B3 EULA v2 (steps 1–3, 5–7 verbatim; §10 untouched) · `c33ac9db` merge of hero-claim fixes. Plus on the consent branch post-audit: `93a24435` hero-claims fix ("Nothing leaves" / "0 Network calls" scoped to dictation truth).
+
+## Pull requests
+
+- **alan-echo PR #1** — Workstreams A + C: https://github.com/diablobuster/alan-echo/pull/1
+- **stock-analyzer PR #730** — Workstream B Wave 1 + hardening: https://github.com/diablobuster/ALAN_post_integration/pull/730 (⚠️ deploy gates: Stripe ToS-URL confirmation + vercel-pre-deploy-check before merge)
+- **stock-analyzer PR #731** — **HOLD FOR COUNSEL** EULA v2: https://github.com/diablobuster/ALAN_post_integration/pull/731 (do not merge until P0.3; carries 3 counsel flags incl. the "validated offline" sentence and the 5-machine-cap wording conflict)
+
+## Final verification (post-B3)
+
+- stock-analyzer `npx prisma generate && npx next build --webpack`: ✓ exit 0 on the consent branch, and ✓ exit 0 again on the HOLD branch (superset of both).
+- v1.2.1 release: `SHA256SUMS.txt` computed from the **actual released asset** and attached (closing an audit CRITICAL). Asset hash: `6dbb09f5…9e76`.
+- ⚠️ **Open CRITICAL:** the site env `ECHO_INSTALLER_SHA256` (`576c16d0…2c44` in .env.prod.local) does NOT match the actual v1.2.1 asset — users following the verify-the-hash instructions today get a mismatch. USER ACTION: check the live Vercel value, update to `6dbb09f5…` or investigate why the asset and the recorded hash diverged.
+
+## Audit (per handoff: audit prompt run against this session's work)
+
+Full report: `docs/2026-06-12-legal-completeness-audit.md` — **Verdict: SHIP-READY WITH USER ACTIONS; open CRITICALs: 2** (installer-hash reconciliation above; copyright registration deadline 2026-09-10). Method: 3 parallel read-only evidence agents + primary re-verification of every FAIL. Two audit findings were closed in-session (SHA256SUMS upload; hero absolute claims fixed in `93a24435`); one agent CRITICAL was **refuted** on re-check (CAN-SPAM address IS present in the email template — it's the home-apartment/D3 issue, not a missing-address issue). Open HIGHs are counsel-text items flagged on PR #731 (live EULA "validated offline" falsehood; "any number of machines" vs 5-machine cap) plus the missing CalOPPA DNT sentence (no verbatim draft existed; not improvised).
 
 ## Session notes / deviations
 

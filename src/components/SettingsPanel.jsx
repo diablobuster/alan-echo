@@ -274,7 +274,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
               border: '1px solid color-mix(in srgb, var(--accent-yellow) 30%, transparent)',
               borderRadius: 'var(--echo-radius-sm)', color: 'var(--text-primary)',
             }}>
-              No microphone detected. Make sure a microphone is connected and that Windows allows this app to access it (Settings &rarr; Privacy &amp; Security &rarr; Microphone).
+              No microphone detected. Make sure a microphone is connected and that your system allows this app to access it (check Privacy &amp; Security &rarr; Microphone in your system settings).
             </div>
           )}
           <SettingsRow label="Input device">

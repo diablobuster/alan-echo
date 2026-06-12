@@ -3,7 +3,7 @@ use sha2::{Sha256, Digest};
 use std::io::{Read as _, Write};
 use tauri::{Emitter, AppHandle};
 
-const VERSION_URL: &str = "https://alanglobalintelligence.com/api/echo/version";
+const VERSION_URL: &str = "https://www.alanglobalintelligence.com/api/echo/version";
 
 fn current_platform() -> &'static str {
     if cfg!(target_os = "macos") { "mac" } else { "windows" }

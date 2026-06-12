@@ -650,7 +650,7 @@ fn check_for_update(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Resul
         let key = state.settings.lock().get_str("license_key");
         if let Some(k) = key {
             info.download_url = Some(format!(
-                "https://alanglobalintelligence.com/api/echo/download?key={}",
+                "https://www.alanglobalintelligence.com/api/echo/download?key={}",
                 k
             ));
         }
@@ -709,9 +709,10 @@ fn register_emit_hotkey(app: &tauri::AppHandle, accel: &str, event: &'static str
         .is_ok()
 }
 
-/// "CmdOrCtrl+Shift+X" → "Ctrl + Shift + X" for display.
+/// "CmdOrCtrl+Shift+X" → "Cmd + Shift + X" (Mac) or "Ctrl + Shift + X" (Windows).
 fn display_accel(accel: &str) -> String {
-    accel.replace("CmdOrCtrl", "Ctrl").replace('+', " + ")
+    let modifier = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+    accel.replace("CmdOrCtrl", modifier).replace('+', " + ")
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
@@ -1087,7 +1088,12 @@ fn main() {
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
             log::error!("Failed to build ALAN Echo: {}", e);
-            show_fatal_error(&format!("ALAN Echo failed to start.\n\n{}\n\nThis usually means WebView2 is missing or corrupted.\nReinstall WebView2 from Microsoft, then try again.", e));
+            let hint = if cfg!(target_os = "windows") {
+                "This usually means WebView2 is missing or corrupted.\nReinstall WebView2 from Microsoft, then try again."
+            } else {
+                "Try reinstalling the app or check Console.app for details."
+            };
+            show_fatal_error(&format!("ALAN Echo failed to start.\n\n{}\n\n{}", e, hint));
             std::process::exit(1);
         });
 

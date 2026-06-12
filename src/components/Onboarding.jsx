@@ -106,7 +106,7 @@ function StepMic() {
           borderRadius: 'var(--echo-radius-sm)', color: 'var(--text-primary)',
         }}>
           <Icon name="alert" size={12} color="var(--accent-yellow)" style={{ marginRight: 6, verticalAlign: '-2px' }} />
-          No microphone detected. Make sure a microphone is connected and that Windows allows this app to access it (Settings &rarr; Privacy &amp; Security &rarr; Microphone).
+          No microphone detected. Make sure a microphone is connected and that your system allows this app to access it (check Privacy &amp; Security &rarr; Microphone in your system settings).
         </div>
       )}
       <select

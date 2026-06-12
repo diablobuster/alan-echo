@@ -3,6 +3,7 @@ name = "alan-echo"
 version = "1.2.1"
 description = "ALAN Echo — Voice-to-text dictation by ALAN Global Intelligence"
 authors = ["ALAN Global Intelligence"]
+license = "LicenseRef-Proprietary"
 edition = "2021"
 
 [dependencies]

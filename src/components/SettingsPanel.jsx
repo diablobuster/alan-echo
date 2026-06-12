@@ -194,6 +194,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
           <SettingsRow label="Speech model" hint="Higher quality = more accurate, slower">
             <Seg
+              label="Speech model"
               options={['Basic', 'Standard', 'Enhanced', 'Ultra']}
               value={activeModelLabel}
               onChange={changeModel}
@@ -309,22 +310,23 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Behavior</div>
 
           <SettingsRow label="Auto-paste" hint="Automatically paste transcription into focused app">
-            <Toggle checked={settings.auto_paste !== false} onChange={v => updateSetting('auto_paste', v)} />
+            <Toggle label="Auto-paste" checked={settings.auto_paste !== false} onChange={v => updateSetting('auto_paste', v)} />
           </SettingsRow>
 
           <SettingsRow label="Launch at startup" hint="Start ALAN Echo when you log in">
-            <Toggle checked={autostart} onChange={async v => {
+            <Toggle label="Launch at startup" checked={autostart} onChange={async v => {
               setAutostart(v)
               try { await invoke('set_autostart', { enabled: v }) } catch (e) { console.error('Autostart error:', e); setAutostart(!v) }
             }} />
           </SettingsRow>
 
           <SettingsRow label="Sound feedback" hint="Play beeps when recording starts and stops">
-            <Toggle checked={settings.sound_enabled !== false} onChange={v => updateSetting('sound_enabled', v)} />
+            <Toggle label="Sound feedback" checked={settings.sound_enabled !== false} onChange={v => updateSetting('sound_enabled', v)} />
           </SettingsRow>
 
           <SettingsRow label="Text cleanup" hint="How aggressively to clean up transcriptions">
             <Seg
+              label="Text cleanup level"
               options={['light', 'standard', 'aggressive']}
               value={settings.text_cleanup_level || 'standard'}
               onChange={changeCleanup}
@@ -351,6 +353,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Appearance</div>
           <SettingsRow label="Theme">
             <Seg
+              label="Theme"
               options={['Light', 'Dark']}
               value={settings.theme === 'dark' ? 'Dark' : 'Light'}
               onChange={changeTheme}
@@ -746,9 +749,9 @@ function SettingsRow({ label, hint, children }) {
   )
 }
 
-function Seg({ options, value, onChange, disabled = [] }) {
+function Seg({ options, value, onChange, disabled = [], label }) {
   return (
-    <div style={{
+    <div role="radiogroup" aria-label={label} style={{
       display: 'flex', background: 'var(--bg-secondary)',
       borderRadius: 'var(--echo-radius-sm)', padding: 2, gap: 1,
     }}>
@@ -757,6 +760,8 @@ function Seg({ options, value, onChange, disabled = [] }) {
         return (
           <button
             key={opt}
+            role="radio"
+            aria-checked={opt === value}
             onClick={() => onChange(opt)}
             title={needsDownload ? 'Click to download this model' : undefined}
             style={{
@@ -778,14 +783,20 @@ function Seg({ options, value, onChange, disabled = [] }) {
   )
 }
 
-function Toggle({ checked, onChange }) {
+function Toggle({ checked, onChange, label }) {
   return (
-    <button onClick={() => onChange(!checked)} style={{
-      width: 36, height: 20, borderRadius: 10, padding: 2, border: 'none', cursor: 'pointer',
-      background: checked ? 'var(--accent-green)' : 'var(--bg-tertiary)',
-      transition: 'background 0.15s',
-      display: 'flex', alignItems: 'center',
-    }}>
+    <button
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      style={{
+        width: 36, height: 20, borderRadius: 10, padding: 2, border: 'none', cursor: 'pointer',
+        background: checked ? 'var(--accent-green)' : 'var(--bg-tertiary)',
+        transition: 'background 0.15s',
+        display: 'flex', alignItems: 'center',
+      }}
+    >
       <div style={{
         width: 16, height: 16, borderRadius: '50%', background: '#fff',
         transition: 'transform 0.15s',

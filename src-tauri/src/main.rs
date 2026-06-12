@@ -833,7 +833,26 @@ fn main() {
         })
         .unwrap_or_else(|e| {
             log::warn!("Settings load failed ({}), starting fresh", e);
-            Settings::new(settings_path.clone())
+            let mut fresh = Settings::new(settings_path.clone());
+            if let Ok(raw) = std::fs::read_to_string(&settings_path) {
+                if let Some(start) = raw.find("\"license_key\"") {
+                    if let Some(colon) = raw[start..].find(':') {
+                        let after = &raw[start + colon + 1..];
+                        let trimmed = after.trim_start();
+                        if trimmed.starts_with('"') {
+                            if let Some(end) = trimmed[1..].find('"') {
+                                let key = &trimmed[1..1 + end];
+                                if !key.is_empty() {
+                                    log::info!("Salvaged license_key from corrupt settings");
+                                    fresh.set("license_key", serde_json::Value::String(key.to_string()));
+                                    fresh.save().ok();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            fresh
         });
     // Keep a daily-ish backup next to the transcript backups — settings.json
     // holds the license key, the only file whose loss costs the customer.

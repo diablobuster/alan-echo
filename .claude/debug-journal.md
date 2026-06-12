@@ -1,5 +1,54 @@
 # ALAN Echo — Debug Journal
 
+## 2026-06-12 — Security hardening + 20-pass ultra audit
+
+### Issue: display_accel() showed "Ctrl" on Mac instead of "Cmd"
+- **Category**: OVERSIGHT
+- **What happened**: `display_accel()` hardcoded "Ctrl" as the replacement for "CmdOrCtrl". Mac users would see "Ctrl + Shift + Space" instead of "Cmd + Shift + Space".
+- **Root cause**: Original implementation assumed Windows-only deployment.
+- **Fix**: `if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }`.
+- **Lesson**: Every user-facing string that mentions a keyboard modifier must be platform-conditional.
+
+### Issue: WebView2 error message shown on Mac
+- **Category**: OVERSIGHT
+- **What happened**: Fatal startup error said "WebView2 is missing or corrupted" regardless of platform. macOS uses WKWebView, not WebView2.
+- **Fix**: Platform-conditional hint string.
+- **Lesson**: Every user-facing error message referencing system components must be cfg-gated.
+
+### Issue: Activation URL used non-www domain causing 307 redirect failure
+- **Category**: LOGIC-ERROR
+- **What happened**: `ACTIVATE_URL` was `https://alanglobalintelligence.com/api/echo/activate` (no www). The non-www domain returns a 307 redirect. While `ureq` follows redirects for GET, the POST body can be lost on redirect. Combined with CSRF middleware blocking the request (no Origin/Referer from desktop app), activation failed with "Failed to read JSON."
+- **Root cause**: Two bugs compounding: (1) wrong domain, (2) missing CSRF exemption.
+- **Fix**: Changed URL to www, added `/api/echo/activate` to CSRF exempt list.
+- **Lesson**: Every API URL in a non-browser client must use the canonical domain (www). CSRF exemptions must be added for desktop app endpoints.
+
+### Issue: Windows-specific text in platform-agnostic components
+- **Category**: OVERSIGHT
+- **What happened**: "AppData" referenced in LicenseGate.jsx, "Windows allows this app" in SettingsPanel.jsx and Onboarding.jsx.
+- **Fix**: Replaced with platform-generic language.
+- **Lesson**: Search all user-facing strings for "Windows", "AppData", "registry", "tray icon" etc. before Mac launch.
+
+### Issue: License keys emailed in plaintext despite D19 decision
+- **Category**: MISREAD (D19 not propagated to email.ts)
+- **What happened**: D19 says "Keys NEVER sent via email — display only at /echo/keys after login." But `lib/echo/email.ts` still embeds the key in HTML (line 92) and plaintext (line 189), plus a download URL with the key in a query parameter (line 51).
+- **Root cause**: D19 was decided after the email code was written. The email code was not updated.
+- **Fix**: Pending user decision — the email should link to /echo/keys instead of showing the key.
+- **Lesson**: When a decision changes the behavior of existing code, grep for ALL references and update them.
+
+### Issue: All Rust API URLs used non-www domain
+- **Category**: COPY-PASTE
+- **What happened**: After fixing activation.rs, discovered packs.rs (GPU download), main.rs (key download), and updater.rs (version check) also used the non-www domain. Each adds an unnecessary 307 redirect hop.
+- **Fix**: Changed all 4 remaining URLs to www.
+- **Lesson**: When fixing a domain/URL pattern, grep for ALL occurrences across the entire codebase, not just the one that caused the bug.
+
+### Verified this session
+- All 17 cargo tests pass after HMAC key change (random bytes, trial state roundtrips correctly)
+- Binary size: 11.52 MB (down from ~19MB with LTO+strip)
+- `strings` verification: no "arowm", no "ALAN_ECHO_TRIAL", no HMAC key fragments
+- Mac CI build succeeds on GitHub Actions (6m20s, 134.78 MB DMG)
+- Activation endpoint returns proper JSON errors (not "Forbidden")
+- Stock-analyzer builds with all changes (settings overlay, middleware, testimonials)
+
 ## 2026-06-10 — Ship-readiness overhaul session
 
 ### Issue: Handoff claimed whisper-server.exe was "already downloaded" at models/ root

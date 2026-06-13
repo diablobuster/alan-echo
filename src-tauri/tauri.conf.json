@@ -33,6 +33,8 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "dmg"],
+    "copyright": "© 2026 ALAN Global Intelligence. All rights reserved.",
+    "licenseFile": "../legal/EULA.txt",
     "resources": {
       "resources/models": "models"
     },

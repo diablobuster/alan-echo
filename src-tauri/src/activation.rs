@@ -55,6 +55,18 @@ pub fn verify_token(token: &str, expected_mfp: &str) -> Result<serde_json::Value
         return Err("Machine fingerprint mismatch".into());
     }
 
+    // Tokens carry a 400-day `exp` since 2026-06; older tokens have none and
+    // stay valid forever (existing customers must never be bricked by an
+    // update). 7-day grace absorbs clock skew; an expired token just reads as
+    // not-activated, and check_license silently re-activates with the saved key.
+    if let Some(exp) = claims.get("exp").and_then(|v| v.as_i64()) {
+        let now = chrono::Utc::now().timestamp();
+        if now > exp + 7 * 86_400 {
+            log::info!("Activation token expired; silent re-activation will refresh it");
+            return Err("Activation token expired".into());
+        }
+    }
+
     Ok(claims)
 }
 
@@ -87,8 +99,11 @@ pub fn activate_online(key: &str, data_dir: &Path) -> Result<String, String> {
     verify_token(token, &mfp)?;
 
     let path = token_path(data_dir);
-    std::fs::write(&path, token)
+    let tmp = path.with_extension("jwt.tmp");
+    std::fs::write(&tmp, token)
         .map_err(|e| format!("Could not save activation token: {}", e))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("Could not finalize activation token: {}", e))?;
 
     Ok(token.to_string())
 }

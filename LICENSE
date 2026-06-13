@@ -1,0 +1,9 @@
+ALAN Echo — Proprietary Software
+© 2026 ALAN Global Intelligence. All rights reserved.
+
+This repository contains proprietary software. No license is granted to copy,
+modify, distribute, or use this software except as set out in the ALAN Echo
+License Agreement: https://www.alanglobalintelligence.com/legal/echo-license
+
+Third-party open-source components are listed in
+src/legal/third-party-notices.txt and remain under their own licenses.

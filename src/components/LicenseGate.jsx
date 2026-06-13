@@ -163,7 +163,7 @@ export default function LicenseGate({ onActivated }) {
             textAlign: 'center', lineHeight: 1.5,
           }}>
             Heads up: the key couldn&apos;t be saved to disk (is the drive full,
-            or antivirus blocking AppData?). It works for this session, but you
+            or permissions blocking the data folder?). It works for this session, but you
             may need to enter it again next launch.
           </div>
         )}

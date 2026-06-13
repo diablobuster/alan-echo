@@ -73,6 +73,10 @@ fn update_transcript(state: State<Arc<AppState>>, id: i64, text: String) -> Resu
 
 #[tauri::command]
 fn export_transcripts(state: State<Arc<AppState>>, path: String, format: String) -> Result<bool, String> {
+    let p = std::path::Path::new(&path);
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("Export path must not contain '..'".into());
+    }
     state.db.lock().export(&path, &format).map_err(|e| e.to_string())
 }
 
@@ -206,11 +210,30 @@ fn get_trial_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, St
 }
 
 #[tauri::command]
+fn quit_app() {
+    // EULA declined — exit cleanly before any engine/tray initialization matters.
+    std::process::exit(0);
+}
+
+#[tauri::command]
 fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
     if cfg!(debug_assertions) {
         return Ok(true);
     }
     if state.license.lock().is_licensed() {
+        // Housekeeping, never gating: if the activation token is missing or
+        // expired (tokens carry a 400-day exp), refresh it in the background
+        // with the saved key. Failures only log — a paying user always boots.
+        if !activation::is_activated(&state.data_dir) {
+            if let Some(key) = state.settings.lock().get_str("license_key") {
+                let data_dir = state.data_dir.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = activation::activate_online(&key, &data_dir) {
+                        log::info!("Silent re-activation failed (will retry next launch): {}", e);
+                    }
+                });
+            }
+        }
         return Ok(true);
     }
     Ok(activation::is_activated(&state.data_dir))
@@ -650,7 +673,7 @@ fn check_for_update(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Resul
         let key = state.settings.lock().get_str("license_key");
         if let Some(k) = key {
             info.download_url = Some(format!(
-                "https://alanglobalintelligence.com/api/echo/download?key={}",
+                "https://www.alanglobalintelligence.com/api/echo/download?key={}",
                 k
             ));
         }
@@ -709,9 +732,10 @@ fn register_emit_hotkey(app: &tauri::AppHandle, accel: &str, event: &'static str
         .is_ok()
 }
 
-/// "CmdOrCtrl+Shift+X" → "Ctrl + Shift + X" for display.
+/// "CmdOrCtrl+Shift+X" → "Cmd + Shift + X" (Mac) or "Ctrl + Shift + X" (Windows).
 fn display_accel(accel: &str) -> String {
-    accel.replace("CmdOrCtrl", "Ctrl").replace('+', " + ")
+    let modifier = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+    accel.replace("CmdOrCtrl", modifier).replace('+', " + ")
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
@@ -809,7 +833,26 @@ fn main() {
         })
         .unwrap_or_else(|e| {
             log::warn!("Settings load failed ({}), starting fresh", e);
-            Settings::new(settings_path.clone())
+            let mut fresh = Settings::new(settings_path.clone());
+            if let Ok(raw) = std::fs::read_to_string(&settings_path) {
+                if let Some(start) = raw.find("\"license_key\"") {
+                    if let Some(colon) = raw[start..].find(':') {
+                        let after = &raw[start + colon + 1..];
+                        let trimmed = after.trim_start();
+                        if trimmed.starts_with('"') {
+                            if let Some(end) = trimmed[1..].find('"') {
+                                let key = &trimmed[1..1 + end];
+                                if !key.is_empty() {
+                                    log::info!("Salvaged license_key from corrupt settings");
+                                    fresh.set("license_key", serde_json::Value::String(key.to_string()));
+                                    fresh.save().ok();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            fresh
         });
     // Keep a daily-ish backup next to the transcript backups — settings.json
     // holds the license key, the only file whose loss costs the customer.
@@ -1053,6 +1096,7 @@ fn main() {
             export_transcripts,
             get_settings,
             set_setting,
+            quit_app,
             validate_license,
             check_license,
             get_trial_status,
@@ -1087,7 +1131,12 @@ fn main() {
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
             log::error!("Failed to build ALAN Echo: {}", e);
-            show_fatal_error(&format!("ALAN Echo failed to start.\n\n{}\n\nThis usually means WebView2 is missing or corrupted.\nReinstall WebView2 from Microsoft, then try again.", e));
+            let hint = if cfg!(target_os = "windows") {
+                "This usually means WebView2 is missing or corrupted.\nReinstall WebView2 from Microsoft, then try again."
+            } else {
+                "Try reinstalling the app or check Console.app for details."
+            };
+            show_fatal_error(&format!("ALAN Echo failed to start.\n\n{}\n\n{}", e, hint));
             std::process::exit(1);
         });
 

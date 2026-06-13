@@ -224,6 +224,7 @@ export default function Dashboard() {
         } catch (e) {
           setError('Transcription failed — ' + (e || 'unknown error'))
           console.error('Transcription error:', e)
+          discardWav(recording?.wav_path)
         }
         applyStatus('ready')
       }

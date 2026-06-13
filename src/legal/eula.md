@@ -1,0 +1,63 @@
+# ALAN Echo License Agreement
+
+Effective: June 10, 2026
+
+This End-User License Agreement (the "Agreement") is between you and ALAN Global Intelligence LLC ("ALAN") and governs your use of the ALAN Echo desktop application (the "Software"). By installing or using the Software, or by activating a license key, you agree to this Agreement. ALAN Echo is licensed, not sold.
+
+## 1. License grant
+
+Upon payment (or valid redemption of a promotional key), ALAN grants you a perpetual, non-exclusive, non-transferable license to install and use the Software on Windows devices that you personally own or control, for personal or internal business use. One license per person: a single key may not be used concurrently by multiple people.
+
+## 2. What your license includes
+
+- The ALAN Echo application and the bundled speech-recognition model.
+- All updates published for the 1.x version line, delivered as downloadable installers.
+- Use on any number of machines you own or control (reinstalls, new computers, and hardware changes do not invalidate your key).
+
+## 3. Restrictions
+
+You may not:
+
+- Resell, rent, lease, sublicense, or distribute the Software or your license key.
+- Publish or share your license key, or use a key you did not lawfully purchase or receive from ALAN.
+- Reverse engineer, decompile, or disassemble the Software, except where applicable law expressly permits it notwithstanding this limitation.
+- Remove or alter any proprietary notices in the Software.
+- Use the Software to violate any law, or to transcribe audio you do not have the right to record or process.
+
+Open-source components included with the Software (including the whisper.cpp inference engine and the bundled speech model) remain governed by their own licenses, which are not limited by this section.
+
+## 4. Privacy — processing happens on your device
+
+The Software performs all audio recording, transcription, and storage locally on your device. It does not transmit your audio, transcripts, usage data, or telemetry to ALAN or any third party. License keys are validated offline. See the Privacy Policy for the full statement, including the separate (website) data practices that apply when you purchase.
+
+## 5. Refunds
+
+Purchases of the Software carry a 30-day money-back guarantee as described in the Refund Policy. If a refund is issued, this license terminates and you must uninstall the Software.
+
+## 6. Disclaimer of warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. SPEECH RECOGNITION IS PROBABILISTIC: ALAN DOES NOT WARRANT THAT TRANSCRIPTIONS WILL BE ACCURATE, COMPLETE, OR SUITABLE FOR ANY PARTICULAR PURPOSE. YOU ARE RESPONSIBLE FOR REVIEWING TRANSCRIBED TEXT BEFORE RELYING ON IT.
+
+## 7. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, ALAN'S TOTAL LIABILITY ARISING OUT OF OR RELATING TO THIS AGREEMENT OR THE SOFTWARE WILL NOT EXCEED THE AMOUNT YOU PAID FOR YOUR LICENSE, AND ALAN WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY LOSS OF DATA, PROFITS, OR BUSINESS, EVEN IF ADVISED OF THE POSSIBILITY. SOME JURISDICTIONS DO NOT ALLOW CERTAIN LIMITATIONS, SO PARTS OF THIS SECTION MAY NOT APPLY TO YOU.
+
+## 8. Termination
+
+This Agreement terminates automatically if you materially breach it (including key sharing or redistribution). Upon termination you must uninstall the Software and destroy all copies. Sections 6–10 survive termination.
+
+## 9. Export and encryption notice
+
+The Software uses standard cryptographic functions (HMAC-SHA-256) solely for license-key validation and is distributed from the United States. You may not use or export the Software in violation of U.S. export laws and regulations.
+
+## 10. Governing law and disputes
+
+This Agreement is governed by the laws of the State of Texas, without regard to conflict-of-law principles. Any dispute arising out of or relating to this Agreement shall be resolved by binding arbitration administered by the American Arbitration Association before one arbitrator seated in Dallas, Texas, except that either party may bring qualifying claims in small-claims court or seek injunctive relief for intellectual-property violations in any court of competent jurisdiction.
+
+## 11. Contact
+
+Questions about this Agreement: support@alanglobalintelligence.com.
+
+---
+
+ALAN Echo · ALAN Global Intelligence LLC · one-time license · 30-day money-back guarantee

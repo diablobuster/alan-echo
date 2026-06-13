@@ -3,6 +3,8 @@ import Icon from './Icons'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { applyTheme } from '../theme'
+import pkg from '../../package.json'
+import notices from '../legal/third-party-notices.txt?raw'
 
 // Must contain aggressive-only tokens ("gonna", "in order to") so the preview
 // visibly differs between standard and aggressive — pinned by the
@@ -26,6 +28,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [autostart, setAutostart] = useState(false)
   const [hasMultilingualModel, setHasMultilingualModel] = useState(true)
   const [modelDownload, setModelDownload] = useState(null) // null | {stage, percent, ...}
+  const [showNotices, setShowNotices] = useState(false)
   const pollRef = useRef(null)
 
   const LANGUAGES = [
@@ -191,6 +194,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
 
           <SettingsRow label="Speech model" hint="Higher quality = more accurate, slower">
             <Seg
+              label="Speech model"
               options={['Basic', 'Standard', 'Enhanced', 'Ultra']}
               value={activeModelLabel}
               onChange={changeModel}
@@ -274,7 +278,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
               border: '1px solid color-mix(in srgb, var(--accent-yellow) 30%, transparent)',
               borderRadius: 'var(--echo-radius-sm)', color: 'var(--text-primary)',
             }}>
-              No microphone detected. Make sure a microphone is connected and that Windows allows this app to access it (Settings &rarr; Privacy &amp; Security &rarr; Microphone).
+              No microphone detected. Make sure a microphone is connected and that your system allows this app to access it (check Privacy &amp; Security &rarr; Microphone in your system settings).
             </div>
           )}
           <SettingsRow label="Input device">
@@ -306,22 +310,23 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Behavior</div>
 
           <SettingsRow label="Auto-paste" hint="Automatically paste transcription into focused app">
-            <Toggle checked={settings.auto_paste !== false} onChange={v => updateSetting('auto_paste', v)} />
+            <Toggle label="Auto-paste" checked={settings.auto_paste !== false} onChange={v => updateSetting('auto_paste', v)} />
           </SettingsRow>
 
           <SettingsRow label="Launch at startup" hint="Start ALAN Echo when you log in">
-            <Toggle checked={autostart} onChange={async v => {
+            <Toggle label="Launch at startup" checked={autostart} onChange={async v => {
               setAutostart(v)
               try { await invoke('set_autostart', { enabled: v }) } catch (e) { console.error('Autostart error:', e); setAutostart(!v) }
             }} />
           </SettingsRow>
 
           <SettingsRow label="Sound feedback" hint="Play beeps when recording starts and stops">
-            <Toggle checked={settings.sound_enabled !== false} onChange={v => updateSetting('sound_enabled', v)} />
+            <Toggle label="Sound feedback" checked={settings.sound_enabled !== false} onChange={v => updateSetting('sound_enabled', v)} />
           </SettingsRow>
 
           <SettingsRow label="Text cleanup" hint="How aggressively to clean up transcriptions">
             <Seg
+              label="Text cleanup level"
               options={['light', 'standard', 'aggressive']}
               value={settings.text_cleanup_level || 'standard'}
               onChange={changeCleanup}
@@ -348,6 +353,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Appearance</div>
           <SettingsRow label="Theme">
             <Seg
+              label="Theme"
               options={['Light', 'Dark']}
               value={settings.theme === 'dark' ? 'Dark' : 'Light'}
               onChange={changeTheme}
@@ -372,6 +378,68 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           {!hotkeys.cancel && (
             <div style={{ fontSize: 10, color: 'var(--accent-yellow)', marginTop: 4 }}>
               Cancel hotkey could not be registered — another app may be using it. Press Esc in the dashboard instead.
+            </div>
+          )}
+
+          {/* About & legal */}
+          <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>About</div>
+
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+            <div>ALAN Echo v{pkg.version}</div>
+            <div>© 2026 ALAN Global Intelligence. All rights reserved.</div>
+            <div style={{ marginTop: 6 }}>
+              {[
+                { label: 'License Agreement', url: 'https://www.alanglobalintelligence.com/legal/echo-license' },
+                { label: 'Privacy Policy', url: 'https://www.alanglobalintelligence.com/privacy' },
+              ].map((link, i) => (
+                <span key={link.url}>
+                  {i > 0 && <span style={{ color: 'var(--text-faint)' }}> · </span>}
+                  <a
+                    href={link.url}
+                    onClick={e => {
+                      e.preventDefault()
+                      invoke('plugin:shell|open', { path: link.url }).catch(() => {
+                        window.open(link.url, '_blank', 'noopener')
+                      })
+                    }}
+                    style={{ color: 'var(--echo-accent)', textDecoration: 'none' }}
+                  >
+                    {link.label}
+                  </a>
+                </span>
+              ))}
+              <span style={{ color: 'var(--text-faint)' }}> · </span>
+              <button
+                onClick={() => setShowNotices(v => !v)}
+                style={{
+                  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                  fontSize: 11, fontFamily: 'inherit', color: 'var(--echo-accent)',
+                }}
+              >
+                Open-source licenses
+              </button>
+            </div>
+          </div>
+
+          {showNotices && (
+            <div style={{
+              marginTop: 8, maxHeight: '40vh', overflowY: 'auto',
+              background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+              borderRadius: 'var(--echo-radius-sm)', padding: '8px 10px',
+            }}>
+              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 9, lineHeight: 1.5, margin: 0, color: 'var(--text-secondary)' }}>
+                {notices}
+              </pre>
+              <button
+                onClick={() => setShowNotices(false)}
+                style={{
+                  marginTop: 8, padding: '5px 10px', background: 'none',
+                  border: '1px solid var(--border-primary)', borderRadius: 'var(--echo-radius-sm)',
+                  fontSize: 10, cursor: 'pointer', color: 'var(--text-secondary)', fontFamily: 'inherit',
+                }}
+              >
+                Close
+              </button>
             </div>
           )}
         </div>
@@ -681,9 +749,9 @@ function SettingsRow({ label, hint, children }) {
   )
 }
 
-function Seg({ options, value, onChange, disabled = [] }) {
+function Seg({ options, value, onChange, disabled = [], label }) {
   return (
-    <div style={{
+    <div role="radiogroup" aria-label={label} style={{
       display: 'flex', background: 'var(--bg-secondary)',
       borderRadius: 'var(--echo-radius-sm)', padding: 2, gap: 1,
     }}>
@@ -692,6 +760,8 @@ function Seg({ options, value, onChange, disabled = [] }) {
         return (
           <button
             key={opt}
+            role="radio"
+            aria-checked={opt === value}
             onClick={() => onChange(opt)}
             title={needsDownload ? 'Click to download this model' : undefined}
             style={{
@@ -713,14 +783,20 @@ function Seg({ options, value, onChange, disabled = [] }) {
   )
 }
 
-function Toggle({ checked, onChange }) {
+function Toggle({ checked, onChange, label }) {
   return (
-    <button onClick={() => onChange(!checked)} style={{
-      width: 36, height: 20, borderRadius: 10, padding: 2, border: 'none', cursor: 'pointer',
-      background: checked ? 'var(--accent-green)' : 'var(--bg-tertiary)',
-      transition: 'background 0.15s',
-      display: 'flex', alignItems: 'center',
-    }}>
+    <button
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      style={{
+        width: 36, height: 20, borderRadius: 10, padding: 2, border: 'none', cursor: 'pointer',
+        background: checked ? 'var(--accent-green)' : 'var(--bg-tertiary)',
+        transition: 'background 0.15s',
+        display: 'flex', alignItems: 'center',
+      }}
+    >
       <div style={{
         width: 16, height: 16, borderRadius: '50%', background: '#fff',
         transition: 'transform 0.15s',

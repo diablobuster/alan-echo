@@ -43,20 +43,20 @@ static HALLUCINATION_EXACT: &[&str] = &[
 ];
 
 static RE_HALLUCINATIONS: Lazy<Vec<Regex>> = Lazy::new(|| vec![
-    Regex::new(r"(?i)thanks?\s+for\s+(watching|listening)").unwrap(),
-    Regex::new(r"(?i)please\s+(like\s+and\s+)?subscribe").unwrap(),
-    Regex::new(r"(?i)see\s+you\s+(in\s+the\s+)?next\s+(video|episode|time)").unwrap(),
-    Regex::new(r"(?i)don'?t\s+forget\s+to\s+(like|subscribe|comment|share)").unwrap(),
-    Regex::new(r"(?i)hit\s+the\s+(bell|notification|like)").unwrap(),
-    Regex::new(r"\[.*?\]").unwrap(),
-    Regex::new(r"\(.*?\)").unwrap(),
+    Regex::new(r"(?i)thanks?\s+for\s+(watching|listening)").expect("hallucination regex 1"),
+    Regex::new(r"(?i)please\s+(like\s+and\s+)?subscribe").expect("hallucination regex 2"),
+    Regex::new(r"(?i)see\s+you\s+(in\s+the\s+)?next\s+(video|episode|time)").expect("hallucination regex 3"),
+    Regex::new(r"(?i)don'?t\s+forget\s+to\s+(like|subscribe|comment|share)").expect("hallucination regex 4"),
+    Regex::new(r"(?i)hit\s+the\s+(bell|notification|like)").expect("hallucination regex 5"),
+    Regex::new(r"\[.*?\]").expect("bracket regex"),
+    Regex::new(r"\(.*?\)").expect("paren regex"),
 ]);
 
 // No backreference regex — word repetition handled programmatically in remove_word_repetitions()
-static RE_MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
-static RE_DOUBLE_PERIOD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").unwrap());
-static RE_SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([.,!?;:])").unwrap());
-static RE_STANDALONE_I: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bi\b").unwrap());
+static RE_MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("multi-space regex"));
+static RE_DOUBLE_PERIOD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").expect("double-period regex"));
+static RE_SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([.,!?;:])").expect("space-before-punct regex"));
+static RE_STANDALONE_I: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bi\b").expect("standalone-i regex"));
 
 pub struct TextCleanupEngine {
     level: String,

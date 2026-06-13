@@ -1,4 +1,5 @@
 import Icon, { Kbd } from './Icons'
+import pkg from '../../package.json'
 
 function HotkeyHint({ accel, label }) {
   if (!accel) return null
@@ -29,7 +30,7 @@ export default function FooterBar({ hotkeys = {} }) {
       </div>
 
       <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>
-        Echo v1.2.1
+        © 2026 ALAN · Echo v{pkg.version}
       </span>
     </div>
   )

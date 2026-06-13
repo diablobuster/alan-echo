@@ -77,8 +77,8 @@ impl PackKind {
             return u;
         }
         match self {
-            Self::Cuda => "https://alanglobalintelligence.com/api/echo/download/gpu".to_string(),
-            Self::Vulkan => "https://alanglobalintelligence.com/api/echo/download/vulkan".to_string(),
+            Self::Cuda => "https://www.alanglobalintelligence.com/api/echo/download/gpu".to_string(),
+            Self::Vulkan => "https://www.alanglobalintelligence.com/api/echo/download/vulkan".to_string(),
         }
     }
 

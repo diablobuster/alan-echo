@@ -485,15 +485,22 @@ impl Drop for WhisperEngine {
     }
 }
 
+const VALID_LANGUAGES: &[&str] = &[
+    "en", "es", "fr", "de", "pt", "ja", "zh", "ko", "it", "nl", "auto",
+    "ar", "cs", "da", "fi", "el", "he", "hi", "hu", "id", "ms", "no",
+    "pl", "ro", "ru", "sk", "sv", "th", "tr", "uk", "vi",
+];
+
 fn spawn_server(binary: &Path, model: &Path, port: u16, threads: usize, language: &str) -> Result<Child, String> {
+    let safe_lang = if VALID_LANGUAGES.contains(&language) { language } else { "en" };
     let mut cmd = Command::new(binary);
     cmd.args([
         "-m", &model.to_string_lossy(),
         "--host", HOST,
         "--port", &port.to_string(),
-        "-l", language,
+        "-l", safe_lang,
         "-t", &threads.to_string(),
-        "-sns", // suppress non-speech tokens — fewer [MUSIC]-style hallucinations
+        "-sns",
     ]);
     if let Some(dir) = binary.parent() {
         cmd.current_dir(dir);
@@ -649,8 +656,17 @@ fn model_name_from_file(file: &str) -> Option<String> {
 }
 
 fn get_wav_duration(path: &str) -> Option<f64> {
-    let reader = hound::WavReader::open(path).ok()?;
+    let reader = match hound::WavReader::open(path) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("Could not read WAV header for {}: {}", path, e);
+            return None;
+        }
+    };
     let spec = reader.spec();
+    if spec.sample_rate == 0 || spec.channels == 0 {
+        return None;
+    }
     let samples = reader.len() as f64;
     Some(samples / spec.sample_rate as f64 / spec.channels as f64)
 }

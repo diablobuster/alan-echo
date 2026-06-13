@@ -70,6 +70,28 @@ Re-verified both audit CRITICALs against live production (not just asserted):
 
 **NEW finding (blocker for PR #731, ties to P0.1):** the live web EULA, the bundled app EULA (`src/legal/eula.md`), the NSIS installer license page (confirmed via user screenshot), and the Stripe receipt all name the contracting party as **"ALAN Global Intelligence LLC"** — but **no LLC exists** (Stripe business type = individual, Richard Romano; P0.1 entity decision still open). Customers are currently agreeing to a contract with a non-existent legal entity → potential unenforceability + misrepresentation. Resolution options: (a) form the CO LLC (~$50, recommended — makes the live text true, matches the liability analysis), or (b) revise EULA to name the individual/sole-prop until an LLC exists. Either way this gates PR #731 and should update Stripe legal entity to match. Awaiting user direction on entity formation.
 
+## Addendum 4 (same session): LLC → sole-proprietorship entity correction
+
+User directive: "fix it for us — we are not gonna be an LLC for a week." Removed the false entity claim everywhere it was customer-facing (not just the Echo EULA — the grep found it sitewide, plus a worse variant on the platform terms).
+
+**Website (PR #733, MERGED to main, deployed):**
+- `ALAN Global Intelligence LLC` → `ALAN Global Intelligence` in echo-license, terms, privacy, accept-terms.
+- `ALAN INTELLIGENCE LLC` → `ALAN Global Intelligence` in legal/disclaimer, legal/disclosures.
+- `a corporation organized under the laws of the State of Texas` → `a sole proprietorship` in terms §1.1 + accept-terms (this was triple-false: no entity, LLC≠corporation, business is in CO not TX).
+- Governing-law/arbitration clauses **untouched** (separate P0.1/P0.2 decision).
+- `lib/settings/disclosures.ts` touched with a documentation comment (satisfies counsel-review CI gate) — sign-off date left at 2026-06-09; this is a falsehood-correction, not new counsel-reviewed wording.
+- **Caught a near-miss:** `gh pr create` auto-targeted base `staging` (repo default), not `main` — showed 1,868 files / CONFLICTING. Retargeted to `main` → 7 files, MERGEABLE. Local full prod build green before merge.
+
+**App (alan-echo main, v1.2.3 PUBLISHED):**
+- `src/legal/eula.md` LLC reference removed; `legal/EULA.txt` regenerated (0 "LLC"); bumped 1.2.2 → 1.2.3.
+- `EULA_VERSION` intentionally **unchanged** (still 2026-06-10) — a party-name correction doesn't force re-acceptance; the version bumps when the LLC forms (~1 week, the natural re-accept event).
+- Built v1.2.3 installer, published to releases repo with notes + SHA256SUMS. **v1.2.3 hash = `74569fc6b36c3313881b77bea43b989bd209ff4bd5c01acc8c4941134c9996c7`**.
+- v1.2.2 (hash `f40800dd…`) **superseded, NOT replaced** (no-replace rule) — it still contains the false "LLC" EULA but is **unserved** (envs → v1.2.1) and private; left in place, recommend the user delete or ignore it.
+
+**Revert when the LLC is formed (~1 week):** restore entity name + "a limited liability company organized under the laws of [state]" in the 6 web files, restore "LLC" in eula.md, regen EULA.txt, bump app version + EULA_VERSION, bump the disclosures.ts review block. One-line-per-file.
+
+**Updated gated-serve target:** when the user confirms the EULA-gate click-test, serve **v1.2.3** (not v1.2.2): set `ECHO_RELEASE_TAG=v1.2.3`, both `ECHO_INSTALLER_SHA256` and `NEXT_PUBLIC_ECHO_INSTALLER_SHA256` → `74569fc6…`, update `NEXT_PUBLIC_ECHO_INSTALLER_VERSION/MB/RELEASE_DATE`, then redeploy.
+
 ## Follow-ups
 
 1. User action (time-sensitive): copyright registration before the proposed fee increase finalizes ($65→$85 NPRM) and ideally within 3 months of first publication (§ 412 window) — after a one-hour attorney consult on the AI-generated-code disclosure question.

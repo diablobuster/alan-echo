@@ -2,7 +2,7 @@ ALAN Echo License Agreement
 
 Effective: June 10, 2026
 
-This End-User License Agreement (the "Agreement") is between you and ALAN Global Intelligence LLC ("ALAN") and governs your use of the ALAN Echo desktop application (the "Software"). By installing or using the Software, or by activating a license key, you agree to this Agreement. ALAN Echo is licensed, not sold.
+This End-User License Agreement (the "Agreement") is between you and ALAN Global Intelligence ("ALAN") and governs your use of the ALAN Echo desktop application (the "Software"). By installing or using the Software, or by activating a license key, you agree to this Agreement. ALAN Echo is licensed, not sold.
 
 1. License grant
 
@@ -60,4 +60,4 @@ Questions about this Agreement: support@alanglobalintelligence.com.
 
 ---
 
-ALAN Echo · ALAN Global Intelligence LLC · one-time license · 30-day money-back guarantee
+ALAN Echo · ALAN Global Intelligence · one-time license · 30-day money-back guarantee

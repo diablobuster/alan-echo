@@ -46,6 +46,9 @@ export default function EulaGate({ onAccepted }) {
         <div className="eula-gate-text" tabIndex={0}>
           <pre>{eulaText}</pre>
         </div>
+        <p className="eula-gate-assent" style={{ fontSize: 12, textAlign: 'center', opacity: 0.78, margin: '0 0 8px' }}>
+          By clicking &ldquo;I Agree — Continue&rdquo; you accept the ALAN Echo License Agreement shown above.
+        </p>
         <div className="eula-gate-actions">
           <button className="btn-secondary" onClick={handleDecline} disabled={saving}>
             Decline &amp; Quit

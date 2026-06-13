@@ -107,13 +107,23 @@ export default function DetailPanel({ transcript, onCopy, onDelete, onSaveEdit }
           }}
         />
       ) : (
-        <div style={{
-          flex: 1, padding: '14px 16px', overflow: 'auto',
-          fontSize: 13, lineHeight: 1.7, color: 'var(--text-primary)',
-          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-        }}>
-          {text}
-        </div>
+        <>
+          <div style={{
+            flex: 1, padding: '14px 16px', overflow: 'auto',
+            fontSize: 13, lineHeight: 1.7, color: 'var(--text-primary)',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+          }}>
+            {text}
+          </div>
+          <div style={{
+            padding: '6px 14px', borderTop: '1px solid var(--border-primary)',
+            fontSize: 10.5, color: 'var(--text-faint)',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <Icon name="waveform" size={11} color="var(--text-faint)" />
+            Auto-transcribed by an on-device speech model — review before relying on it.
+          </div>
+        </>
       )}
     </div>
   )

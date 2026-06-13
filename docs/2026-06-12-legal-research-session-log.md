@@ -43,6 +43,25 @@ Key audit findings that reshaped the plan vs. the morning's research assumptions
 
 Verification status of the planning phase: plan grounded in direct reads of `main.jsx`, `LicenseGate.jsx`, `tauri.conf.json`, `main.rs` settings/command patterns, stock-analyzer `package.json` (vitest confirmed) and two Explore-agent audits; no code changed, nothing committed; the plan's two cross-repo read-then-insert steps (B8 webhook `where`, B10 claims struct) are explicitly marked for implementer verification.
 
+## Addendum 2 (same session, evening): execution run ("do all for me")
+
+Executed the post-implementation walkthrough end-to-end:
+
+| Step | Result |
+|---|---|
+| Vercel `ECHO_INSTALLER_SHA256` | Replaced with verified v1.2.1 hash `6dbb09f5…` (independent re-download confirmed; divergence root-caused: asset re-uploaded 06-12 08:31Z after release cut 06-10 — env was set against the original build) |
+| PR #730 review | Full 591-line diff review clean; CI failures verified pre-existing on main (IPv6 url-safety tests failing since May, file untouched); webhook revocation, consent block, claims scoping all correct |
+| Pre-deploy gate | vercel-pre-deploy-check skill run in full: all 24 mistake-bank detections pass, tsc errors pre-existing-only, new guard module typechecks, full local `npm run build` green |
+| PR #730 | **MERGED** (merge commit, branch kept for stacked #731) 2026-06-13T00:05Z; production deploy SUCCESS; post-deploy sweep verified: terms carve-out ×2, privacy app section, scoped claims (zero hits for old absolutism), CTA microcopy, trial-terms line, languages truth |
+| Hash display gap (new finding) | Download page reads `NEXT_PUBLIC_ECHO_INSTALLER_SHA256` which **did not exist** → page showed "pending". Created the env, redeployed; page now displays `6dbb09f5…` correctly. Server-side var (in-app updater integrity + receipt) was already fixed pre-deploy |
+| PR #1 review | Full code-diff review: faithful to plan + accepted hardenings (atomic token write, silent re-activation, whisper language allowlist, WAV cleanup on failed transcription, a11y roles, Mac-neutral copy, license-key salvage). EULA bundle verified: 11/11 sections, version 2026-06-10, EULA.txt regenerates identically; vite build + cargo check green |
+| Dev render test | **Aborted deliberately**: window-watcher matched the user's resident production Echo (tray) — dev shares `com.alan.echo` data dir; killed dev task pre-launch, re-minimized user's window, deleted the screenshot (contained personal transcripts), wrote memory `project_resident-echo-app` |
+| PR #1 | **MERGED** 2026-06-13T00:17Z; version bumped to 1.2.2 (tauri.conf, package.json, Cargo.toml) on main, pushed (`023aac5`) |
+| Release v1.2.2 | Built (NSIS, 135,375,442 bytes), **published** to diablobuster/alan-echo-releases with release notes + SHA256SUMS.txt; uploaded asset re-downloaded and verified byte-identical (`f40800dd…`) |
+| Worktree hygiene | stock-analyzer restored to `legal/echo-eula-v2-HOLD` (the state the implementation session left it in) |
+
+**Deliberately NOT done (gated on the human click test):** flipping the site envs that actually serve v1.2.2 (`ECHO_RELEASE_TAG`, both SHA256 vars → `f40800dd…`, `NEXT_PUBLIC_ECHO_INSTALLER_VERSION/MB/RELEASE_DATE`) + redeploy. A broken EULA gate would hit existing users via the in-app updater, so the 2-minute installer test gates the flip. PR #731 remains HOLD FOR COUNSEL. Known nit for a future PR: `scripts/release-checksums.ps1` globs all installers in the bundle dir (picks up old versions) — checksums were generated manually for this release.
+
 ## Follow-ups
 
 1. User action (time-sensitive): copyright registration before the proposed fee increase finalizes ($65→$85 NPRM) and ideally within 3 months of first publication (§ 412 window) — after a one-hour attorney consult on the AI-generated-code disclosure question.

@@ -62,6 +62,14 @@ Executed the post-implementation walkthrough end-to-end:
 
 **Deliberately NOT done (gated on the human click test):** flipping the site envs that actually serve v1.2.2 (`ECHO_RELEASE_TAG`, both SHA256 vars → `f40800dd…`, `NEXT_PUBLIC_ECHO_INSTALLER_VERSION/MB/RELEASE_DATE`) + redeploy. A broken EULA gate would hit existing users via the in-app updater, so the 2-minute installer test gates the flip. PR #731 remains HOLD FOR COUNSEL. Known nit for a future PR: `scripts/release-checksums.ps1` globs all installers in the bundle dir (picks up old versions) — checksums were generated manually for this release.
 
+## Addendum 3 (same session): live verification + LLC finding
+
+Re-verified both audit CRITICALs against live production (not just asserted):
+- **Installer hash**: `ECHO_INSTALLER_SHA256` and `NEXT_PUBLIC_ECHO_INSTALLER_SHA256` both = `6dbb09f5…` (decrypted via `vercel env pull`); live download page displays it; `/api/echo/version` returns it; site serves the v1.2.1 asset which hashes to it. Original `576c16d0…` mismatch resolved and consistent across all four surfaces.
+- **Stripe/checkout**: confirmed not blocking — a real `cs_live` session was created earlier with `consent_collection: required` succeeding; live `/api/echo/checkout` returns a normal 307 auth redirect, not 500; both ToS (`/terms`) and Privacy URLs set and 200.
+
+**NEW finding (blocker for PR #731, ties to P0.1):** the live web EULA, the bundled app EULA (`src/legal/eula.md`), the NSIS installer license page (confirmed via user screenshot), and the Stripe receipt all name the contracting party as **"ALAN Global Intelligence LLC"** — but **no LLC exists** (Stripe business type = individual, Richard Romano; P0.1 entity decision still open). Customers are currently agreeing to a contract with a non-existent legal entity → potential unenforceability + misrepresentation. Resolution options: (a) form the CO LLC (~$50, recommended — makes the live text true, matches the liability analysis), or (b) revise EULA to name the individual/sole-prop until an LLC exists. Either way this gates PR #731 and should update Stripe legal entity to match. Awaiting user direction on entity formation.
+
 ## Follow-ups
 
 1. User action (time-sensitive): copyright registration before the proposed fee increase finalizes ($65→$85 NPRM) and ideally within 3 months of first publication (§ 412 window) — after a one-hour attorney consult on the AI-generated-code disclosure question.

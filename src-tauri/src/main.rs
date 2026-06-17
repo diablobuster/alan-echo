@@ -813,6 +813,16 @@ fn main() {
     std::fs::create_dir_all(data_dir.join("backups")).ok();
     std::fs::create_dir_all(data_dir.join("models")).ok();
 
+    // Warm the machine-fingerprint cache off the hotkey path. The first license
+    // check (inside start_recording) otherwise computes it lazily by spawning
+    // three PowerShell/WMI processes (~2s warm, far worse cold), stalling the
+    // first beep. Computing it once here, in parallel with the rest of startup,
+    // means the cache is hot well before any hotkey press. machine_fingerprint()
+    // memoizes, so this is the only place that pays the cost.
+    std::thread::spawn(|| {
+        let _ = activation::machine_fingerprint();
+    });
+
     let db_path = data_dir.join("transcripts.db");
     let settings_path = data_dir.join("settings.json");
 

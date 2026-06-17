@@ -1,5 +1,15 @@
 # ALAN Echo — Debug Journal
 
+## 2026-06-17 — Hotkey-to-beep latency (~15s) / "recording too short"
+
+### Issue: First beep lagged the hotkey by seconds; mashing the key reported "Recording too short"
+- **Category**: PERFORMANCE (expensive syscall on the hot path)
+- **Symptom**: Press dictation hotkey → up to ~15s before the start beep. Or press repeatedly → "Recording too short — try a full sentence."
+- **Root cause**: The frontend gates the start beep behind `await invoke('start_recording')` (Dashboard.jsx). `start_recording`'s first line is `require_license`, which — because `LicenseManager::is_licensed()` is hardcoded `false` (crypto moved to Ed25519 activation) — always falls through to `activation::is_activated()`. With an `activation.jwt` present (every activated/owner machine), `is_activated()` recomputed `machine_fingerprint()` on **every** call. On Windows that spawns three sequential PowerShell `Get-CimInstance` processes — measured **2.077s warm**, far worse cold / under Defender (the reported ~15s). The "too short" cascade follows: presses are dropped while `inflightRef` is true, then the first press after start finally completes immediately stops a <0.5s recording.
+- **Evidence**: Timed the three CIM queries directly (2.1s warm). A failing-first unit test (`machine_fingerprint_is_memoized`) measured the 2nd call at 2.077s before the fix.
+- **Fix**: Memoize `machine_fingerprint()` with a process-lifetime `OnceLock` (hardware IDs are immutable while running) — fixes every caller at once (start_recording, transcribe, trial, status). Plus a startup warm-up thread in `main()` so the cache is hot before the first hotkey press. Extracted `fingerprint_from()` and pinned the SHA-256(`|`-join) algorithm with a known-vector test so the value can never silently change (which would brick existing activation tokens).
+- **Lesson**: Never put a process-spawning syscall on a latency-critical UI path. If a value is derived from immutable hardware, compute it once and memoize; warm it off the hot path at startup.
+
 ## 2026-06-12 — Security hardening + 20-pass ultra audit
 
 ### Issue: display_accel() showed "Ctrl" on Mac instead of "Cmd"

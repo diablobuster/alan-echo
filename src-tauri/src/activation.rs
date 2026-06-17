@@ -1,6 +1,7 @@
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use sha2::{Sha256, Digest};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -108,9 +109,22 @@ pub fn activate_online(key: &str, data_dir: &Path) -> Result<String, String> {
     Ok(token.to_string())
 }
 
+/// Stable per-machine identifier (SHA-256 of the hardware components joined by
+/// '|'). The underlying IDs never change while the process runs, so we compute
+/// it exactly once and memoize it. Gathering the components is expensive — on
+/// Windows it spawns three PowerShell/WMI processes (~2s warm, far worse cold);
+/// on macOS, ioreg/sysctl/diskutil — and `require_license` runs on the
+/// hotkey-to-record path. Recomputing per call used to stall the first beep by
+/// seconds. `main()` also warms this cache off the hotkey path at startup.
 pub fn machine_fingerprint() -> String {
-    let raw = raw_fingerprint_components();
-    let input = raw.join("|");
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE
+        .get_or_init(|| fingerprint_from(raw_fingerprint_components()))
+        .clone()
+}
+
+fn fingerprint_from(components: Vec<String>) -> String {
+    let input = components.join("|");
     let hash = Sha256::digest(input.as_bytes());
     format!("{:x}", hash)
 }
@@ -220,5 +234,42 @@ fn mac_disk_serial() -> String {
             "UNKNOWN".into()
         }
         _ => "UNKNOWN".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The hardware IDs behind the fingerprint never change while the process
+    // runs, so it must be computed once. Before memoization every call
+    // re-spawned 3 PowerShell/WMI (or ioreg/diskutil) processes — ~2s warm,
+    // far worse cold — which stalled start_recording and thus the first beep.
+    #[test]
+    fn machine_fingerprint_is_memoized() {
+        let _ = machine_fingerprint(); // first call may pay the spawn cost
+        let start = std::time::Instant::now();
+        let _ = machine_fingerprint(); // must be served from the cache
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "second machine_fingerprint() took {:?}; expected a cached (<50ms) result",
+            elapsed
+        );
+    }
+
+    // Pin the exact algorithm: SHA-256 of the components joined by '|'. Every
+    // already-issued activation token embeds an mfp computed this way, so a
+    // silent change here would brick activation for existing customers.
+    #[test]
+    fn fingerprint_from_is_stable_sha256_of_pipe_join() {
+        let components = vec!["CPU123".to_string(), "BOARD456".to_string(), "DISK789".to_string()];
+        let got = fingerprint_from(components.clone());
+        let expected = format!("{:x}", Sha256::digest(b"CPU123|BOARD456|DISK789"));
+        assert_eq!(got, expected);
+        assert_eq!(got.len(), 64);
+        assert!(got.chars().all(|c| c.is_ascii_hexdigit()));
+        // Deterministic across calls.
+        assert_eq!(got, fingerprint_from(components));
     }
 }

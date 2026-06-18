@@ -110,8 +110,13 @@ fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Valu
     match key.as_str() {
         "text_cleanup_level" => {
             if let Some(level) = value.as_str() {
-                *state.cleanup.lock() = TextCleanupEngine::new(level);
+                // Mutate in place so the user's find→replace rules survive a
+                // level change (constructing a fresh engine would drop them).
+                state.cleanup.lock().set_level(level);
             }
+        }
+        "text_replace_rules" => {
+            state.cleanup.lock().set_rules(&parse_replace_rules(&value));
         }
         "whisper_model" => {
             state.whisper.reload(value.as_str());
@@ -125,6 +130,19 @@ fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Valu
         _ => {}
     }
     Ok(())
+}
+
+/// Parse the `text_replace_rules` setting — a JSON array of
+/// `{"from": "...", "to": "..."}` — into (from, to) pairs. Malformed entries
+/// and a missing/non-array value yield no rules (find→replace simply off).
+fn parse_replace_rules(value: &serde_json::Value) -> Vec<(String, String)> {
+    value.as_array().map(|arr| {
+        arr.iter().filter_map(|item| {
+            let from = item.get("from")?.as_str()?.to_string();
+            let to = item.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some((from, to))
+        }).collect()
+    }).unwrap_or_default()
 }
 
 // ── License commands ─────────────────────────────────────────────────
@@ -871,6 +889,9 @@ fn main() {
     }
     let license_key = settings.get_str("license_key");
     let cleanup_level = settings.get_str("text_cleanup_level").unwrap_or_else(|| "standard".into());
+    let replace_rules = settings.get("text_replace_rules")
+        .map(parse_replace_rules)
+        .unwrap_or_default();
     let model_pref = settings.get_str("whisper_model");
     let language = settings.get_str("language").unwrap_or_else(|| "en".into());
 
@@ -888,7 +909,11 @@ fn main() {
         })),
         settings: Mutex::new(settings),
         license: Mutex::new(LicenseManager::new(license_key)),
-        cleanup: Mutex::new(TextCleanupEngine::new(&cleanup_level)),
+        cleanup: Mutex::new({
+            let mut engine = TextCleanupEngine::new(&cleanup_level);
+            engine.set_rules(&replace_rules);
+            engine
+        }),
         recorder: RecorderHandle::new(),
         whisper: Arc::clone(&whisper_engine),
         paste_target: Mutex::new(None),

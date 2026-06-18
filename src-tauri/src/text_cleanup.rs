@@ -98,11 +98,43 @@ static RE_TIGHTEN: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
 
 pub struct TextCleanupEngine {
     level: String,
+    /// User-defined find→replace rules, precompiled. Applied as the last
+    /// transform so they win over the engine's own casing rules.
+    rules: Vec<(Regex, String)>,
 }
 
 impl TextCleanupEngine {
     pub fn new(level: &str) -> Self {
-        Self { level: level.to_string() }
+        Self { level: level.to_string(), rules: Vec::new() }
+    }
+
+    /// Change the cleanup level in place. Kept separate from `new` so a level
+    /// change from settings doesn't discard the user's find→replace rules.
+    pub fn set_level(&mut self, level: &str) {
+        self.level = level.to_string();
+    }
+
+    /// Compile deterministic find→replace rules. Each `from` matches whole-word
+    /// and case-insensitively (the idiom the acronym/correction passes use);
+    /// empty/uncompilable `from` patterns are skipped. The replacement is
+    /// inserted literally — `$1` in a user's replacement is not a capture ref.
+    pub fn set_rules(&mut self, pairs: &[(String, String)]) {
+        self.rules = pairs.iter().filter_map(|(from, to)| {
+            if from.trim().is_empty() {
+                return None;
+            }
+            Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from)))
+                .ok()
+                .map(|re| (re, to.clone()))
+        }).collect();
+    }
+
+    fn apply_rules(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (re, to) in &self.rules {
+            result = re.replace_all(&result, regex::NoExpand(to.as_str())).to_string();
+        }
+        result
     }
 
     pub fn clean(&self, raw: &str) -> String {
@@ -115,7 +147,7 @@ impl TextCleanupEngine {
         // kills `arr[i]`, fix_punctuation force-appends '.', and
         // fix_capitalization rewrites case. Return the trimmed text untouched.
         if self.level == "verbatim" {
-            return text;
+            return self.apply_rules(&text);
         }
 
         // Levels in increasing aggression: `light` = baseline only (whitespace,
@@ -146,6 +178,9 @@ impl TextCleanupEngine {
 
         // Final pass
         text = self.fix_capitalization(&text);
+        // User find→replace runs after capitalization so it wins over the
+        // engine's casing (e.g. "github" → "GitHub" stays GitHub).
+        text = self.apply_rules(&text);
         text = self.final_cleanup(&text);
         text.trim().to_string()
     }
@@ -402,6 +437,42 @@ mod tests {
         let engine = TextCleanupEngine::new("standard");
         let out = engine.clean("um so basically i think the the api is ready");
         assert_eq!(out, "I think the API is ready.");
+    }
+
+    #[test]
+    fn find_replace_rules_win_over_casing_and_are_case_insensitive() {
+        let mut engine = TextCleanupEngine::new("standard");
+        engine.set_rules(&[
+            ("github".to_string(), "GitHub".to_string()),
+            ("k8s".to_string(), "Kubernetes".to_string()),
+        ]);
+        let out = engine.clean("i pushed it to github and deployed to k8s");
+        assert!(out.contains("GitHub"), "got: {out}");
+        assert!(out.contains("Kubernetes"), "got: {out}");
+        assert!(!out.contains("github"), "casing rule must win: {out}");
+    }
+
+    #[test]
+    fn find_replace_applies_in_verbatim_mode() {
+        let mut engine = TextCleanupEngine::new("verbatim");
+        engine.set_rules(&[("todo".to_string(), "TODO".to_string())]);
+        // Rule fires, and verbatim still preserves the code/casing around it.
+        assert_eq!(engine.clean("todo: fix arr[i]"), "TODO: fix arr[i]");
+    }
+
+    #[test]
+    fn find_replace_replacement_is_literal_not_a_capture_ref() {
+        let mut engine = TextCleanupEngine::new("verbatim");
+        engine.set_rules(&[("price".to_string(), "$5".to_string())]);
+        // "$5" must be inserted literally, not interpreted as capture group 5.
+        assert_eq!(engine.clean("the price"), "the $5");
+    }
+
+    #[test]
+    fn empty_from_rule_is_ignored() {
+        let mut engine = TextCleanupEngine::new("verbatim");
+        engine.set_rules(&[(String::new(), "X".to_string())]);
+        assert_eq!(engine.clean("hello world"), "hello world");
     }
 
     #[test]

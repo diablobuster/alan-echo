@@ -327,7 +327,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           <SettingsRow label="Text cleanup" hint="How aggressively to clean up transcriptions">
             <Seg
               label="Text cleanup level"
-              options={['light', 'standard', 'aggressive']}
+              options={['verbatim', 'light', 'standard', 'aggressive']}
               value={settings.text_cleanup_level || 'standard'}
               onChange={changeCleanup}
             />

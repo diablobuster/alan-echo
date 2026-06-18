@@ -109,6 +109,19 @@ impl TextCleanupEngine {
         let mut text = raw.trim().to_string();
         if text.is_empty() { return String::new(); }
 
+        // Verbatim: the user wants exactly what they said (lawyers, devs,
+        // people quoting). Bypass every baseline transform — they are the
+        // destructive ones: remove_hallucinations strips [..]/(..) and so
+        // kills `arr[i]`, fix_punctuation force-appends '.', and
+        // fix_capitalization rewrites case. Return the trimmed text untouched.
+        if self.level == "verbatim" {
+            return text;
+        }
+
+        // Levels in increasing aggression: `light` = baseline only (whitespace,
+        // hallucination strip, de-dup, punctuation, capitalization); `standard`
+        // adds filler/acronym cleanup; `aggressive` adds informal/tightening.
+        // Any unrecognized level behaves as `light`.
         // All levels
         text = self.normalize_whitespace(&text);
         text = self.remove_hallucinations(&text);
@@ -389,5 +402,17 @@ mod tests {
         let engine = TextCleanupEngine::new("standard");
         let out = engine.clean("um so basically i think the the api is ready");
         assert_eq!(out, "I think the API is ready.");
+    }
+
+    #[test]
+    fn verbatim_preserves_code_punctuation_and_case() {
+        // Verbatim must bypass the destructive baseline transforms:
+        // remove_hallucinations strips [..]/(..) (would kill arr[i]),
+        // fix_punctuation force-appends '.', fix_capitalization rewrites case.
+        let engine = TextCleanupEngine::new("verbatim");
+        assert_eq!(engine.clean("arr[i] = compute(x)"), "arr[i] = compute(x)");
+        assert_eq!(engine.clean("hello world"), "hello world");
+        // ...but it is not raw: surrounding whitespace is still trimmed.
+        assert_eq!(engine.clean("  spaced out  "), "spaced out");
     }
 }

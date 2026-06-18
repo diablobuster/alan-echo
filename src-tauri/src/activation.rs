@@ -139,15 +139,19 @@ fn resolved_component_count(components: &[String]) -> usize {
     components.iter().filter(|c| c.as_str() != "UNKNOWN").count()
 }
 
-/// Build the fingerprint from hardware components, but only when at least two
-/// of the three resolved. When fewer resolve (locked-down corp boxes, VMs),
-/// hashing the components would collapse every such machine to the *same*
-/// constant — SHA256("UNKNOWN|UNKNOWN|UNKNOWN") — defeating token binding and
-/// colliding per-machine accounting. In that case bind to a persisted random
-/// UUID instead. Machines with >=2 real components keep their exact prior
-/// fingerprint, so already-issued tokens are never bricked.
+/// Build the fingerprint from hardware components. Only the *all-UNKNOWN* case
+/// (zero components resolved — locked-down corp boxes, VMs) is the real bug: it
+/// collapses every such machine to the SAME constant
+/// SHA256("UNKNOWN|UNKNOWN|UNKNOWN"), defeating token binding and colliding
+/// per-machine accounting; there we bind to a persisted random UUID instead.
+///
+/// Anything with at least one real component (e.g. "CPU123|UNKNOWN|UNKNOWN") is
+/// already per-machine and keeps its EXACT prior hardware hash — so this change
+/// is zero-regression for every machine that previously had a usable
+/// fingerprint. (A stricter >=2 threshold would have invalidated the tokens of
+/// already-activated 1-component machines.)
 fn fingerprint_with_fallback<F: FnOnce() -> String>(components: Vec<String>, fallback_id: F) -> String {
-    if resolved_component_count(&components) >= 2 {
+    if resolved_component_count(&components) >= 1 {
         fingerprint_from(components)
     } else {
         fingerprint_from(vec![format!("UUID:{}", fallback_id())])
@@ -343,7 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_falls_back_to_uuid_when_fewer_than_two_resolve() {
+    fn fingerprint_falls_back_to_uuid_when_no_components_resolve() {
+        // Only the all-UNKNOWN case collapses every such machine to the SAME
+        // constant SHA256("UNKNOWN|UNKNOWN|UNKNOWN"); that is the case the
+        // fallback exists for.
         let all_unknown = || vec!["UNKNOWN".to_string(), "UNKNOWN".to_string(), "UNKNOWN".to_string()];
         let collapsed = fingerprint_from(all_unknown());
         let got = fingerprint_with_fallback(all_unknown(), || "uuid-machine-A".to_string());
@@ -355,13 +362,14 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_falls_back_when_only_one_component_resolves() {
-        let one = || vec!["CPU123".to_string(), "UNKNOWN".to_string(), "UNKNOWN".to_string()];
-        assert_ne!(
-            fingerprint_with_fallback(one(), || "uuid-A".to_string()),
-            fingerprint_from(one()),
-            "one resolved component is insufficient -> fallback"
-        );
+    fn fingerprint_uses_hardware_when_one_component_resolves() {
+        // A single real component ("CPU123|UNKNOWN|UNKNOWN") is already
+        // per-machine — it does NOT collapse to a shared constant. It must keep
+        // its exact hardware hash, or already-activated 1-component machines get
+        // their tokens invalidated (the fallback only exists for 0 resolved).
+        let one = vec!["CPU123".to_string(), "UNKNOWN".to_string(), "UNKNOWN".to_string()];
+        let got = fingerprint_with_fallback(one.clone(), || panic!("fallback must not run for 1 resolved"));
+        assert_eq!(got, fingerprint_from(one));
     }
 
     // ── verify_token: forged / malformed tokens are rejected ─────────────

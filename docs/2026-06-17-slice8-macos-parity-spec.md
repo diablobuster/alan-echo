@@ -94,6 +94,27 @@ Intel-Mac path (if still supported — see below) still reports CPU and works.
 
 ---
 
+## 8d — Release held Shift on the macOS paste path (surfaced by re-paste-last)
+
+**Problem:** `paste.rs` `win::paste_into` explicitly synthesizes Shift-up (and
+Alt-up) before sending Ctrl+V (≈ line 118) precisely because "the user may still
+hold Shift from the Ctrl+Shift+Space hotkey." The macOS `mac::paste_into` (≈
+lines 166–171) has **no equivalent** — it runs `keystroke "v" using command
+down` after only `delay 0.15`. For the new **re-paste-last** hotkey
+(`CmdOrCtrl+Shift+V`) this matters: it fires within ~150 ms of the keypress, so
+the user is likely still physically holding Shift, and the synthesized Cmd+V can
+combine into **Cmd+Shift+V** ("Paste and Match Style" / a different shortcut in
+many apps). Dictation tolerates it only because seconds of Whisper latency elapse
+first; the synchronous paste-last does not.
+
+**Fix:** before the `keystroke "v" using command down`, release Shift (and
+Option) explicitly — e.g. post a Core Graphics `key up` for the Shift modifier /
+clear the synthesized event's flags — mirroring the Windows VK_SHIFT key-up.
+Intermittent and macOS-only, so it ships with this spec rather than blind from
+Windows. (Found by the 2026-06-17 self-review; low severity.)
+
+---
+
 ## Out of scope but adjacent (decide separately)
 
 - **Intel-Mac build:** CI targets `aarch64` only. Decide Apple-Silicon-only

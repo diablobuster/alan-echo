@@ -58,6 +58,44 @@ static RE_DOUBLE_PERIOD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").expect
 static RE_SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([.,!?;:])").expect("space-before-punct regex"));
 static RE_STANDALONE_I: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bi\b").expect("standalone-i regex"));
 
+// Precompiled once. `clean()` runs on every transcription; building these
+// ~30-70 regexes per call (one per acronym / correction / phrase) used to be
+// pure waste on the dictation hot path. Match the RE_HALLUCINATIONS idiom.
+static RE_ACRONYMS: Lazy<Vec<(Regex, String)>> = Lazy::new(|| {
+    ALWAYS_UPPERCASE.iter().map(|acr| {
+        let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(acr))).expect("acronym regex");
+        (re, acr.to_uppercase())
+    }).collect()
+});
+
+static RE_INFORMAL: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+    const CORRECTIONS: &[(&str, &str)] = &[
+        ("gonna", "going to"), ("wanna", "want to"), ("gotta", "got to"),
+        ("kinda", "kind of"), ("sorta", "sort of"), ("coulda", "could have"),
+        ("woulda", "would have"), ("shoulda", "should have"), ("dunno", "don't know"),
+        ("lemme", "let me"), ("gimme", "give me"),
+    ];
+    CORRECTIONS.iter().map(|(from, to)| {
+        let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from))).expect("informal regex");
+        (re, *to)
+    }).collect()
+});
+
+static RE_TIGHTEN: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+    const REPLACEMENTS: &[(&str, &str)] = &[
+        (r"(?i)\bin order to\b", "to"),
+        (r"(?i)\bdue to the fact that\b", "because"),
+        (r"(?i)\bat this point in time\b", "now"),
+        (r"(?i)\bin the event that\b", "if"),
+        (r"(?i)\bhas the ability to\b", "can"),
+        (r"(?i)\bis able to\b", "can"),
+        (r"(?i)\bprior to\b", "before"),
+    ];
+    REPLACEMENTS.iter().map(|(pattern, replacement)| {
+        (Regex::new(pattern).expect("tighten regex"), *replacement)
+    }).collect()
+});
+
 pub struct TextCleanupEngine {
     level: String,
 }
@@ -258,41 +296,23 @@ impl TextCleanupEngine {
 
     fn fix_acronyms(&self, text: &str) -> String {
         let mut result = text.to_string();
-        for acr in ALWAYS_UPPERCASE {
-            let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(acr))).unwrap();
-            result = re.replace_all(&result, acr.to_uppercase().as_str()).to_string();
+        for (re, upper) in RE_ACRONYMS.iter() {
+            result = re.replace_all(&result, upper.as_str()).to_string();
         }
         result
     }
 
     fn apply_informal_corrections(&self, text: &str) -> String {
-        let corrections = [
-            ("gonna", "going to"), ("wanna", "want to"), ("gotta", "got to"),
-            ("kinda", "kind of"), ("sorta", "sort of"), ("coulda", "could have"),
-            ("woulda", "would have"), ("shoulda", "should have"), ("dunno", "don't know"),
-            ("lemme", "let me"), ("gimme", "give me"),
-        ];
         let mut result = text.to_string();
-        for (from, to) in &corrections {
-            let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from))).unwrap();
+        for (re, to) in RE_INFORMAL.iter() {
             result = re.replace_all(&result, *to).to_string();
         }
         result
     }
 
     fn tighten_phrasing(&self, text: &str) -> String {
-        let replacements = [
-            (r"(?i)\bin order to\b", "to"),
-            (r"(?i)\bdue to the fact that\b", "because"),
-            (r"(?i)\bat this point in time\b", "now"),
-            (r"(?i)\bin the event that\b", "if"),
-            (r"(?i)\bhas the ability to\b", "can"),
-            (r"(?i)\bis able to\b", "can"),
-            (r"(?i)\bprior to\b", "before"),
-        ];
         let mut result = text.to_string();
-        for (pattern, replacement) in &replacements {
-            let re = Regex::new(pattern).unwrap();
+        for (re, replacement) in RE_TIGHTEN.iter() {
             result = re.replace_all(&result, *replacement).to_string();
         }
         result

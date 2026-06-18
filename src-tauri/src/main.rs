@@ -1136,11 +1136,21 @@ fn main() {
             let show_ok = register_emit_hotkey(handle, "CmdOrCtrl+Shift+H", "show-dashboard");
             // Re-paste the most recent transcript into the focused app. Bound
             // globally (active while idle) so it works from any app. NOTE:
-            // CmdOrCtrl+Shift+V is also "paste without formatting" in many
+            // Ctrl+Shift+V is also "paste without formatting" in many
             // terminals/editors — registering it globally intercepts that combo
             // system-wide. Kept as the intuitive default; revisit once hotkeys
             // are user-rebindable.
-            let paste_last_ok = register_paste_last_hotkey(handle, "CmdOrCtrl+Shift+V");
+            //
+            // Windows-only for now: paste-last fires synchronously while the
+            // user may still hold Shift, and only the Windows paste path
+            // releases it. On macOS the held Shift would turn Cmd+V into
+            // Cmd+Shift+V ("Paste and Match Style") — re-enable once the macOS
+            // Shift-release lands (docs/2026-06-17-slice8-macos-parity-spec.md §8d).
+            let paste_last_ok = if cfg!(target_os = "windows") {
+                register_paste_last_hotkey(handle, "CmdOrCtrl+Shift+V")
+            } else {
+                false
+            };
 
             {
                 let state = app.state::<Arc<AppState>>();

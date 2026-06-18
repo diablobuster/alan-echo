@@ -113,6 +113,12 @@ clear the synthesized event's flags — mirroring the Windows VK_SHIFT key-up.
 Intermittent and macOS-only, so it ships with this spec rather than blind from
 Windows. (Found by the 2026-06-17 self-review; low severity.)
 
+**Current state:** the re-paste-last hotkey is registered **Windows-only**
+(`register_paste_last_hotkey` is gated behind `cfg!(target_os = "windows")` in
+`main.rs` setup) so this buggy behavior does NOT ship to macOS users. Once this
+modifier-release is implemented and validated, **remove that cfg gate** to enable
+re-paste-last on macOS.
+
 ---
 
 ## Out of scope but adjacent (decide separately)

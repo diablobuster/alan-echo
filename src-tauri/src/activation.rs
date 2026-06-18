@@ -51,6 +51,14 @@ pub fn verify_token(token: &str, expected_mfp: &str) -> Result<serde_json::Value
     let claims: serde_json::Value = serde_json::from_slice(&payload_json)
         .map_err(|e| format!("Invalid claims: {}", e))?;
 
+    check_claims(&claims, expected_mfp)?;
+    Ok(claims)
+}
+
+/// Validate the non-cryptographic claims of an already signature-verified
+/// token: machine-fingerprint binding and (optional) expiry. Split out from
+/// `verify_token` so these branches are unit-testable without the signing key.
+fn check_claims(claims: &serde_json::Value, expected_mfp: &str) -> Result<(), String> {
     let token_mfp = claims.get("mfp").and_then(|v| v.as_str()).unwrap_or("");
     if !token_mfp.eq_ignore_ascii_case(expected_mfp) {
         return Err("Machine fingerprint mismatch".into());
@@ -68,7 +76,7 @@ pub fn verify_token(token: &str, expected_mfp: &str) -> Result<serde_json::Value
         }
     }
 
-    Ok(claims)
+    Ok(())
 }
 
 fn base64_url_decode(input: &str) -> Result<Vec<u8>, String> {
@@ -271,5 +279,82 @@ mod tests {
         assert!(got.chars().all(|c| c.is_ascii_hexdigit()));
         // Deterministic across calls.
         assert_eq!(got, fingerprint_from(components));
+    }
+
+    // ── verify_token: forged / malformed tokens are rejected ─────────────
+    // The happy path needs the server's private key, so it can't be unit
+    // tested here. What we CAN (and must) prove is that every token NOT signed
+    // by the real key is rejected — that is the revenue gate.
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    #[test]
+    fn verify_token_rejects_malformed_part_count() {
+        assert!(verify_token("notoken", "mfp").is_err());
+        assert!(verify_token("only.two", "mfp").is_err());
+        assert!(verify_token("a.b.c.d", "mfp").is_err());
+    }
+
+    #[test]
+    fn verify_token_rejects_bad_base64_signature() {
+        let token = format!("{}.{}.@@not-base64@@", b64(b"{}"), b64(br#"{"mfp":"x"}"#));
+        assert!(verify_token(&token, "x").is_err());
+    }
+
+    #[test]
+    fn verify_token_rejects_wrong_signature_length() {
+        let token = format!("{}.{}.{}", b64(b"{}"), b64(br#"{"mfp":"x"}"#), b64(&[0u8; 10]));
+        assert_eq!(verify_token(&token, "x").unwrap_err(), "Invalid signature length");
+    }
+
+    #[test]
+    fn verify_token_rejects_forged_64_byte_signature() {
+        // Correct length, but not a real signature over the payload.
+        let token = format!("{}.{}.{}", b64(b"{}"), b64(br#"{"mfp":"x"}"#), b64(&[0u8; 64]));
+        assert_eq!(verify_token(&token, "x").unwrap_err(), "Signature verification failed");
+    }
+
+    // ── check_claims: fingerprint binding + expiry ───────────────────────
+
+    #[test]
+    fn check_claims_rejects_fingerprint_mismatch() {
+        let claims = serde_json::json!({ "mfp": "AAAA" });
+        assert_eq!(check_claims(&claims, "BBBB").unwrap_err(), "Machine fingerprint mismatch");
+    }
+
+    #[test]
+    fn check_claims_matches_fingerprint_case_insensitively() {
+        let claims = serde_json::json!({ "mfp": "AbCdEf" });
+        assert!(check_claims(&claims, "abcdef").is_ok());
+    }
+
+    #[test]
+    fn check_claims_accepts_legacy_token_without_exp() {
+        let claims = serde_json::json!({ "mfp": "x" });
+        assert!(check_claims(&claims, "x").is_ok());
+    }
+
+    #[test]
+    fn check_claims_accepts_unexpired_token() {
+        let future = chrono::Utc::now().timestamp() + 400 * 86_400;
+        let claims = serde_json::json!({ "mfp": "x", "exp": future });
+        assert!(check_claims(&claims, "x").is_ok());
+    }
+
+    #[test]
+    fn check_claims_rejects_token_expired_beyond_grace() {
+        let long_ago = chrono::Utc::now().timestamp() - 8 * 86_400; // beyond 7-day grace
+        let claims = serde_json::json!({ "mfp": "x", "exp": long_ago });
+        assert_eq!(check_claims(&claims, "x").unwrap_err(), "Activation token expired");
+    }
+
+    #[test]
+    fn check_claims_accepts_token_expired_within_grace() {
+        let recently = chrono::Utc::now().timestamp() - 3 * 86_400; // inside 7-day grace
+        let claims = serde_json::json!({ "mfp": "x", "exp": recently });
+        assert!(check_claims(&claims, "x").is_ok());
     }
 }

@@ -756,6 +756,49 @@ fn display_accel(accel: &str) -> String {
     accel.replace("CmdOrCtrl", modifier).replace('+', " + ")
 }
 
+/// Re-insert the most recent transcript into whatever window is focused right
+/// now — no re-recording. The capture happens here in the backend because at
+/// hotkey time the user's target app is focused (not Echo's window); routing it
+/// through a JS event round-trip would capture Echo instead. Reuses
+/// deliver_text, so it honors the auto_paste setting and does the UIPI-safe
+/// paste + clipboard restore. (NOTE: with auto_paste off this only re-copies to
+/// the clipboard — an explicit-paste override is a candidate follow-up.)
+fn paste_last_transcript(app: &tauri::AppHandle) {
+    let state = app.state::<Arc<AppState>>();
+    let state = Arc::clone(state.inner());
+
+    // The window focused at the instant the hotkey fired is the paste target.
+    *state.paste_target.lock() = Some(paste::foreground_window());
+
+    let newest = state.db.lock()
+        .get_page(0, 1)
+        .ok()
+        .and_then(|(rows, _)| rows.into_iter().next())
+        .map(|t| t.text)
+        .filter(|t| !t.trim().is_empty());
+    let Some(text) = newest else {
+        log::info!("paste-last: no transcript to re-paste");
+        return;
+    };
+
+    let pasted = deliver_text(app, &state, &text);
+    if let Some(w) = app.get_webview_window("main") {
+        w.emit("paste-last", serde_json::json!({ "pasted": pasted })).ok();
+    }
+}
+
+fn register_paste_last_hotkey(app: &tauri::AppHandle, accel: &str) -> bool {
+    use tauri_plugin_global_shortcut::ShortcutState;
+    app.global_shortcut()
+        .on_shortcut(accel, move |app, _shortcut, ev| {
+            if ev.state == ShortcutState::Pressed {
+                paste_last_transcript(app);
+            }
+        })
+        .map_err(|e| log::warn!("Failed to register paste-last {}: {}", accel, e))
+        .is_ok()
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 fn setup_logging(data_dir: &std::path::Path) {
@@ -1088,6 +1131,13 @@ fn main() {
                 })
                 .copied();
             let show_ok = register_emit_hotkey(handle, "CmdOrCtrl+Shift+H", "show-dashboard");
+            // Re-paste the most recent transcript into the focused app. Bound
+            // globally (active while idle) so it works from any app. NOTE:
+            // CmdOrCtrl+Shift+V is also "paste without formatting" in many
+            // terminals/editors — registering it globally intercepts that combo
+            // system-wide. Kept as the intuitive default; revisit once hotkeys
+            // are user-rebindable.
+            let paste_last_ok = register_paste_last_hotkey(handle, "CmdOrCtrl+Shift+V");
 
             {
                 let state = app.state::<Arc<AppState>>();
@@ -1096,6 +1146,7 @@ fn main() {
                     "toggle": if toggle_ok { Some(display_accel("CmdOrCtrl+Shift+Space")) } else { None },
                     "cancel": cancel_accel.map(display_accel),
                     "show": if show_ok { Some(display_accel("CmdOrCtrl+Shift+H")) } else { None },
+                    "pasteLast": if paste_last_ok { Some(display_accel("CmdOrCtrl+Shift+V")) } else { None },
                 });
             }
 

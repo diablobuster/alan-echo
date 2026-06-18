@@ -126,9 +126,59 @@ pub fn activate_online(key: &str, data_dir: &Path) -> Result<String, String> {
 /// seconds. `main()` also warms this cache off the hotkey path at startup.
 pub fn machine_fingerprint() -> String {
     static CACHE: OnceLock<String> = OnceLock::new();
-    CACHE
-        .get_or_init(|| fingerprint_from(raw_fingerprint_components()))
-        .clone()
+    CACHE.get_or_init(compute_machine_fingerprint).clone()
+}
+
+fn compute_machine_fingerprint() -> String {
+    fingerprint_with_fallback(raw_fingerprint_components(), read_or_create_fallback_id)
+}
+
+/// Number of hardware components that actually resolved (i.e. aren't the
+/// "UNKNOWN" sentinel the probes return on failure).
+fn resolved_component_count(components: &[String]) -> usize {
+    components.iter().filter(|c| c.as_str() != "UNKNOWN").count()
+}
+
+/// Build the fingerprint from hardware components, but only when at least two
+/// of the three resolved. When fewer resolve (locked-down corp boxes, VMs),
+/// hashing the components would collapse every such machine to the *same*
+/// constant — SHA256("UNKNOWN|UNKNOWN|UNKNOWN") — defeating token binding and
+/// colliding per-machine accounting. In that case bind to a persisted random
+/// UUID instead. Machines with >=2 real components keep their exact prior
+/// fingerprint, so already-issued tokens are never bricked.
+fn fingerprint_with_fallback<F: FnOnce() -> String>(components: Vec<String>, fallback_id: F) -> String {
+    if resolved_component_count(&components) >= 2 {
+        fingerprint_from(components)
+    } else {
+        fingerprint_from(vec![format!("UUID:{}", fallback_id())])
+    }
+}
+
+/// Path of the persisted per-machine UUID used as a fingerprint fallback.
+/// Mirrors main.rs's data_dir (`dirs::data_dir()/ALAN Echo`).
+fn fallback_id_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ALAN Echo")
+        .join("machine-id")
+}
+
+/// Read the persisted fallback UUID, creating it on first use. Best-effort
+/// persistence: if the write fails we still return a usable id for this run.
+fn read_or_create_fallback_id() -> String {
+    let path = fallback_id_path();
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let _ = std::fs::write(&path, &id);
+    id
 }
 
 fn fingerprint_from(components: Vec<String>) -> String {
@@ -279,6 +329,39 @@ mod tests {
         assert!(got.chars().all(|c| c.is_ascii_hexdigit()));
         // Deterministic across calls.
         assert_eq!(got, fingerprint_from(components));
+    }
+
+    // ── machine fingerprint: collapse guard ──────────────────────────────
+
+    #[test]
+    fn fingerprint_uses_hardware_when_two_or_more_components_resolve() {
+        // Existing behavior must be preserved EXACTLY when >=2 components
+        // resolve — re-deriving these would brick every already-issued token.
+        let components = vec!["CPU123".to_string(), "BOARD456".to_string(), "UNKNOWN".to_string()];
+        let got = fingerprint_with_fallback(components.clone(), || panic!("fallback must not run"));
+        assert_eq!(got, fingerprint_from(components));
+    }
+
+    #[test]
+    fn fingerprint_falls_back_to_uuid_when_fewer_than_two_resolve() {
+        let all_unknown = || vec!["UNKNOWN".to_string(), "UNKNOWN".to_string(), "UNKNOWN".to_string()];
+        let collapsed = fingerprint_from(all_unknown());
+        let got = fingerprint_with_fallback(all_unknown(), || "uuid-machine-A".to_string());
+        assert_ne!(got, collapsed, "must not collapse to the shared UNKNOWN constant");
+        // Same machine id -> stable fingerprint.
+        assert_eq!(got, fingerprint_with_fallback(all_unknown(), || "uuid-machine-A".to_string()));
+        // Different machine id -> different fingerprint (per-machine accounting).
+        assert_ne!(got, fingerprint_with_fallback(all_unknown(), || "uuid-machine-B".to_string()));
+    }
+
+    #[test]
+    fn fingerprint_falls_back_when_only_one_component_resolves() {
+        let one = || vec!["CPU123".to_string(), "UNKNOWN".to_string(), "UNKNOWN".to_string()];
+        assert_ne!(
+            fingerprint_with_fallback(one(), || "uuid-A".to_string()),
+            fingerprint_from(one()),
+            "one resolved component is insufficient -> fallback"
+        );
     }
 
     // ── verify_token: forged / malformed tokens are rejected ─────────────

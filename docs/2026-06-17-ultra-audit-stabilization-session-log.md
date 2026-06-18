@@ -67,5 +67,53 @@ Commits `489e2fc..HEAD` (9): `ada9fe6` regex precompile · `8d3112e` verbatim ·
 - **Re-paste-last UX decisions to confirm:** (a) `Ctrl+Shift+V` globally intercepts "paste without formatting" in terminals/editors — intuitive but intrusive; (b) reuses `deliver_text`, so with `auto_paste` off it only re-copies. Both easy to change; proper fix is user-rebindable hotkeys.
 - **Slice 8 macOS parity** — execute `docs/2026-06-17-slice8-macos-parity-spec.md` on a Mac; the new `macos-14` CI job will compile the `cfg(macos)` code.
 - **Audit false positive corrected:** the handoff's `resample` empty-input panic does not exist (subtraction is inside a closure that never runs for empty input).
-- **Adversarial self-review** (6 dimensions → per-finding verification) was launched at session end; confirmed findings, if any, to be addressed in a follow-up and folded into this log.
+- **Adversarial self-review** ran (6 dimensions → per-finding verification) and surfaced 3 confirmed findings — all fixed this session (see §6). A second targeted re-review (the 2 rate-limited dimensions + the fixes themselves) was launched after the fixes.
 - Untouched from the handoff backlog (next sessions): macOS `osascript` is the same class as items already done; honest progress bar; download integrity check (§6 High); CSV formula-injection (§6); custom vocabulary; rebindable hotkeys; push-to-talk.
+
+---
+
+## 6. Self-review round (adversarial, post-implementation)
+
+A 6-dimension adversarial review (each finding independently verified) ran over
+`489e2fc..HEAD`. 3 confirmed findings, all fixed:
+
+- **F1 — fingerprint regression + dead self-heal** (medium). The `<2` fallback
+  threshold regressed already-activated 1-component machines (`"CPU123|UNKNOWN|
+  UNKNOWN"` is already per-machine, not a shared constant), and the "one silent
+  re-activation" recovery it relied on was **dead code** — gated behind
+  `is_licensed()`, which is hardcoded `false`. **Fix:** threshold → `>=1` (fall
+  back only for all-UNKNOWN), commit `84a9d4e`; and re-gate `check_license`'s
+  background re-activation on "a saved key exists" so it actually runs (also
+  repairs the separately-broken 400-day-exp refresh), commit `59f6a5f`.
+- **F2 — paste-last race** (medium). `paste_last_transcript` wrote the shared
+  `paste_target` mutex the dictation flow uses → wrong/missing paste if
+  `Ctrl+Shift+V` is pressed during the post-stop transcription window. **Fix:**
+  `deliver_text` now takes an explicit `target: Option<isize>`; paste-last passes
+  its own captured window and never touches the shared mutex. Commit `59f6a5f`.
+- **F3 — macOS Cmd+Shift+V** (low). The macOS paste path doesn't release a held
+  Shift (Windows does), so paste-last can emit Cmd+Shift+V. cfg(macos) /
+  unverifiable here → added to the Slice 8 spec. Commit `ade9d3e`.
+
+**Verification of the fixes:** `cargo test` 40/40; F1b threshold change was TDD'd
+(watched the 1-component test fail under `>=2`, then fixed); `deliver_text` caller
+audit confirms both sites updated and paste-last decoupled. **Deferred:** the
+`check_license` self-heal touches the licensing path and can't be exercised
+offline (needs a saved key + an invalidated token) — flag for on-device
+validation.
+
+**Second re-review (clean run, no rate-limit failures):** re-ran the two
+rate-limited dimensions plus an adversarial check of the fixes themselves. The
+licensing-path change (`check_license`), the `deliver_text` refactor, the
+fingerprint threshold change, the CI workflow, and the settings wiring **all
+passed with zero findings**. One new finding: the re-paste-last hotkey **shipped
+live on macOS** while its Shift-release fix (F3/§8d) was deferred — so macOS
+users would hit the `Cmd+Shift+V` misfire now. **Fix:** gate
+`register_paste_last_hotkey` behind `cfg!(target_os = "windows")` (commit
+`70509b5`); paste-last is Windows-only until §8d lands. `cargo test` 40/40.
+
+**Process note:** 2 of 6 dimensions in the FIRST review (`ci-and-settings`,
+`dual-platform-cfg`) aborted on server-side rate-limiting and did not actually
+review — hence the targeted re-run, which completed cleanly.
+
+**Final commit count:** 14 on `feat/ultra-audit-stabilization` (9 implementation
++ session log + 4 self-review fixes). `cargo test` 40/40 throughout.

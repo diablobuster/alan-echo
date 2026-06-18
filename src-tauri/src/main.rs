@@ -238,23 +238,25 @@ fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
     if cfg!(debug_assertions) {
         return Ok(true);
     }
-    if state.license.lock().is_licensed() {
-        // Housekeeping, never gating: if the activation token is missing or
-        // expired (tokens carry a 400-day exp), refresh it in the background
-        // with the saved key. Failures only log — a paying user always boots.
-        if !activation::is_activated(&state.data_dir) {
-            if let Some(key) = state.settings.lock().get_str("license_key") {
-                let data_dir = state.data_dir.clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = activation::activate_online(&key, &data_dir) {
-                        log::info!("Silent re-activation failed (will retry next launch): {}", e);
-                    }
-                });
-            }
+    let activated = activation::is_activated(&state.data_dir);
+    // Housekeeping, never gating: if the activation token is missing, expired
+    // (tokens carry a 400-day exp), or no longer verifies after a machine-
+    // fingerprint change, refresh it in the background with the saved key.
+    // Previously this was gated behind is_licensed(), which is always false
+    // (format-only check) — so the self-heal never ran, leaving expired and
+    // post-fingerprint-change tokens un-refreshed. Gate on "a saved key exists"
+    // instead. Failures only log — a paying user always boots.
+    if !activated {
+        if let Some(key) = state.settings.lock().get_str("license_key") {
+            let data_dir = state.data_dir.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = activation::activate_online(&key, &data_dir) {
+                    log::info!("Silent re-activation failed (will retry next launch): {}", e);
+                }
+            });
         }
-        return Ok(true);
     }
-    Ok(activation::is_activated(&state.data_dir))
+    Ok(activated)
 }
 
 #[tauri::command]
@@ -447,7 +449,9 @@ async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_
             increment_trial_count(&state);
         }
 
-        let pasted = deliver_text(&app, &state, &cleaned);
+        // Consume the target captured at recording start (set in start_recording).
+        let target = state.paste_target.lock().take();
+        let pasted = deliver_text(&app, &state, &cleaned, target);
 
         Ok(serde_json::json!({
             "id": id,
@@ -463,11 +467,10 @@ async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_
 
 /// Copy the transcript to the clipboard and, if enabled, paste it into the app
 /// that was focused when recording started. Returns whether a paste happened.
-fn deliver_text(app: &tauri::AppHandle, state: &AppState, text: &str) -> bool {
+fn deliver_text(app: &tauri::AppHandle, state: &AppState, text: &str, target: Option<isize>) -> bool {
     use tauri_plugin_clipboard_manager::ClipboardExt;
 
     let auto_paste = state.settings.lock().get_bool("auto_paste").unwrap_or(true);
-    let target = state.paste_target.lock().take();
 
     let prior_clip = app.clipboard().read_text().ok();
     if let Err(e) = app.clipboard().write_text(text.to_string()) {
@@ -767,9 +770,6 @@ fn paste_last_transcript(app: &tauri::AppHandle) {
     let state = app.state::<Arc<AppState>>();
     let state = Arc::clone(state.inner());
 
-    // The window focused at the instant the hotkey fired is the paste target.
-    *state.paste_target.lock() = Some(paste::foreground_window());
-
     let newest = state.db.lock()
         .get_page(0, 1)
         .ok()
@@ -781,7 +781,10 @@ fn paste_last_transcript(app: &tauri::AppHandle) {
         return;
     };
 
-    let pasted = deliver_text(app, &state, &text);
+    // The window focused at the instant the hotkey fired is the paste target.
+    // Pass it directly — never via the shared state.paste_target mutex, which
+    // belongs to the dictation flow and could be mid-transcription right now.
+    let pasted = deliver_text(app, &state, &text, Some(paste::foreground_window()));
     if let Some(w) = app.get_webview_window("main") {
         w.emit("paste-last", serde_json::json!({ "pasted": pasted })).ok();
     }

@@ -16,6 +16,7 @@
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -88,6 +89,21 @@ impl PackKind {
         match self {
             Self::Cuda => 50 * 1024 * 1024,
             Self::Vulkan => 5 * 1024 * 1024,
+        }
+    }
+
+    /// Pinned SHA-256 of the pack zip (lowercase hex). The extracted binary is
+    /// launched as the speech engine, so this is the integrity gate against a
+    /// compromised/poisoned origin — an RCE vector if skipped. `None` means
+    /// unverified (logged loudly). To pin: download the pack asset and run
+    ///   Get-FileHash <pack>.zip -Algorithm SHA256   (Windows)
+    ///   shasum -a 256 <pack>.zip                     (macOS/Linux)
+    /// then paste the lowercase hash here; bump on every pack release.
+    fn expected_sha256(self) -> Option<&'static str> {
+        match self {
+            // TODO(release): pin from the pack release's SHA256SUMS.txt.
+            Self::Cuda => None,
+            Self::Vulkan => None,
         }
     }
 }
@@ -376,7 +392,7 @@ fn run_install(app: &tauri::AppHandle, state: &Arc<AppState>, kind: PackKind) ->
     let zip_path = models.join("gpu-pack.zip.partial");
     let tmp_dir = models.join(".gpu-pack-tmp");
 
-    download_to(app, &kind.url(), &zip_path, kind.min_bytes())?;
+    download_to(app, &kind.url(), &zip_path, kind.min_bytes(), kind.expected_sha256())?;
 
     set_progress(app, PackProgress { state: "extracting".into(), ..Default::default() });
     if tmp_dir.exists() {
@@ -486,7 +502,13 @@ fn disable_vulkan_pack(state: &Arc<AppState>, models: &Path) {
     log::warn!("Vulkan engine failed on this driver — pack disabled, engine back on CPU");
 }
 
-fn download_to(app: &tauri::AppHandle, url: &str, dest: &Path, min_bytes: u64) -> Result<(), String> {
+fn download_to(
+    app: &tauri::AppHandle,
+    url: &str,
+    dest: &Path,
+    min_bytes: u64,
+    expected_sha256: Option<&str>,
+) -> Result<(), String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         // Per-read timeout, NOT overall — a 440 MB download on a slow link is
@@ -542,6 +564,39 @@ fn download_to(app: &tauri::AppHandle, url: &str, dest: &Path, min_bytes: u64) -
             std::fs::remove_file(dest).ok();
             return Err("The download ended early — try again".into());
         }
+    }
+
+    // Cryptographic integrity: the extracted pack binary is launched as the
+    // native speech engine, so an unverified download is an RCE vector (a
+    // compromised/poisoned origin could substitute a same-size malicious zip).
+    // Verify against the pinned SHA-256 when known; fail closed on mismatch.
+    if let Some(expected) = expected_sha256 {
+        let mut hasher = Sha256::new();
+        let mut vf = std::fs::File::open(dest)
+            .map_err(|e| format!("Couldn't open the download for verification: {}", e))?;
+        let mut hbuf = [0u8; 64 * 1024];
+        loop {
+            let n = vf
+                .read(&mut hbuf)
+                .map_err(|e| format!("Verification read failed: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&hbuf[..n]);
+        }
+        let got = format!("{:x}", hasher.finalize());
+        if !got.eq_ignore_ascii_case(expected) {
+            std::fs::remove_file(dest).ok();
+            return Err(
+                "The acceleration pack failed its integrity check and was discarded. Try again, or email support."
+                    .into(),
+            );
+        }
+    } else {
+        eprintln!(
+            "[packs] WARNING: no pinned SHA-256 for this pack — installing UNVERIFIED. \
+             Pin PackKind::expected_sha256 to enforce integrity before launch."
+        );
     }
     Ok(())
 }

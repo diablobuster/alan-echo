@@ -693,9 +693,20 @@ fn check_for_update(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Resul
     if info.download_url.is_none() && info.available {
         let key = state.settings.lock().get_str("license_key");
         if let Some(k) = key {
+            // Percent-encode defensively — the key is normally [A-Z0-9-], but a
+            // raw interpolation into a URL is a latent correctness/leak gap.
+            let enc: String = k
+                .bytes()
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        (b as char).to_string()
+                    }
+                    _ => format!("%{:02X}", b),
+                })
+                .collect();
             info.download_url = Some(format!(
                 "https://www.alanglobalintelligence.com/api/echo/download?key={}",
-                k
+                enc
             ));
         }
     }

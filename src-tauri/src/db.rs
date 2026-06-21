@@ -225,12 +225,25 @@ impl TranscriptDB {
                 std::fs::write(path, json).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             }
             "csv" => {
+                // Quote-escape AND neutralize spreadsheet formula injection: a
+                // cell beginning with = + - @ is evaluated as a formula by Excel
+                // / Sheets even inside quotes (a dictated transcript starting
+                // with one of those could exfiltrate data via WEBSERVICE/DDE),
+                // so prefix those cells with an apostrophe.
+                let cell = |s: &str| -> String {
+                    let cleaned = s.replace('"', "\"\"").replace('\n', " ").replace('\r', "");
+                    if cleaned.starts_with(|c| matches!(c, '=' | '+' | '-' | '@')) {
+                        format!("'{}", cleaned)
+                    } else {
+                        cleaned
+                    }
+                };
                 let mut out = String::from("Timestamp,Text,Duration,Words\n");
                 for t in &reversed {
                     out.push_str(&format!(
                         "\"{}\",\"{}\",{},{}\n",
                         t.timestamp.get(..19).unwrap_or(&t.timestamp).replace('T', " "),
-                        t.text.replace('"', "\"\"").replace('\n', " ").replace('\r', ""),
+                        cell(&t.text),
                         t.duration_seconds.unwrap_or(0.0),
                         t.word_count.unwrap_or(0),
                     ));

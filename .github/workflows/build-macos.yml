@@ -6,12 +6,15 @@ on:
       - "v*"
   workflow_dispatch:
 
-# This workflow degrades gracefully: until the Apple Developer identity exists,
-# the signing/notarization secrets are unset, every signing step is skipped via
-# `if: env.APPLE_CERTIFICATE != ''`, and the build still produces an UNSIGNED
-# universal .dmg (today's behavior) — so CI never breaks while waiting on Apple
-# enrollment. Once the secrets are set, the same run signs (hardened runtime),
-# notarizes, and staples.
+# Degrades gracefully: until the Apple Developer identity exists, the signing
+# secrets are unset and the job builds an UNSIGNED universal .dmg (so CI never
+# breaks while waiting on enrollment). Once APPLE_CERTIFICATE is set, the same
+# job signs (hardened runtime), notarizes, and staples.
+#
+# IMPORTANT: the Apple secrets are passed ONLY to the steps that need them, never
+# at job level. An EMPTY APPLE_CERTIFICATE in `tauri build`'s environment makes
+# Tauri's bundler attempt `security import` and FAIL the build — so the unsigned
+# build step is kept entirely free of APPLE_* vars.
 #
 # Required repo secrets to switch on signing + notarization:
 #   APPLE_CERTIFICATE            base64 of the "Developer ID Application" .p12
@@ -27,17 +30,9 @@ jobs:
   build-macos:
     runs-on: macos-14
     env:
-      # Mapped from secrets so steps can gate on presence (secrets aren't
-      # readable directly in `if:`). Empty until enrollment → unsigned build.
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'echo-ci-keychain' }}
-      # Notarization (Tauri runs it during `tauri build` when these + a signing
-      # identity are present). Empty → signed-but-not-notarized.
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # Boolean gate as a string ("true"/"false"). Secrets can't be read in
+      # `if:` directly, and we must NOT expose APPLE_* at job level (see above).
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,7 +73,11 @@ jobs:
           ./scripts/prepare-resources-macos.sh
 
       - name: Import Apple Developer certificate
-        if: env.APPLE_CERTIFICATE != ''
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'echo-ci-keychain' }}
         run: |
           echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
@@ -92,28 +91,44 @@ jobs:
           security find-identity -v -p codesigning "$RUNNER_TEMP/build.keychain"
 
       - name: Sign bundled whisper-server (hardened runtime)
-        if: env.APPLE_CERTIFICATE != ''
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           # The whisper-server resource is a separate Mach-O; notarization
           # requires every executable in the bundle to carry a hardened-runtime
           # Developer ID signature. Sign it here, BEFORE tauri build copies it
-          # into Contents/Resources. Tauri signs the outer .app afterward and
-          # leaves this nested signature intact.
+          # into Contents/Resources.
           codesign --force --options runtime --timestamp \
             --entitlements src-tauri/entitlements-helper.plist \
             --sign "$APPLE_SIGNING_IDENTITY" \
             src-tauri/resources/models/whisper-server
           codesign -dvvv src-tauri/resources/models/whisper-server || true
 
-      - name: Build universal (.dmg) — signs + notarizes when identity present
-        run: npx tauri build --target universal-apple-darwin --verbose
+      # Two mutually-exclusive build steps so the UNSIGNED path never sees an
+      # APPLE_* var (an empty one breaks Tauri's bundler at the codesign phase).
+      - name: Build universal — unsigned (no Apple identity)
+        if: env.HAS_APPLE_CERT != 'true'
         env:
-          # Updater signing key (separate from the Apple identity). Unset here;
-          # the in-app updater verifies the served-file SHA, not a Tauri sig.
+          # Updater signing key (separate from the Apple identity); the in-app
+          # updater verifies the served-file SHA, not a Tauri signature.
           TAURI_SIGNING_PRIVATE_KEY: ""
+        run: npx tauri build --target universal-apple-darwin --verbose
+
+      - name: Build universal — signed + notarized
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx tauri build --target universal-apple-darwin --verbose
 
       - name: Verify signature + notarization stapling
-        if: env.APPLE_CERTIFICATE != ''
+        if: env.HAS_APPLE_CERT == 'true'
         run: |
           APP="$(ls -d src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app | head -n1)"
           DMG="$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n1)"

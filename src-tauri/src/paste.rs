@@ -136,62 +136,106 @@ pub use win::{foreground_window, paste_into};
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use std::process::Command;
+    //! Native auto-paste for macOS.
+    //!
+    //! Replaces the previous two-osascript-subprocesses-per-dictation path with
+    //! in-process Cocoa/CoreGraphics calls: NSWorkspace captures the frontmost
+    //! app at record start, NSRunningApplication refocuses it, and CGEventPost
+    //! synthesizes Cmd+V. Like the osascript path, injecting keystrokes into
+    //! another app requires Accessibility access.
+    //!
+    //! VALIDATION (must compile + run-test on real Mac hardware): the objc2
+    //! crate surface and pinned versions below were authored from a non-Mac
+    //! host — a Mac CI build is the first real compile check, and Accessibility
+    //! behavior must be verified on a device.
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
+    use std::thread;
+    use std::time::Duration;
 
-    /// Capture the PID of the frontmost application (the one receiving keystrokes).
+    /// kVK_ANSI_V — the virtual key code for the 'v' key.
+    const KEY_V: u16 = 9;
+
+    // AXIsProcessTrusted() reports whether this process holds Accessibility
+    // access. CGEventPost into another app silently no-ops without it, so we
+    // check up front to surface the same actionable error the osascript path
+    // returned (CGEventPost itself reports no permission error).
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> u8;
+    }
+
+    fn accessibility_trusted() -> bool {
+        unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    /// Capture the PID of the frontmost application (the one receiving
+    /// keystrokes) at record start, so we can refocus it before pasting.
     pub fn foreground_window() -> isize {
-        let output = Command::new("osascript")
-            .args([
-                "-e",
-                "tell application \"System Events\" to unix id of first process whose frontmost is true",
-            ])
-            .output()
-            .ok();
-        match output {
-            Some(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse::<isize>()
-                .unwrap_or(0),
-            _ => 0,
+        unsafe {
+            let ws = NSWorkspace::sharedWorkspace();
+            match ws.frontmostApplication() {
+                Some(app) => app.processIdentifier() as isize,
+                None => 0,
+            }
         }
     }
 
-    /// Re-focus the application that was frontmost when recording started,
-    /// then simulate Cmd+V via System Events. Requires Accessibility access.
+    /// Re-focus the app captured at record start, then synthesize Cmd+V.
+    /// Requires Accessibility access.
     pub fn paste_into(pid: isize) -> Result<(), String> {
         if pid <= 0 {
             return Err("No target application captured".into());
         }
 
-        let script = format!(
-            "tell application \"System Events\"\n\
-             set targetProc to first process whose unix id is {}\n\
-             set frontmost of targetProc to true\n\
-             delay 0.15\n\
-             keystroke \"v\" using command down\n\
-             end tell",
-            pid
-        );
-
-        let result = Command::new("osascript")
-            .args(["-e", &script])
-            .output()
-            .map_err(|e| format!("Auto-paste failed: {}", e))?;
-
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            if stderr.contains("not allowed assistive access")
-                || stderr.contains("osascript is not allowed")
-            {
-                return Err(
-                    "Auto-paste requires Accessibility access. \
-                     Open System Settings \u{2192} Privacy & Security \u{2192} Accessibility, \
-                     and enable ALAN Echo."
-                        .into(),
-                );
-            }
-            return Err(format!("Auto-paste failed: {}", stderr.trim()));
+        if !accessibility_trusted() {
+            return Err(
+                "Auto-paste requires Accessibility access. \
+                 Open System Settings \u{2192} Privacy & Security \u{2192} Accessibility, \
+                 and enable ALAN Echo."
+                    .into(),
+            );
         }
+
+        // Refocus the captured app. Best-effort: if it has since quit, fall
+        // through and paste into whatever is frontmost rather than failing.
+        unsafe {
+            if let Some(app) =
+                NSRunningApplication::runningApplicationWithProcessIdentifier(pid as i32)
+            {
+                app.activateWithOptions(NSApplicationActivationOptions::NSApplicationActivateAllWindows);
+                // Let the window server complete the focus switch.
+                thread::sleep(Duration::from_millis(120));
+            }
+        }
+
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| "Could not create a keyboard event source".to_string())?;
+
+        // Neutralize a physically-held Shift from the Cmd+Shift+Space hotkey
+        // (mirrors the Windows path, which releases Shift before pasting). With
+        // the HID source merging real modifier state, a still-held Shift could
+        // otherwise turn the synthetic Cmd+V into Cmd+Shift+V ("Paste and Match
+        // Style"). Verify on hardware (see the macOS parity spec §8d).
+        const KEY_SHIFT: u16 = 56; // kVK_Shift
+        if let Ok(shift_up) = CGEvent::new_keyboard_event(source.clone(), KEY_SHIFT, false) {
+            shift_up.post(CGEventTapLocation::HID);
+        }
+
+        // Down + up for 'v', each carrying ONLY the Command flag. Setting the
+        // flag explicitly keeps a physically-held Shift (from the
+        // Cmd+Shift+Space hotkey) from turning this into Cmd+Shift+V
+        // ("Paste and Match Style").
+        let down = CGEvent::new_keyboard_event(source.clone(), KEY_V, true)
+            .map_err(|_| "Could not synthesize the paste keystroke".to_string())?;
+        down.set_flags(CGEventFlags::CGEventFlagCommand);
+        down.post(CGEventTapLocation::HID);
+
+        let up = CGEvent::new_keyboard_event(source, KEY_V, false)
+            .map_err(|_| "Could not synthesize the paste keystroke".to_string())?;
+        up.set_flags(CGEventFlags::CGEventFlagCommand);
+        up.post(CGEventTapLocation::HID);
 
         Ok(())
     }

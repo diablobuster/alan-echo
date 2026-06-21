@@ -48,6 +48,23 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Native macOS auto-paste (paste.rs): NSWorkspace/NSRunningApplication to
+# capture + refocus the target app, CGEventPost to synthesize Cmd+V. Replaces
+# the osascript subprocesses. Versions are best-effort from a non-Mac host —
+# a Mac CI build validates them.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+# `libc` feature is REQUIRED: NSRunningApplication::processIdentifier and
+# ::runningApplicationWithProcessIdentifier (used by paste.rs) are gated behind
+# it in objc2-app-kit 0.2 (they take/return libc::pid_t). objc2 itself is pulled
+# transitively — no direct dep needed.
+objc2-app-kit = { version = "0.2", features = [
+    "NSWorkspace",
+    "NSRunningApplication",
+    "NSApplication",
+    "libc",
+] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -174,7 +174,12 @@ pub fn get_gpu_pack_status(state: State<Arc<AppState>>) -> Result<serde_json::Va
     let info = state.whisper.info();
     // §5.2 offer logic: NVIDIA → CUDA pack (proven); otherwise any AMD/Intel
     // adapter → Vulkan pack, beta-labeled. No matching hardware → no offer.
-    let (offer, offer_gpu, beta) = if info.gpu_name.is_some() {
+    let (offer, offer_gpu, beta) = if cfg!(target_os = "macos") {
+        // macOS ships Metal compiled into the engine — there's no separate
+        // acceleration pack to download (the Windows CUDA/Vulkan packs don't
+        // apply, and their adapter heuristics would mis-offer here).
+        (None, None, false)
+    } else if info.gpu_name.is_some() {
         (Some(PackKind::Cuda), info.gpu_name.clone(), false)
     } else if let Some(name) = vulkan_candidate(&probe_display_adapters()) {
         (Some(PackKind::Vulkan), Some(name), true)
@@ -226,7 +231,10 @@ pub fn test_gpu(state: State<Arc<AppState>>) -> Result<GpuTestResult, String> {
     let info = state.whisper.info();
 
     let vulkan_gpu = vulkan_candidate(&display_gpus);
-    let verdict = if nvidia_gpu.is_some() && pack_installed {
+    let verdict = if cfg!(target_os = "macos") {
+        // Apple Silicon runs the built-in Metal engine; Intel Macs stay on CPU.
+        if info.metal { "metal_ready" } else { "cpu_only" }
+    } else if nvidia_gpu.is_some() && pack_installed {
         "cuda_ready"
     } else if nvidia_gpu.is_some() {
         "cuda_available"
@@ -358,6 +366,13 @@ pub fn download_gpu_pack(
     state: State<Arc<AppState>>,
     kind: Option<String>,
 ) -> Result<(), String> {
+    // Defense in depth: the macOS UI never offers a pack (Metal is built in),
+    // but never let a stray call install a Windows CUDA/Vulkan binary on a Mac.
+    // `cfg!` (not `#[cfg]`) keeps the rest of the body from tripping
+    // `unreachable_code` on macOS.
+    if cfg!(target_os = "macos") {
+        return Err("Acceleration packs aren't used on macOS — Metal is built in.".into());
+    }
     // No kind = CUDA, the original pack (pre-1.2 UI sent no argument).
     let kind = PackKind::parse(kind.as_deref().unwrap_or("cuda"))
         .ok_or_else(|| "Unknown acceleration pack".to_string())?;

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Entitlements for the bundled whisper-server helper (signed separately in
+       CI before tauri build, then re-bundled). Notarization requires every
+       Mach-O in the .app to be signed with the hardened runtime.
+
+       MINIMIZE ON HARDWARE: start with the smallest set that lets the Metal
+       engine launch. disable-library-validation lets the separately-signed
+       helper load alongside the app; allow-jit covers Metal's runtime shader
+       compilation. If the helper launches and transcribes without one of
+       these, remove it. If it fails to launch, the usual next addition is
+       com.apple.security.cs.allow-unsigned-executable-memory. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+</dict>
+</plist>

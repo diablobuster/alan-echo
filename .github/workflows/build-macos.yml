@@ -6,9 +6,38 @@ on:
       - "v*"
   workflow_dispatch:
 
+# This workflow degrades gracefully: until the Apple Developer identity exists,
+# the signing/notarization secrets are unset, every signing step is skipped via
+# `if: env.APPLE_CERTIFICATE != ''`, and the build still produces an UNSIGNED
+# universal .dmg (today's behavior) — so CI never breaks while waiting on Apple
+# enrollment. Once the secrets are set, the same run signs (hardened runtime),
+# notarizes, and staples.
+#
+# Required repo secrets to switch on signing + notarization:
+#   APPLE_CERTIFICATE            base64 of the "Developer ID Application" .p12
+#   APPLE_CERTIFICATE_PASSWORD   the .p12 export password
+#   APPLE_SIGNING_IDENTITY       "Developer ID Application: <Name> (<TEAMID>)"
+#   KEYCHAIN_PASSWORD            any string (ephemeral CI keychain)
+#   APPLE_ID / APPLE_PASSWORD    Apple account email + app-specific password
+#   APPLE_TEAM_ID                your Team ID
+# (Alternative to APPLE_ID/PASSWORD/TEAM_ID for notarization: the App Store
+#  Connect API key — APPLE_API_ISSUER, APPLE_API_KEY, APPLE_API_KEY_PATH.)
+
 jobs:
   build-macos:
     runs-on: macos-14
+    env:
+      # Mapped from secrets so steps can gate on presence (secrets aren't
+      # readable directly in `if:`). Empty until enrollment → unsigned build.
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'echo-ci-keychain' }}
+      # Notarization (Tauri runs it during `tauri build` when these + a signing
+      # identity are present). Empty → signed-but-not-notarized.
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,7 +50,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -38,37 +67,86 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .build/whisper.cpp
-          key: whisper-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/prepare-resources-macos.sh') }}
+          key: whisper-cpp-universal-metal-${{ hashFiles('scripts/prepare-resources-macos.sh') }}
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Prepare macOS resources
+      - name: Prepare macOS resources (universal + Metal)
         run: |
           chmod +x scripts/prepare-resources-macos.sh
           ./scripts/prepare-resources-macos.sh
 
-      - name: Build (aarch64 — Apple Silicon)
-        run: npx tauri build --target aarch64-apple-darwin
+      - name: Import Apple Developer certificate
+        if: env.APPLE_CERTIFICATE != ''
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security default-keychain -s "$RUNNER_TEMP/build.keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security set-keychain-settings -t 21600 -u "$RUNNER_TEMP/build.keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$RUNNER_TEMP/build.keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/build.keychain"
+          security find-identity -v -p codesigning "$RUNNER_TEMP/build.keychain"
+
+      - name: Sign bundled whisper-server (hardened runtime)
+        if: env.APPLE_CERTIFICATE != ''
+        run: |
+          # The whisper-server resource is a separate Mach-O; notarization
+          # requires every executable in the bundle to carry a hardened-runtime
+          # Developer ID signature. Sign it here, BEFORE tauri build copies it
+          # into Contents/Resources. Tauri signs the outer .app afterward and
+          # leaves this nested signature intact.
+          codesign --force --options runtime --timestamp \
+            --entitlements src-tauri/entitlements-helper.plist \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            src-tauri/resources/models/whisper-server
+          codesign -dvvv src-tauri/resources/models/whisper-server || true
+
+      - name: Build universal (.dmg) — signs + notarizes when identity present
+        run: npx tauri build --target universal-apple-darwin --verbose
         env:
+          # Updater signing key (separate from the Apple identity). Unset here;
+          # the in-app updater verifies the served-file SHA, not a Tauri sig.
           TAURI_SIGNING_PRIVATE_KEY: ""
+
+      - name: Verify signature + notarization stapling
+        if: env.APPLE_CERTIFICATE != ''
+        run: |
+          APP="$(ls -d src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app | head -n1)"
+          DMG="$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n1)"
+          echo "Verifying $APP"
+          # Gatekeeper assessment of the .app (the notarized + stapled artifact).
+          spctl -a -vvv --type execute "$APP" || true
+          # Hard gate: the app must carry a stapled notarization ticket.
+          xcrun stapler validate "$APP"
+          # The bundled whisper-server must keep its hardened-runtime signature —
+          # i.e. Tauri's deep-sign of the .app didn't strip the helper's entitlements.
+          codesign -dvvv "$APP/Contents/Resources/models/whisper-server" 2>&1 \
+            | grep -i "flags.*runtime" \
+            || { echo "ERROR: bundled whisper-server lost its hardened-runtime signature"; exit 1; }
+          # The outer .dmg ticket is version-dependent / historically flaky — diagnostic only.
+          echo "Verifying $DMG"
+          xcrun stapler validate "$DMG" || true
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: alan-echo-macos-arm64
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          name: alan-echo-macos-universal
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
 
       - name: Upload app bundle
         uses: actions/upload-artifact@v4
         with:
-          name: alan-echo-macos-arm64-app
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+          name: alan-echo-macos-universal-app
+          path: src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
 
       - name: Create draft release (on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           draft: true

@@ -494,10 +494,14 @@ function EngineStatus({ engine }) {
   const computeText = engine
     ? (engine.engine_kind === 'cuda'
         ? `GPU: ${engine.gpu_name}${engine.vram_mb ? ` (${Math.round(engine.vram_mb / 1024)} GB)` : ''} · CUDA active`
+        : engine.engine_kind === 'metal'
+        ? `GPU: ${engine.gpu_name} · Metal active`
         : engine.engine_kind === 'vulkan'
         ? `GPU acceleration · Vulkan active (beta)`
         : engine.cuda
         ? `CPU engine · ${engine.cpu_cores} cores (${engine.gpu_name} idle)`
+        : engine.metal
+        ? `Apple Silicon GPU · starting…`
         : `CPU only · ${engine.cpu_cores} cores`)
     : ''
 
@@ -531,6 +535,9 @@ function EngineStatus({ engine }) {
 /** Plain-language consequences of a GPU test result. */
 function gpuVerdictText(r) {
   const vram = r.vram_mb ? ` (${Math.round(r.vram_mb / 1024)} GB)` : ''
+  if (r.verdict === 'metal_ready') {
+    return `Apple Silicon GPU — Metal acceleration is built in and active. Short dictations transcribe in well under a second.`
+  }
   if (r.verdict === 'cuda_ready') {
     return `${r.nvidia_gpu}${vram} — GPU acceleration is installed and active. Short dictations transcribe in well under a second.`
   }

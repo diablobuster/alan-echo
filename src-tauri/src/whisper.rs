@@ -46,6 +46,8 @@ pub struct EngineInfo {
     /// An NVIDIA GPU is PRESENT (nvidia-smi answered). Says nothing about
     /// which engine build is actually running — see `engine_kind`.
     pub cuda: bool,
+    /// Apple Silicon Metal GPU is present and the macOS engine runs on it.
+    pub metal: bool,
     pub cpu_cores: usize,
     pub model_file: Option<String>,
     pub model_label: Option<String>,
@@ -80,6 +82,8 @@ struct Hardware {
     gpu_name: Option<String>,
     vram_mb: Option<u64>,
     physical_cores: usize,
+    /// Apple Silicon (Metal-capable) — drives the macOS `metal` engine label.
+    metal: bool,
 }
 
 pub struct WhisperEngine {
@@ -92,9 +96,10 @@ pub struct WhisperEngine {
 impl WhisperEngine {
     pub fn new(data_dir: &Path) -> Self {
         let hw = detect_hardware();
-        match &hw.gpu_name {
-            Some(name) => log::info!("GPU detected: {} ({} MB VRAM)", name, hw.vram_mb.unwrap_or(0)),
-            None => log::info!("No NVIDIA GPU detected — using CPU build ({} physical cores)", hw.physical_cores),
+        match (&hw.gpu_name, hw.metal) {
+            (Some(name), true) => log::info!("Apple Silicon GPU detected: {} — Metal engine", name),
+            (Some(name), false) => log::info!("GPU detected: {} ({} MB VRAM)", name, hw.vram_mb.unwrap_or(0)),
+            (None, _) => log::info!("No dedicated GPU detected — using CPU build ({} physical cores)", hw.physical_cores),
         }
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -154,7 +159,7 @@ impl WhisperEngine {
             inner.port = port;
             inner.status = Status::Starting;
             inner.model_file = model.file_name().map(|n| n.to_string_lossy().to_string());
-            inner.engine_kind = Some(binary_kind(&binary));
+            inner.engine_kind = Some(binary_kind(&binary, &self.hw));
         }
 
         log::info!("Starting whisper-server: {} (model {}) on port {}", binary.display(), model.display(), port);
@@ -289,7 +294,8 @@ impl WhisperEngine {
         EngineInfo {
             gpu_name: self.hw.gpu_name.clone(),
             vram_mb: self.hw.vram_mb,
-            cuda: self.hw.gpu_name.is_some(),
+            cuda: self.hw.gpu_name.is_some() && !self.hw.metal,
+            metal: self.hw.metal,
             cpu_cores: self.hw.physical_cores,
             model_file: inner.model_file.clone(),
             model_label: inner.model_file.as_deref().map(model_label),
@@ -401,6 +407,16 @@ impl WhisperEngine {
             }
         }
 
+        // macOS bundles resources under the .app's Contents/Resources, NOT
+        // alongside the executable in Contents/MacOS. Walk up from the exe
+        // (Contents/MacOS/<exe> → Contents/Resources/models/<bin>).
+        #[cfg(target_os = "macos")]
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
+                candidates.push(contents.join("Resources").join("models").join(bin));
+            }
+        }
+
         candidates
             .into_iter()
             .find(|p| p.exists())
@@ -413,6 +429,12 @@ impl WhisperEngine {
             if let Some(dir) = exe.parent() {
                 dirs.push(dir.join("models"));
                 dirs.push(dir.to_path_buf());
+                // macOS: bundled resources live in Contents/Resources, not in
+                // Contents/MacOS next to the executable.
+                #[cfg(target_os = "macos")]
+                if let Some(contents) = dir.parent() {
+                    dirs.push(contents.join("Resources").join("models"));
+                }
             }
         }
         dirs
@@ -553,13 +575,18 @@ fn free_port() -> Option<u16> {
     (BASE_PORT..BASE_PORT + 20).find(|p| std::net::TcpListener::bind((HOST, *p)).is_ok())
 }
 
-/// Which acceleration family a server binary belongs to, by its pack directory.
-fn binary_kind(path: &Path) -> String {
+/// Which acceleration family a server binary belongs to. Windows packs are
+/// keyed by their directory; macOS ships a single Metal-enabled build, so an
+/// Apple Silicon machine reports `metal` even though the binary sits in the
+/// plain models directory.
+fn binary_kind(path: &Path, hw: &Hardware) -> String {
     let p = path.to_string_lossy();
     if p.contains("cuda_release") {
         "cuda".to_string()
     } else if p.contains("vulkan_release") {
         "vulkan".to_string()
+    } else if hw.metal {
+        "metal".to_string()
     } else {
         "cpu".to_string()
     }
@@ -567,8 +594,16 @@ fn binary_kind(path: &Path) -> String {
 
 fn detect_hardware() -> Hardware {
     let physical_cores = num_cpus::get_physical().max(1);
-    let (gpu_name, vram_mb) = detect_nvidia_gpu();
-    Hardware { gpu_name, vram_mb, physical_cores }
+    #[cfg(target_os = "macos")]
+    {
+        let (gpu_name, metal) = detect_apple_gpu();
+        return Hardware { gpu_name, vram_mb: None, physical_cores, metal };
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (gpu_name, vram_mb) = detect_nvidia_gpu();
+        Hardware { gpu_name, vram_mb, physical_cores, metal: false }
+    }
 }
 
 /// Probe for an NVIDIA GPU via nvidia-smi. Returns (None, None) on Macs
@@ -597,11 +632,32 @@ fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn detect_nvidia_gpu() -> (Option<String>, Option<u64>) {
-    // macOS hasn't shipped NVIDIA drivers since Mojave (2019).
-    // Metal/CoreML acceleration is a v2 item.
+    // No NVIDIA probe outside Windows yet.
     (None, None)
+}
+
+/// Apple Silicon exposes a unified-memory GPU that whisper.cpp's Metal backend
+/// uses automatically. Detect it by CPU brand (sysctl). Intel Macs return
+/// (None, false): their integrated GPUs aren't reliably faster than the CPU
+/// engine for Whisper, so we keep them on the honest CPU path.
+#[cfg(target_os = "macos")]
+fn detect_apple_gpu() -> (Option<String>, bool) {
+    let brand = Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if brand.starts_with("Apple") {
+        // e.g. "Apple M2 Pro" — the UI prefixes "GPU:".
+        (Some(brand), true)
+    } else {
+        (None, false)
+    }
 }
 
 /// Filename candidates for a model name, in preference order. For English,

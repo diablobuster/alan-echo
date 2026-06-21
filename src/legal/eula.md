@@ -6,7 +6,7 @@ This End-User License Agreement (the "Agreement") is between you and ALAN Global
 
 ## 1. License grant
 
-Upon payment (or valid redemption of a promotional key), ALAN grants you a perpetual, non-exclusive, non-transferable license to install and use the Software on Windows devices that you personally own or control, for personal or internal business use. One license per person: a single key may not be used concurrently by multiple people.
+Upon payment (or valid redemption of a promotional key), ALAN grants you a perpetual, non-exclusive, non-transferable license to install and use the Software on devices that you personally own or control, for personal or internal business use. One license per person: a single key may not be used concurrently by multiple people.
 
 ## 2. What your license includes
 

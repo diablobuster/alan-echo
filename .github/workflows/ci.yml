@@ -1,0 +1,82 @@
+name: CI
+
+# The single highest-leverage gate: prove the backend compiles AND its unit
+# tests pass on BOTH shipping platforms on every PR. This is the only automated
+# way a cfg(target_os) Windows- or macOS-only break is caught at review time
+# instead of at tag-build. Windows is the primary target yet had no CI at all.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # tauri::generate_context!() embeds ../dist at compile time, so the
+      # frontend must be built before the Rust crate will compile.
+      - run: npm ci
+      - run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # ── Hard gate ──────────────────────────────────────────────────────
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # ── Informational ──────────────────────────────────────────────────
+      # The tree is not yet rustfmt/clippy-clean (pre-existing debt). These run
+      # for visibility without blocking; promote to hard gates once the backlog
+      # is cleared (drop continue-on-error).
+      - name: cargo fmt --check (informational)
+        continue-on-error: true
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: cargo clippy (informational)
+        continue-on-error: true
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # ── Hard gate ──────────────────────────────────────────────────────
+      - name: Build
+        run: npm run build
+
+      # ── Informational ──────────────────────────────────────────────────
+      # eslint currently reports pre-existing errors; non-blocking until fixed.
+      - name: Lint (informational)
+        continue-on-error: true
+        run: npm run lint

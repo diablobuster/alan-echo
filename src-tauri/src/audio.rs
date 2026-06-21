@@ -363,3 +363,33 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
         s0 + (s1 - s0) * frac
     }).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The handoff flagged resample() as panicking on empty input via a
+    // samples.len()-1 underflow. That subtraction lives inside the
+    // (0..output_len) closure, and empty input makes output_len == 0, so the
+    // closure never runs. This test pins that safe behavior either way.
+    #[test]
+    fn resample_empty_input_returns_empty_without_panic() {
+        assert!(resample(&[], 48_000, 16_000).is_empty());
+        assert!(resample(&[], 16_000, 16_000).is_empty());
+    }
+
+    #[test]
+    fn resample_single_sample_no_panic() {
+        // Downsampling one frame truncates to zero output frames; the index
+        // clamps (idx.min(len-1)) must not underflow.
+        let _ = resample(&[0.5], 48_000, 16_000);
+        // Upsampling one frame must also be safe.
+        let _ = resample(&[0.5], 16_000, 48_000);
+    }
+
+    #[test]
+    fn resample_identity_rate_preserves_samples() {
+        let input = vec![0.1f32, 0.2, 0.3, 0.4];
+        assert_eq!(resample(&input, 16_000, 16_000), input);
+    }
+}

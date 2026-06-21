@@ -1,6 +1,7 @@
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use sha2::{Sha256, Digest};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -50,6 +51,14 @@ pub fn verify_token(token: &str, expected_mfp: &str) -> Result<serde_json::Value
     let claims: serde_json::Value = serde_json::from_slice(&payload_json)
         .map_err(|e| format!("Invalid claims: {}", e))?;
 
+    check_claims(&claims, expected_mfp)?;
+    Ok(claims)
+}
+
+/// Validate the non-cryptographic claims of an already signature-verified
+/// token: machine-fingerprint binding and (optional) expiry. Split out from
+/// `verify_token` so these branches are unit-testable without the signing key.
+fn check_claims(claims: &serde_json::Value, expected_mfp: &str) -> Result<(), String> {
     let token_mfp = claims.get("mfp").and_then(|v| v.as_str()).unwrap_or("");
     if !token_mfp.eq_ignore_ascii_case(expected_mfp) {
         return Err("Machine fingerprint mismatch".into());
@@ -67,7 +76,7 @@ pub fn verify_token(token: &str, expected_mfp: &str) -> Result<serde_json::Value
         }
     }
 
-    Ok(claims)
+    Ok(())
 }
 
 fn base64_url_decode(input: &str) -> Result<Vec<u8>, String> {
@@ -108,9 +117,76 @@ pub fn activate_online(key: &str, data_dir: &Path) -> Result<String, String> {
     Ok(token.to_string())
 }
 
+/// Stable per-machine identifier (SHA-256 of the hardware components joined by
+/// '|'). The underlying IDs never change while the process runs, so we compute
+/// it exactly once and memoize it. Gathering the components is expensive — on
+/// Windows it spawns three PowerShell/WMI processes (~2s warm, far worse cold);
+/// on macOS, ioreg/sysctl/diskutil — and `require_license` runs on the
+/// hotkey-to-record path. Recomputing per call used to stall the first beep by
+/// seconds. `main()` also warms this cache off the hotkey path at startup.
 pub fn machine_fingerprint() -> String {
-    let raw = raw_fingerprint_components();
-    let input = raw.join("|");
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(compute_machine_fingerprint).clone()
+}
+
+fn compute_machine_fingerprint() -> String {
+    fingerprint_with_fallback(raw_fingerprint_components(), read_or_create_fallback_id)
+}
+
+/// Number of hardware components that actually resolved (i.e. aren't the
+/// "UNKNOWN" sentinel the probes return on failure).
+fn resolved_component_count(components: &[String]) -> usize {
+    components.iter().filter(|c| c.as_str() != "UNKNOWN").count()
+}
+
+/// Build the fingerprint from hardware components. Only the *all-UNKNOWN* case
+/// (zero components resolved — locked-down corp boxes, VMs) is the real bug: it
+/// collapses every such machine to the SAME constant
+/// SHA256("UNKNOWN|UNKNOWN|UNKNOWN"), defeating token binding and colliding
+/// per-machine accounting; there we bind to a persisted random UUID instead.
+///
+/// Anything with at least one real component (e.g. "CPU123|UNKNOWN|UNKNOWN") is
+/// already per-machine and keeps its EXACT prior hardware hash — so this change
+/// is zero-regression for every machine that previously had a usable
+/// fingerprint. (A stricter >=2 threshold would have invalidated the tokens of
+/// already-activated 1-component machines.)
+fn fingerprint_with_fallback<F: FnOnce() -> String>(components: Vec<String>, fallback_id: F) -> String {
+    if resolved_component_count(&components) >= 1 {
+        fingerprint_from(components)
+    } else {
+        fingerprint_from(vec![format!("UUID:{}", fallback_id())])
+    }
+}
+
+/// Path of the persisted per-machine UUID used as a fingerprint fallback.
+/// Mirrors main.rs's data_dir (`dirs::data_dir()/ALAN Echo`).
+fn fallback_id_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ALAN Echo")
+        .join("machine-id")
+}
+
+/// Read the persisted fallback UUID, creating it on first use. Best-effort
+/// persistence: if the write fails we still return a usable id for this run.
+fn read_or_create_fallback_id() -> String {
+    let path = fallback_id_path();
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let _ = std::fs::write(&path, &id);
+    id
+}
+
+fn fingerprint_from(components: Vec<String>) -> String {
+    let input = components.join("|");
     let hash = Sha256::digest(input.as_bytes());
     format!("{:x}", hash)
 }
@@ -220,5 +296,156 @@ fn mac_disk_serial() -> String {
             "UNKNOWN".into()
         }
         _ => "UNKNOWN".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The hardware IDs behind the fingerprint never change while the process
+    // runs, so it must be computed once. Before memoization every call
+    // re-spawned 3 PowerShell/WMI (or ioreg/diskutil) processes — ~2s warm,
+    // far worse cold — which stalled start_recording and thus the first beep.
+    #[test]
+    fn machine_fingerprint_is_memoized() {
+        let _ = machine_fingerprint(); // first call may pay the spawn cost
+        let start = std::time::Instant::now();
+        let _ = machine_fingerprint(); // must be served from the cache
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "second machine_fingerprint() took {:?}; expected a cached (<50ms) result",
+            elapsed
+        );
+    }
+
+    // Pin the exact algorithm: SHA-256 of the components joined by '|'. Every
+    // already-issued activation token embeds an mfp computed this way, so a
+    // silent change here would brick activation for existing customers.
+    #[test]
+    fn fingerprint_from_is_stable_sha256_of_pipe_join() {
+        let components = vec!["CPU123".to_string(), "BOARD456".to_string(), "DISK789".to_string()];
+        let got = fingerprint_from(components.clone());
+        let expected = format!("{:x}", Sha256::digest(b"CPU123|BOARD456|DISK789"));
+        assert_eq!(got, expected);
+        assert_eq!(got.len(), 64);
+        assert!(got.chars().all(|c| c.is_ascii_hexdigit()));
+        // Deterministic across calls.
+        assert_eq!(got, fingerprint_from(components));
+    }
+
+    // ── machine fingerprint: collapse guard ──────────────────────────────
+
+    #[test]
+    fn fingerprint_uses_hardware_when_two_or_more_components_resolve() {
+        // Existing behavior must be preserved EXACTLY when >=2 components
+        // resolve — re-deriving these would brick every already-issued token.
+        let components = vec!["CPU123".to_string(), "BOARD456".to_string(), "UNKNOWN".to_string()];
+        let got = fingerprint_with_fallback(components.clone(), || panic!("fallback must not run"));
+        assert_eq!(got, fingerprint_from(components));
+    }
+
+    #[test]
+    fn fingerprint_falls_back_to_uuid_when_no_components_resolve() {
+        // Only the all-UNKNOWN case collapses every such machine to the SAME
+        // constant SHA256("UNKNOWN|UNKNOWN|UNKNOWN"); that is the case the
+        // fallback exists for.
+        let all_unknown = || vec!["UNKNOWN".to_string(), "UNKNOWN".to_string(), "UNKNOWN".to_string()];
+        let collapsed = fingerprint_from(all_unknown());
+        let got = fingerprint_with_fallback(all_unknown(), || "uuid-machine-A".to_string());
+        assert_ne!(got, collapsed, "must not collapse to the shared UNKNOWN constant");
+        // Same machine id -> stable fingerprint.
+        assert_eq!(got, fingerprint_with_fallback(all_unknown(), || "uuid-machine-A".to_string()));
+        // Different machine id -> different fingerprint (per-machine accounting).
+        assert_ne!(got, fingerprint_with_fallback(all_unknown(), || "uuid-machine-B".to_string()));
+    }
+
+    #[test]
+    fn fingerprint_uses_hardware_when_one_component_resolves() {
+        // A single real component ("CPU123|UNKNOWN|UNKNOWN") is already
+        // per-machine — it does NOT collapse to a shared constant. It must keep
+        // its exact hardware hash, or already-activated 1-component machines get
+        // their tokens invalidated (the fallback only exists for 0 resolved).
+        let one = vec!["CPU123".to_string(), "UNKNOWN".to_string(), "UNKNOWN".to_string()];
+        let got = fingerprint_with_fallback(one.clone(), || panic!("fallback must not run for 1 resolved"));
+        assert_eq!(got, fingerprint_from(one));
+    }
+
+    // ── verify_token: forged / malformed tokens are rejected ─────────────
+    // The happy path needs the server's private key, so it can't be unit
+    // tested here. What we CAN (and must) prove is that every token NOT signed
+    // by the real key is rejected — that is the revenue gate.
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    #[test]
+    fn verify_token_rejects_malformed_part_count() {
+        assert!(verify_token("notoken", "mfp").is_err());
+        assert!(verify_token("only.two", "mfp").is_err());
+        assert!(verify_token("a.b.c.d", "mfp").is_err());
+    }
+
+    #[test]
+    fn verify_token_rejects_bad_base64_signature() {
+        let token = format!("{}.{}.@@not-base64@@", b64(b"{}"), b64(br#"{"mfp":"x"}"#));
+        assert!(verify_token(&token, "x").is_err());
+    }
+
+    #[test]
+    fn verify_token_rejects_wrong_signature_length() {
+        let token = format!("{}.{}.{}", b64(b"{}"), b64(br#"{"mfp":"x"}"#), b64(&[0u8; 10]));
+        assert_eq!(verify_token(&token, "x").unwrap_err(), "Invalid signature length");
+    }
+
+    #[test]
+    fn verify_token_rejects_forged_64_byte_signature() {
+        // Correct length, but not a real signature over the payload.
+        let token = format!("{}.{}.{}", b64(b"{}"), b64(br#"{"mfp":"x"}"#), b64(&[0u8; 64]));
+        assert_eq!(verify_token(&token, "x").unwrap_err(), "Signature verification failed");
+    }
+
+    // ── check_claims: fingerprint binding + expiry ───────────────────────
+
+    #[test]
+    fn check_claims_rejects_fingerprint_mismatch() {
+        let claims = serde_json::json!({ "mfp": "AAAA" });
+        assert_eq!(check_claims(&claims, "BBBB").unwrap_err(), "Machine fingerprint mismatch");
+    }
+
+    #[test]
+    fn check_claims_matches_fingerprint_case_insensitively() {
+        let claims = serde_json::json!({ "mfp": "AbCdEf" });
+        assert!(check_claims(&claims, "abcdef").is_ok());
+    }
+
+    #[test]
+    fn check_claims_accepts_legacy_token_without_exp() {
+        let claims = serde_json::json!({ "mfp": "x" });
+        assert!(check_claims(&claims, "x").is_ok());
+    }
+
+    #[test]
+    fn check_claims_accepts_unexpired_token() {
+        let future = chrono::Utc::now().timestamp() + 400 * 86_400;
+        let claims = serde_json::json!({ "mfp": "x", "exp": future });
+        assert!(check_claims(&claims, "x").is_ok());
+    }
+
+    #[test]
+    fn check_claims_rejects_token_expired_beyond_grace() {
+        let long_ago = chrono::Utc::now().timestamp() - 8 * 86_400; // beyond 7-day grace
+        let claims = serde_json::json!({ "mfp": "x", "exp": long_ago });
+        assert_eq!(check_claims(&claims, "x").unwrap_err(), "Activation token expired");
+    }
+
+    #[test]
+    fn check_claims_accepts_token_expired_within_grace() {
+        let recently = chrono::Utc::now().timestamp() - 3 * 86_400; // inside 7-day grace
+        let claims = serde_json::json!({ "mfp": "x", "exp": recently });
+        assert!(check_claims(&claims, "x").is_ok());
     }
 }

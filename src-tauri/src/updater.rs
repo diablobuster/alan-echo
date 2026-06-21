@@ -160,9 +160,19 @@ fn launch_installer(_app: &AppHandle, exe_path: &std::path::Path) -> Result<(), 
 }
 
 fn version_gt(a: &str, b: &str) -> bool {
+    // Take the leading numeric run of each dot-segment so a pre-release/hotfix
+    // suffix (e.g. "1.2.4-beta") doesn't drop the whole segment and silently
+    // suppress a real update. "1.2.4-beta" -> [1,2,4]; "1.3-hotfix" -> [1,3].
     let parse = |s: &str| -> Vec<u32> {
         s.split('.')
-            .filter_map(|p| p.trim().parse::<u32>().ok())
+            .map(|p| {
+                p.trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u32>()
+                    .unwrap_or(0)
+            })
             .collect()
     };
     let va = parse(a);
@@ -174,4 +184,35 @@ fn version_gt(a: &str, b: &str) -> bool {
         if x < y { return false; }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_gt;
+
+    #[test]
+    fn plain_semver() {
+        assert!(version_gt("1.2.3", "1.2.2"));
+        assert!(version_gt("1.3.0", "1.2.9"));
+        assert!(version_gt("2.0.0", "1.9.9"));
+        assert!(!version_gt("1.2.3", "1.2.3"));
+        assert!(!version_gt("1.2.2", "1.2.3"));
+    }
+
+    #[test]
+    fn shorter_is_not_greater() {
+        assert!(!version_gt("1.2", "1.2.0"));
+        assert!(version_gt("1.2.1", "1.2"));
+    }
+
+    #[test]
+    fn prerelease_suffix_does_not_suppress_a_real_update() {
+        // Regression: filter_map(parse) previously dropped "4-beta" entirely,
+        // leaving [1,2] which is NOT > [1,2,3] — so a real update was withheld.
+        assert!(version_gt("1.2.4-beta", "1.2.3"));
+        assert!(version_gt("1.3-hotfix", "1.2.9"));
+        assert!(version_gt("1.2.10-rc1", "1.2.9"));
+        // Same numeric core must still be treated as equal (no update).
+        assert!(!version_gt("1.2.3-beta", "1.2.3"));
+    }
 }

@@ -280,6 +280,17 @@ export default function Dashboard() {
     setTimeout(() => setToast(null), 1800)
   }, [])
 
+  // Backend re-paste-last hotkey: the paste already happened in Rust, this is
+  // just user feedback.
+  useEffect(() => {
+    let cancelled = false
+    const unsub = listen('paste-last', (e) => {
+      if (cancelled) return
+      fireToast(e?.payload?.pasted ? 'Re-pasted last transcript' : 'Copied last transcript')
+    })
+    return () => { cancelled = true; unsub.then(fn => fn()) }
+  }, [fireToast])
+
   const handleCopy = useCallback(async () => {
     if (!selected) return
     try { await navigator.clipboard.writeText(selected.text) } catch {}

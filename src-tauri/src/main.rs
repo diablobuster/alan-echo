@@ -110,8 +110,13 @@ fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Valu
     match key.as_str() {
         "text_cleanup_level" => {
             if let Some(level) = value.as_str() {
-                *state.cleanup.lock() = TextCleanupEngine::new(level);
+                // Mutate in place so the user's find→replace rules survive a
+                // level change (constructing a fresh engine would drop them).
+                state.cleanup.lock().set_level(level);
             }
+        }
+        "text_replace_rules" => {
+            state.cleanup.lock().set_rules(&parse_replace_rules(&value));
         }
         "whisper_model" => {
             state.whisper.reload(value.as_str());
@@ -125,6 +130,19 @@ fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Valu
         _ => {}
     }
     Ok(())
+}
+
+/// Parse the `text_replace_rules` setting — a JSON array of
+/// `{"from": "...", "to": "..."}` — into (from, to) pairs. Malformed entries
+/// and a missing/non-array value yield no rules (find→replace simply off).
+fn parse_replace_rules(value: &serde_json::Value) -> Vec<(String, String)> {
+    value.as_array().map(|arr| {
+        arr.iter().filter_map(|item| {
+            let from = item.get("from")?.as_str()?.to_string();
+            let to = item.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some((from, to))
+        }).collect()
+    }).unwrap_or_default()
 }
 
 // ── License commands ─────────────────────────────────────────────────
@@ -220,23 +238,25 @@ fn check_license(state: State<Arc<AppState>>) -> Result<bool, String> {
     if cfg!(debug_assertions) {
         return Ok(true);
     }
-    if state.license.lock().is_licensed() {
-        // Housekeeping, never gating: if the activation token is missing or
-        // expired (tokens carry a 400-day exp), refresh it in the background
-        // with the saved key. Failures only log — a paying user always boots.
-        if !activation::is_activated(&state.data_dir) {
-            if let Some(key) = state.settings.lock().get_str("license_key") {
-                let data_dir = state.data_dir.clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = activation::activate_online(&key, &data_dir) {
-                        log::info!("Silent re-activation failed (will retry next launch): {}", e);
-                    }
-                });
-            }
+    let activated = activation::is_activated(&state.data_dir);
+    // Housekeeping, never gating: if the activation token is missing, expired
+    // (tokens carry a 400-day exp), or no longer verifies after a machine-
+    // fingerprint change, refresh it in the background with the saved key.
+    // Previously this was gated behind is_licensed(), which is always false
+    // (format-only check) — so the self-heal never ran, leaving expired and
+    // post-fingerprint-change tokens un-refreshed. Gate on "a saved key exists"
+    // instead. Failures only log — a paying user always boots.
+    if !activated {
+        if let Some(key) = state.settings.lock().get_str("license_key") {
+            let data_dir = state.data_dir.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = activation::activate_online(&key, &data_dir) {
+                    log::info!("Silent re-activation failed (will retry next launch): {}", e);
+                }
+            });
         }
-        return Ok(true);
     }
-    Ok(activation::is_activated(&state.data_dir))
+    Ok(activated)
 }
 
 #[tauri::command]
@@ -429,7 +449,9 @@ async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_
             increment_trial_count(&state);
         }
 
-        let pasted = deliver_text(&app, &state, &cleaned);
+        // Consume the target captured at recording start (set in start_recording).
+        let target = state.paste_target.lock().take();
+        let pasted = deliver_text(&app, &state, &cleaned, target);
 
         Ok(serde_json::json!({
             "id": id,
@@ -445,11 +467,10 @@ async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_
 
 /// Copy the transcript to the clipboard and, if enabled, paste it into the app
 /// that was focused when recording started. Returns whether a paste happened.
-fn deliver_text(app: &tauri::AppHandle, state: &AppState, text: &str) -> bool {
+fn deliver_text(app: &tauri::AppHandle, state: &AppState, text: &str, target: Option<isize>) -> bool {
     use tauri_plugin_clipboard_manager::ClipboardExt;
 
     let auto_paste = state.settings.lock().get_bool("auto_paste").unwrap_or(true);
-    let target = state.paste_target.lock().take();
 
     let prior_clip = app.clipboard().read_text().ok();
     if let Err(e) = app.clipboard().write_text(text.to_string()) {
@@ -672,9 +693,20 @@ fn check_for_update(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Resul
     if info.download_url.is_none() && info.available {
         let key = state.settings.lock().get_str("license_key");
         if let Some(k) = key {
+            // Percent-encode defensively — the key is normally [A-Z0-9-], but a
+            // raw interpolation into a URL is a latent correctness/leak gap.
+            let enc: String = k
+                .bytes()
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        (b as char).to_string()
+                    }
+                    _ => format!("%{:02X}", b),
+                })
+                .collect();
             info.download_url = Some(format!(
                 "https://www.alanglobalintelligence.com/api/echo/download?key={}",
-                k
+                enc
             ));
         }
     }
@@ -736,6 +768,49 @@ fn register_emit_hotkey(app: &tauri::AppHandle, accel: &str, event: &'static str
 fn display_accel(accel: &str) -> String {
     let modifier = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
     accel.replace("CmdOrCtrl", modifier).replace('+', " + ")
+}
+
+/// Re-insert the most recent transcript into whatever window is focused right
+/// now — no re-recording. The capture happens here in the backend because at
+/// hotkey time the user's target app is focused (not Echo's window); routing it
+/// through a JS event round-trip would capture Echo instead. Reuses
+/// deliver_text, so it honors the auto_paste setting and does the UIPI-safe
+/// paste + clipboard restore. (NOTE: with auto_paste off this only re-copies to
+/// the clipboard — an explicit-paste override is a candidate follow-up.)
+fn paste_last_transcript(app: &tauri::AppHandle) {
+    let state = app.state::<Arc<AppState>>();
+    let state = Arc::clone(state.inner());
+
+    let newest = state.db.lock()
+        .get_page(0, 1)
+        .ok()
+        .and_then(|(rows, _)| rows.into_iter().next())
+        .map(|t| t.text)
+        .filter(|t| !t.trim().is_empty());
+    let Some(text) = newest else {
+        log::info!("paste-last: no transcript to re-paste");
+        return;
+    };
+
+    // The window focused at the instant the hotkey fired is the paste target.
+    // Pass it directly — never via the shared state.paste_target mutex, which
+    // belongs to the dictation flow and could be mid-transcription right now.
+    let pasted = deliver_text(app, &state, &text, Some(paste::foreground_window()));
+    if let Some(w) = app.get_webview_window("main") {
+        w.emit("paste-last", serde_json::json!({ "pasted": pasted })).ok();
+    }
+}
+
+fn register_paste_last_hotkey(app: &tauri::AppHandle, accel: &str) -> bool {
+    use tauri_plugin_global_shortcut::ShortcutState;
+    app.global_shortcut()
+        .on_shortcut(accel, move |app, _shortcut, ev| {
+            if ev.state == ShortcutState::Pressed {
+                paste_last_transcript(app);
+            }
+        })
+        .map_err(|e| log::warn!("Failed to register paste-last {}: {}", accel, e))
+        .is_ok()
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
@@ -813,6 +888,16 @@ fn main() {
     std::fs::create_dir_all(data_dir.join("backups")).ok();
     std::fs::create_dir_all(data_dir.join("models")).ok();
 
+    // Warm the machine-fingerprint cache off the hotkey path. The first license
+    // check (inside start_recording) otherwise computes it lazily by spawning
+    // three PowerShell/WMI processes (~2s warm, far worse cold), stalling the
+    // first beep. Computing it once here, in parallel with the rest of startup,
+    // means the cache is hot well before any hotkey press. machine_fingerprint()
+    // memoizes, so this is the only place that pays the cost.
+    std::thread::spawn(|| {
+        let _ = activation::machine_fingerprint();
+    });
+
     let db_path = data_dir.join("transcripts.db");
     let settings_path = data_dir.join("settings.json");
 
@@ -861,6 +946,9 @@ fn main() {
     }
     let license_key = settings.get_str("license_key");
     let cleanup_level = settings.get_str("text_cleanup_level").unwrap_or_else(|| "standard".into());
+    let replace_rules = settings.get("text_replace_rules")
+        .map(parse_replace_rules)
+        .unwrap_or_default();
     let model_pref = settings.get_str("whisper_model");
     let language = settings.get_str("language").unwrap_or_else(|| "en".into());
 
@@ -878,7 +966,11 @@ fn main() {
         })),
         settings: Mutex::new(settings),
         license: Mutex::new(LicenseManager::new(license_key)),
-        cleanup: Mutex::new(TextCleanupEngine::new(&cleanup_level)),
+        cleanup: Mutex::new({
+            let mut engine = TextCleanupEngine::new(&cleanup_level);
+            engine.set_rules(&replace_rules);
+            engine
+        }),
         recorder: RecorderHandle::new(),
         whisper: Arc::clone(&whisper_engine),
         paste_target: Mutex::new(None),
@@ -1053,6 +1145,23 @@ fn main() {
                 })
                 .copied();
             let show_ok = register_emit_hotkey(handle, "CmdOrCtrl+Shift+H", "show-dashboard");
+            // Re-paste the most recent transcript into the focused app. Bound
+            // globally (active while idle) so it works from any app. NOTE:
+            // Ctrl+Shift+V is also "paste without formatting" in many
+            // terminals/editors — registering it globally intercepts that combo
+            // system-wide. Kept as the intuitive default; revisit once hotkeys
+            // are user-rebindable.
+            //
+            // Windows-only for now: paste-last fires synchronously while the
+            // user may still hold Shift, and only the Windows paste path
+            // releases it. On macOS the held Shift would turn Cmd+V into
+            // Cmd+Shift+V ("Paste and Match Style") — re-enable once the macOS
+            // Shift-release lands (docs/2026-06-17-slice8-macos-parity-spec.md §8d).
+            let paste_last_ok = if cfg!(target_os = "windows") {
+                register_paste_last_hotkey(handle, "CmdOrCtrl+Shift+V")
+            } else {
+                false
+            };
 
             {
                 let state = app.state::<Arc<AppState>>();
@@ -1061,6 +1170,7 @@ fn main() {
                     "toggle": if toggle_ok { Some(display_accel("CmdOrCtrl+Shift+Space")) } else { None },
                     "cancel": cancel_accel.map(display_accel),
                     "show": if show_ok { Some(display_accel("CmdOrCtrl+Shift+H")) } else { None },
+                    "pasteLast": if paste_last_ok { Some(display_accel("CmdOrCtrl+Shift+V")) } else { None },
                 });
             }
 

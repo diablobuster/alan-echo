@@ -58,19 +58,102 @@ static RE_DOUBLE_PERIOD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").expect
 static RE_SPACE_BEFORE_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+([.,!?;:])").expect("space-before-punct regex"));
 static RE_STANDALONE_I: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bi\b").expect("standalone-i regex"));
 
+// Precompiled once. `clean()` runs on every transcription; building these
+// ~30-70 regexes per call (one per acronym / correction / phrase) used to be
+// pure waste on the dictation hot path. Match the RE_HALLUCINATIONS idiom.
+static RE_ACRONYMS: Lazy<Vec<(Regex, String)>> = Lazy::new(|| {
+    ALWAYS_UPPERCASE.iter().map(|acr| {
+        let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(acr))).expect("acronym regex");
+        (re, acr.to_uppercase())
+    }).collect()
+});
+
+static RE_INFORMAL: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+    const CORRECTIONS: &[(&str, &str)] = &[
+        ("gonna", "going to"), ("wanna", "want to"), ("gotta", "got to"),
+        ("kinda", "kind of"), ("sorta", "sort of"), ("coulda", "could have"),
+        ("woulda", "would have"), ("shoulda", "should have"), ("dunno", "don't know"),
+        ("lemme", "let me"), ("gimme", "give me"),
+    ];
+    CORRECTIONS.iter().map(|(from, to)| {
+        let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from))).expect("informal regex");
+        (re, *to)
+    }).collect()
+});
+
+static RE_TIGHTEN: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+    const REPLACEMENTS: &[(&str, &str)] = &[
+        (r"(?i)\bin order to\b", "to"),
+        (r"(?i)\bdue to the fact that\b", "because"),
+        (r"(?i)\bat this point in time\b", "now"),
+        (r"(?i)\bin the event that\b", "if"),
+        (r"(?i)\bhas the ability to\b", "can"),
+        (r"(?i)\bis able to\b", "can"),
+        (r"(?i)\bprior to\b", "before"),
+    ];
+    REPLACEMENTS.iter().map(|(pattern, replacement)| {
+        (Regex::new(pattern).expect("tighten regex"), *replacement)
+    }).collect()
+});
+
 pub struct TextCleanupEngine {
     level: String,
+    /// User-defined find→replace rules, precompiled. Applied as the last
+    /// transform so they win over the engine's own casing rules.
+    rules: Vec<(Regex, String)>,
 }
 
 impl TextCleanupEngine {
     pub fn new(level: &str) -> Self {
-        Self { level: level.to_string() }
+        Self { level: level.to_string(), rules: Vec::new() }
+    }
+
+    /// Change the cleanup level in place. Kept separate from `new` so a level
+    /// change from settings doesn't discard the user's find→replace rules.
+    pub fn set_level(&mut self, level: &str) {
+        self.level = level.to_string();
+    }
+
+    /// Compile deterministic find→replace rules. Each `from` matches whole-word
+    /// and case-insensitively (the idiom the acronym/correction passes use);
+    /// empty/uncompilable `from` patterns are skipped. The replacement is
+    /// inserted literally — `$1` in a user's replacement is not a capture ref.
+    pub fn set_rules(&mut self, pairs: &[(String, String)]) {
+        self.rules = pairs.iter().filter_map(|(from, to)| {
+            if from.trim().is_empty() {
+                return None;
+            }
+            Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from)))
+                .ok()
+                .map(|re| (re, to.clone()))
+        }).collect();
+    }
+
+    fn apply_rules(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (re, to) in &self.rules {
+            result = re.replace_all(&result, regex::NoExpand(to.as_str())).to_string();
+        }
+        result
     }
 
     pub fn clean(&self, raw: &str) -> String {
         let mut text = raw.trim().to_string();
         if text.is_empty() { return String::new(); }
 
+        // Verbatim: the user wants exactly what they said (lawyers, devs,
+        // people quoting). Bypass every baseline transform — they are the
+        // destructive ones: remove_hallucinations strips [..]/(..) and so
+        // kills `arr[i]`, fix_punctuation force-appends '.', and
+        // fix_capitalization rewrites case. Return the trimmed text untouched.
+        if self.level == "verbatim" {
+            return self.apply_rules(&text);
+        }
+
+        // Levels in increasing aggression: `light` = baseline only (whitespace,
+        // hallucination strip, de-dup, punctuation, capitalization); `standard`
+        // adds filler/acronym cleanup; `aggressive` adds informal/tightening.
+        // Any unrecognized level behaves as `light`.
         // All levels
         text = self.normalize_whitespace(&text);
         text = self.remove_hallucinations(&text);
@@ -95,6 +178,9 @@ impl TextCleanupEngine {
 
         // Final pass
         text = self.fix_capitalization(&text);
+        // User find→replace runs after capitalization so it wins over the
+        // engine's casing (e.g. "github" → "GitHub" stays GitHub).
+        text = self.apply_rules(&text);
         text = self.final_cleanup(&text);
         text.trim().to_string()
     }
@@ -258,41 +344,23 @@ impl TextCleanupEngine {
 
     fn fix_acronyms(&self, text: &str) -> String {
         let mut result = text.to_string();
-        for acr in ALWAYS_UPPERCASE {
-            let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(acr))).unwrap();
-            result = re.replace_all(&result, acr.to_uppercase().as_str()).to_string();
+        for (re, upper) in RE_ACRONYMS.iter() {
+            result = re.replace_all(&result, upper.as_str()).to_string();
         }
         result
     }
 
     fn apply_informal_corrections(&self, text: &str) -> String {
-        let corrections = [
-            ("gonna", "going to"), ("wanna", "want to"), ("gotta", "got to"),
-            ("kinda", "kind of"), ("sorta", "sort of"), ("coulda", "could have"),
-            ("woulda", "would have"), ("shoulda", "should have"), ("dunno", "don't know"),
-            ("lemme", "let me"), ("gimme", "give me"),
-        ];
         let mut result = text.to_string();
-        for (from, to) in &corrections {
-            let re = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(from))).unwrap();
+        for (re, to) in RE_INFORMAL.iter() {
             result = re.replace_all(&result, *to).to_string();
         }
         result
     }
 
     fn tighten_phrasing(&self, text: &str) -> String {
-        let replacements = [
-            (r"(?i)\bin order to\b", "to"),
-            (r"(?i)\bdue to the fact that\b", "because"),
-            (r"(?i)\bat this point in time\b", "now"),
-            (r"(?i)\bin the event that\b", "if"),
-            (r"(?i)\bhas the ability to\b", "can"),
-            (r"(?i)\bis able to\b", "can"),
-            (r"(?i)\bprior to\b", "before"),
-        ];
         let mut result = text.to_string();
-        for (pattern, replacement) in &replacements {
-            let re = Regex::new(pattern).unwrap();
+        for (re, replacement) in RE_TIGHTEN.iter() {
             result = re.replace_all(&result, *replacement).to_string();
         }
         result
@@ -369,5 +437,53 @@ mod tests {
         let engine = TextCleanupEngine::new("standard");
         let out = engine.clean("um so basically i think the the api is ready");
         assert_eq!(out, "I think the API is ready.");
+    }
+
+    #[test]
+    fn find_replace_rules_win_over_casing_and_are_case_insensitive() {
+        let mut engine = TextCleanupEngine::new("standard");
+        engine.set_rules(&[
+            ("github".to_string(), "GitHub".to_string()),
+            ("k8s".to_string(), "Kubernetes".to_string()),
+        ]);
+        let out = engine.clean("i pushed it to github and deployed to k8s");
+        assert!(out.contains("GitHub"), "got: {out}");
+        assert!(out.contains("Kubernetes"), "got: {out}");
+        assert!(!out.contains("github"), "casing rule must win: {out}");
+    }
+
+    #[test]
+    fn find_replace_applies_in_verbatim_mode() {
+        let mut engine = TextCleanupEngine::new("verbatim");
+        engine.set_rules(&[("todo".to_string(), "TODO".to_string())]);
+        // Rule fires, and verbatim still preserves the code/casing around it.
+        assert_eq!(engine.clean("todo: fix arr[i]"), "TODO: fix arr[i]");
+    }
+
+    #[test]
+    fn find_replace_replacement_is_literal_not_a_capture_ref() {
+        let mut engine = TextCleanupEngine::new("verbatim");
+        engine.set_rules(&[("price".to_string(), "$5".to_string())]);
+        // "$5" must be inserted literally, not interpreted as capture group 5.
+        assert_eq!(engine.clean("the price"), "the $5");
+    }
+
+    #[test]
+    fn empty_from_rule_is_ignored() {
+        let mut engine = TextCleanupEngine::new("verbatim");
+        engine.set_rules(&[(String::new(), "X".to_string())]);
+        assert_eq!(engine.clean("hello world"), "hello world");
+    }
+
+    #[test]
+    fn verbatim_preserves_code_punctuation_and_case() {
+        // Verbatim must bypass the destructive baseline transforms:
+        // remove_hallucinations strips [..]/(..) (would kill arr[i]),
+        // fix_punctuation force-appends '.', fix_capitalization rewrites case.
+        let engine = TextCleanupEngine::new("verbatim");
+        assert_eq!(engine.clean("arr[i] = compute(x)"), "arr[i] = compute(x)");
+        assert_eq!(engine.clean("hello world"), "hello world");
+        // ...but it is not raw: surrounding whitespace is still trimmed.
+        assert_eq!(engine.clean("  spaced out  "), "spaced out");
     }
 }

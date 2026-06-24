@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 use crate::activation;
 use crate::settings::Settings;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+// Suppress the console window Windows would otherwise flash when `reg` runs
+// (e.g. on every dictation when the trial counter is persisted).
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 type HmacSha256 = Hmac<Sha256>;
 
 pub const DAILY_LIMIT: u32 = 5;
@@ -265,6 +272,7 @@ fn write_registry(blob: &str) {
         .args(["add", r"HKCU\Software\ALAN Echo", "/v", "TrialState", "/t", "REG_SZ", "/d", blob, "/f"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .ok();
 }
@@ -276,6 +284,7 @@ fn read_registry() -> Option<String> {
         .args(["query", r"HKCU\Software\ALAN Echo", "/v", "TrialState"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);

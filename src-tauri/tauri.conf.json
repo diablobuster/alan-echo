@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-0/tauri/v2/tooling/cli/schema.json",
   "productName": "ALAN Echo",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "identifier": "com.alan.echo",
   "build": {
     "frontendDist": "../dist",
@@ -23,7 +23,8 @@
         "decorations": false,
         "transparent": false,
         "visible": true,
-        "focus": true
+        "focus": true,
+        "backgroundThrottling": "disabled"
       }
     ],
     "security": {

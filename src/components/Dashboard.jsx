@@ -99,6 +99,9 @@ export default function Dashboard() {
     try {
       if (!audioCtx.current) audioCtx.current = new AudioContext()
       const ctx = audioCtx.current
+      // A backgrounded/hidden webview can suspend the AudioContext; resume it so
+      // the hotkey beep is never silently dropped while Echo lives in the tray.
+      if (ctx.state === 'suspended') ctx.resume()
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
       osc.connect(gain)
@@ -179,9 +182,14 @@ export default function Dashboard() {
       const s = statusRef.current
       if (s === 'ready') {
         setError(null)
+        // Beep on the keypress, not after the mic finishes cold-opening
+        // (hundreds of ms). The old silent gap trained the user to re-press —
+        // and a queued second press would cancel the just-started recording.
+        // applyStatus stays AFTER the await so a failed start never shows
+        // "recording"; a genuine mic failure still surfaces the error toast.
+        playBeep('start')
         try {
           await invoke('start_recording')
-          playBeep('start')
           applyStatus('recording')
         } catch (e) {
           setError('Microphone error — ' + (e || 'check your audio device'))

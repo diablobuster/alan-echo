@@ -12,7 +12,7 @@ mod trial;
 mod updater;
 mod whisper;
 
-use audio::{DeviceInfo, RecordingResult, RecorderHandle};
+use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;
 use license::LicenseManager;
 use settings::Settings;
@@ -356,14 +356,27 @@ fn unregister_cancel_hotkey(app: &tauri::AppHandle, state: &AppState) {
 }
 
 #[tauri::command]
-async fn stop_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<RecordingResult, String> {
+async fn stop_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     // Off the main thread: recorder.stop() blocks on resample + WAV encode +
     // write (tens-to-hundreds of ms for a long clip), which otherwise froze the
     // hotkey pump and delayed deactivation.
+    //
+    // Take the paste target HERE (at stop), while it still unambiguously belongs
+    // to THIS recording, and hand it back to the frontend. The frontend then
+    // transcribes in the background and passes the target to transcribe() — so a
+    // NEW dictation can start (overwriting the shared paste_target slot) before
+    // this one's transcription finishes, without pasting into the wrong window.
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
         unregister_cancel_hotkey(&app, &state);
-        state.recorder.stop()
+        let r = state.recorder.stop()?;
+        let target = state.paste_target.lock().take();
+        Ok(serde_json::json!({
+            "wav_path": r.wav_path,
+            "duration_seconds": r.duration_seconds,
+            "has_speech": r.has_speech,
+            "paste_target": target,
+        }))
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -472,7 +485,7 @@ async fn test_microphone() -> Result<serde_json::Value, String> {
 // ── Transcription commands ───────────────────────────────────────────
 
 #[tauri::command]
-async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_path: String) -> Result<serde_json::Value, String> {
+async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_path: String, paste_target: Option<isize>) -> Result<serde_json::Value, String> {
     require_license(&state)?;
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
@@ -494,9 +507,10 @@ async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_
             increment_trial_count(&state);
         }
 
-        // Consume the target captured at recording start (set in start_recording).
-        let target = state.paste_target.lock().take();
-        let pasted = deliver_text(&app, &state, &cleaned, target);
+        // The target was captured at recording start and handed back by
+        // stop_recording, so it belongs to THIS recording even if a newer
+        // dictation has since started and overwritten the shared slot.
+        let pasted = deliver_text(&app, &state, &cleaned, paste_target);
 
         Ok(serde_json::json!({
             "id": id,

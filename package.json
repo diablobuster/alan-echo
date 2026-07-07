@@ -1,7 +1,7 @@
 {
   "name": "alan-echo",
   "private": true,
-  "version": "1.2.3",
+  "version": "1.2.5",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "scripts": {

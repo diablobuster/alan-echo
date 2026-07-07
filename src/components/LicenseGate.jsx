@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Monogram } from './Icons'
 import Icon from './Icons'
 import { invoke } from '@tauri-apps/api/core'
+import pkg from '../../package.json'
 
 // Open external pages in the user's real default browser — a plain
 // target=_blank would open a chromeless WebView2 popup with no address bar,
@@ -233,7 +234,7 @@ export default function LicenseGate({ onActivated }) {
       {/* Footer */}
       <div style={{ position: 'absolute', bottom: 24, textAlign: 'center' }}>
         <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-          ALAN Global Intelligence &middot; Echo v1.2.1
+          ALAN Global Intelligence &middot; Echo v{pkg.version}
         </span>
       </div>
     </div>

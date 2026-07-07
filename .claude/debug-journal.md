@@ -1,5 +1,18 @@
 # ALAN Echo — Debug Journal
 
+## 2026-06-28 — Hotkey slow/multi-press to activate AND deactivate
+
+### Issue: Ctrl+Shift+Space lagged, needed multiple presses, and a fast double-press cancelled the recording it just started
+- **Category**: ARCHITECTURE (latency-critical path routed through the main event loop + a throttled webview)
+- **Symptom**: Press to start → ~1s of nothing, or had to press several times; press to stop → delayed or needed several presses. Distinct from the 2026-06-17 fingerprint fix, which only touched the *start* path's license check and never the stop path.
+- **Root cause** (verified vs Tauri v2 docs + global-hotkey/plugin source + WebView2/Chromium docs):
+  1. `start_recording`/`stop_recording`/`cancel_recording` were *synchronous* `#[tauri::command]`s. Tauri v2 runs non-async commands on the **main thread**, which on Windows pumps `WM_HOTKEY`. `recorder.start()`/`stop()` block it (cpal cold-open; resample+WAV write), freezing both the global-shortcut callback and `emit`-to-webview. A second press queued during the freeze fired *after* the command returned (status already `recording`) → it stopped the just-started recording.
+  2. The hotkey did a Rust→webview→Rust round trip; with Echo hidden in the tray, Chromium occlusion + background-timer throttling delayed the JS `handleToggle` and suspended the `AudioContext` beep.
+  3. The start beep was gated behind `await invoke('start_recording')`, so confirmation lagged the full cold-open and trained re-presses.
+- **Evidence**: Tauri v2 docs — "Commands without the async keyword are executed on the main thread"; global-hotkey `windows/mod.rs` — `WM_HOTKEY` dispatched on the main-thread message pump; `emit_js → eval → EvaluateScript` queued to the (blocked) event loop. Chromium occlusion docs — "rendering stops, and js is throttled" for occluded/minimized windows.
+- **Fix**: (a) Make the three recorder commands `async fn` + `tokio::task::spawn_blocking` so the blocking work leaves the event loop; marshal the cancel-hotkey register/unregister back via `app.run_on_main_thread` (the plugin's hotkey window lives on the main thread). (b) Set `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (env-var path — appends to wry defaults) to disable background-timer/renderer/occlusion throttling; add `backgroundThrottling: "disabled"` for macOS parity. (c) Beep before the await + `AudioContext.resume()` when suspended.
+- **Lesson**: Never put a blocking call in a *synchronous* Tauri command — it runs on the main/event-loop thread and starves the global-shortcut pump *and* `emit`. Use `async fn` + `spawn_blocking` (as `transcribe` already did). A global hotkey routed through a hidden webview is also subject to WebView2 occlusion throttling — disable it, or own the action in Rust. Verify config enum literals against the installed crate (`backgroundThrottling` value is `disabled`, not `never`).
+
 ## 2026-06-17 — Hotkey-to-beep latency (~15s) / "recording too short"
 
 ### Issue: First beep lagged the hotkey by seconds; mashing the key reported "Recording too short"

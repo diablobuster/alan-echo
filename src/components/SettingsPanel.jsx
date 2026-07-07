@@ -472,7 +472,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
           </div>
           <div style={{ marginTop: 10, textAlign: 'center' }}>
             <span className="echo-mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
-              Part of ALAN Global Intelligence &middot; v1.2.1
+              Part of ALAN Global Intelligence &middot; v{pkg.version}
             </span>
           </div>
         </div>

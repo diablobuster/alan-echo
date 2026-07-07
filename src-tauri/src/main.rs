@@ -12,7 +12,7 @@ mod trial;
 mod updater;
 mod whisper;
 
-use audio::{DeviceInfo, RecordingResult, RecorderHandle};
+use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;
 use license::LicenseManager;
 use settings::Settings;
@@ -285,60 +285,118 @@ fn list_audio_devices() -> Result<Vec<DeviceInfo>, String> {
 }
 
 #[tauri::command]
-fn start_recording(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<(), String> {
-    require_license(&state)?;
+async fn start_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Run the blocking recorder work OFF the main/event-loop thread. A
+    // *synchronous* Tauri command runs on the main thread, and recorder.start()
+    // blocks until the cpal/WASAPI input stream cold-opens (hundreds of ms). On
+    // Windows the main thread is the loop that pumps WM_HOTKEY, so that block
+    // froze global-shortcut delivery: a second press queued during the freeze
+    // fired only *after* the command returned (status already 'recording') and
+    // immediately stopped the just-started recording — the "press twice and it
+    // cancels itself" symptom. spawn_blocking keeps the event loop free.
+    let state = Arc::clone(state.inner());
+    tokio::task::spawn_blocking(move || {
+        require_license(&state)?;
 
-    // Capture the focused app NOW — this is where the transcript gets pasted.
-    let target = paste::foreground_window();
+        // Capture the focused app NOW — this is where the transcript gets pasted.
+        let target = paste::foreground_window();
 
-    // A recording abandoned mid mic-test (its component unmounted) must not
-    // wedge dictation forever: discard the stale capture and start fresh.
-    if state.recorder.is_recording() {
-        if let Ok(stale) = state.recorder.stop() {
-            if let Some(path) = stale.wav_path {
-                std::fs::remove_file(path).ok();
+        // A recording abandoned mid mic-test (its component unmounted) must not
+        // wedge dictation forever: discard the stale capture and start fresh.
+        if state.recorder.is_recording() {
+            if let Ok(stale) = state.recorder.stop() {
+                if let Some(path) = stale.wav_path {
+                    std::fs::remove_file(path).ok();
+                }
             }
         }
-    }
 
-    let device = state.settings.lock().get_str("microphone_device");
-    state.recorder.start(device.as_deref())?;
+        let device = state.settings.lock().get_str("microphone_device");
+        state.recorder.start(device.as_deref())?;
 
-    // Commit only after a successful start so a failed start (e.g. a mic test
-    // racing a dictation) can never clobber the in-flight paste target.
-    *state.paste_target.lock() = Some(target);
+        // Commit only after a successful start so a failed start (e.g. a mic test
+        // racing a dictation) can never clobber the in-flight paste target.
+        *state.paste_target.lock() = Some(target);
 
-    // Register the cancel hotkey only for the duration of the recording —
-    // Echo must not swallow Ctrl+Shift+X system-wide while idle in the tray.
-    if let Some(accel) = state.cancel_accel.lock().clone() {
-        register_emit_hotkey(&app, &accel, "dictate-cancel");
-    }
-    Ok(())
+        // Register the cancel hotkey only for the duration of the recording —
+        // Echo must not swallow Ctrl+Shift+X system-wide while idle in the tray.
+        if let Some(accel) = state.cancel_accel.lock().clone() {
+            register_cancel_hotkey_on_main(&app, accel);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Register the per-recording cancel hotkey from a worker thread by marshaling
+/// the call back to the main thread. The global-shortcut plugin's hotkey
+/// message window is created on the main thread in setup(); (un)registering
+/// from a spawn_blocking worker could bind the hotkey to the wrong thread, so
+/// always run it on the main thread. Posting is non-blocking.
+fn register_cancel_hotkey_on_main(app: &tauri::AppHandle, accel: String) {
+    let app_handle = app.clone();
+    app.run_on_main_thread(move || {
+        register_emit_hotkey(&app_handle, &accel, "dictate-cancel");
+    })
+    .ok();
 }
 
 fn unregister_cancel_hotkey(app: &tauri::AppHandle, state: &AppState) {
-    if let Some(accel) = state.cancel_accel.lock().clone() {
-        app.global_shortcut().unregister(accel.as_str()).ok();
-    }
+    let Some(accel) = state.cancel_accel.lock().clone() else {
+        return;
+    };
+    // Marshal back to the main thread (see register_cancel_hotkey_on_main) —
+    // stop/cancel now run on a spawn_blocking worker.
+    let app_handle = app.clone();
+    app.run_on_main_thread(move || {
+        app_handle.global_shortcut().unregister(accel.as_str()).ok();
+    })
+    .ok();
 }
 
 #[tauri::command]
-fn stop_recording(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<RecordingResult, String> {
-    unregister_cancel_hotkey(&app, &state);
-    state.recorder.stop()
+async fn stop_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    // Off the main thread: recorder.stop() blocks on resample + WAV encode +
+    // write (tens-to-hundreds of ms for a long clip), which otherwise froze the
+    // hotkey pump and delayed deactivation.
+    //
+    // Take the paste target HERE (at stop), while it still unambiguously belongs
+    // to THIS recording, and hand it back to the frontend. The frontend then
+    // transcribes in the background and passes the target to transcribe() — so a
+    // NEW dictation can start (overwriting the shared paste_target slot) before
+    // this one's transcription finishes, without pasting into the wrong window.
+    let state = Arc::clone(state.inner());
+    tokio::task::spawn_blocking(move || {
+        unregister_cancel_hotkey(&app, &state);
+        let r = state.recorder.stop()?;
+        let target = state.paste_target.lock().take();
+        Ok(serde_json::json!({
+            "wav_path": r.wav_path,
+            "duration_seconds": r.duration_seconds,
+            "has_speech": r.has_speech,
+            "paste_target": target,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
-fn cancel_recording(app: tauri::AppHandle, state: State<Arc<AppState>>) -> Result<(), String> {
-    unregister_cancel_hotkey(&app, &state);
-    if let Ok(result) = state.recorder.stop() {
-        // Discard the recording — nothing should reach the transcriber.
-        if let Some(path) = result.wav_path {
-            std::fs::remove_file(path).ok();
+async fn cancel_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let state = Arc::clone(state.inner());
+    tokio::task::spawn_blocking(move || {
+        unregister_cancel_hotkey(&app, &state);
+        if let Ok(result) = state.recorder.stop() {
+            // Discard the recording — nothing should reach the transcriber.
+            if let Some(path) = result.wav_path {
+                std::fs::remove_file(path).ok();
+            }
         }
-    }
-    *state.paste_target.lock() = None;
-    Ok(())
+        *state.paste_target.lock() = None;
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))
 }
 
 #[tauri::command]
@@ -427,7 +485,7 @@ async fn test_microphone() -> Result<serde_json::Value, String> {
 // ── Transcription commands ───────────────────────────────────────────
 
 #[tauri::command]
-async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_path: String) -> Result<serde_json::Value, String> {
+async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_path: String, paste_target: Option<isize>) -> Result<serde_json::Value, String> {
     require_license(&state)?;
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
@@ -449,9 +507,10 @@ async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_
             increment_trial_count(&state);
         }
 
-        // Consume the target captured at recording start (set in start_recording).
-        let target = state.paste_target.lock().take();
-        let pasted = deliver_text(&app, &state, &cleaned, target);
+        // The target was captured at recording start and handed back by
+        // stop_recording, so it belongs to THIS recording even if a newer
+        // dictation has since started and overwritten the shared slot.
+        let pasted = deliver_text(&app, &state, &cleaned, paste_target);
 
         Ok(serde_json::json!({
             "id": id,
@@ -868,6 +927,24 @@ fn show_fatal_error(message: &str) {
 }
 
 fn main() {
+    // Keep the dictation hotkey and its start/stop beep responsive even when
+    // Echo is hidden in the tray (its normal resident state). WebView2/Chromium
+    // throttles JS, timers, and injected-event delivery for occluded or
+    // minimized windows (native window-occlusion tracking + background-timer
+    // throttling), which otherwise delays the 'dictate-toggle' event reaching
+    // the webview and the beep that confirms it. These switches disable that
+    // throttling. Use the env var rather than the additionalBrowserArgs config:
+    // WebView2 *appends* the env var to wry's defaults, whereas the config arg
+    // *replaces* them and would silently drop wry's
+    // --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection. Must be set
+    // before any webview environment is created — and before any thread is
+    // spawned below, since set_var is not thread-safe.
+    #[cfg(target_os = "windows")]
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion",
+    );
+
     // A corrupt engine binary (e.g. a damaged GPU pack) must make CreateProcess
     // FAIL, not hang the spawn behind a modal "Unsupported 16-Bit Application"
     // system dialog. Error mode is per-process and inherited by children.

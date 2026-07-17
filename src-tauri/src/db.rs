@@ -104,6 +104,18 @@ impl TranscriptDB {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Surface (don't silently swallow) rows that fail to decode — a corrupt
+    /// row vanishing from listings/search/export is data loss with no signal.
+    fn keep_row(r: Result<Transcript>) -> Option<Transcript> {
+        match r {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::warn!("Skipping undecodable transcript row: {}", e);
+                None
+            }
+        }
+    }
+
     pub fn get_page(&self, page: u32, page_size: u32) -> Result<(Vec<Transcript>, i64)> {
         let total: i64 = self.conn.query_row("SELECT COUNT(*) FROM transcripts", [], |r| r.get(0))?;
         // u64 math: both values are frontend-controlled and u32 * u32 wraps
@@ -122,7 +134,7 @@ impl TranscriptDB {
                 character_count: row.get(5)?,
                 word_count: row.get(6)?,
             })
-        })?.filter_map(|r| r.ok()).collect();
+        })?.filter_map(Self::keep_row).collect();
         Ok((rows, total))
     }
 
@@ -143,7 +155,7 @@ impl TranscriptDB {
                     raw_text: row.get(3)?, duration_seconds: row.get(4)?,
                     character_count: row.get(5)?, word_count: row.get(6)?,
                 })
-            })?.filter_map(|r| r.ok()).collect();
+            })?.filter_map(Self::keep_row).collect();
             Ok(rows)
         })();
         match fts_result {
@@ -159,7 +171,7 @@ impl TranscriptDB {
                         raw_text: row.get(3)?, duration_seconds: row.get(4)?,
                         character_count: row.get(5)?, word_count: row.get(6)?,
                     })
-                })?.filter_map(|r| r.ok()).collect();
+                })?.filter_map(Self::keep_row).collect();
                 Ok(rows)
             }
         }

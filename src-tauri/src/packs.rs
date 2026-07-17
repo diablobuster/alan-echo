@@ -567,19 +567,34 @@ fn download_to(
     let mut reader = resp.into_reader();
     let mut file = std::fs::File::create(dest)
         .map_err(|e| format!("Couldn't create the download file: {}", e))?;
+    // Hard ceiling: the largest real pack is ~440 MB. A misconfigured or
+    // malicious origin streaming forever must not fill the user's disk.
+    const MAX_PACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     let mut last_emit_mb: u64 = 0;
     loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("Download interrupted — try again ({})", e))?;
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                // Don't leave a half-written .partial behind on failure.
+                drop(file);
+                std::fs::remove_file(dest).ok();
+                return Err(format!("Download interrupted — try again ({})", e));
+            }
+        };
         if n == 0 {
             break;
         }
         file.write_all(&buf[..n])
             .map_err(|e| format!("Disk write failed (out of space?): {}", e))?;
         downloaded += n as u64;
+        if downloaded > MAX_PACK_BYTES {
+            drop(file);
+            std::fs::remove_file(dest).ok();
+            return Err("The download exceeded the expected size — try again later".into());
+        }
         let mb = downloaded / (1024 * 1024);
         if mb > last_emit_mb {
             last_emit_mb = mb;

@@ -289,13 +289,20 @@ fn today_str() -> String {
 #[cfg(target_os = "windows")]
 fn write_registry(blob: &str) {
     use std::process::{Command, Stdio};
-    Command::new("reg")
+    // Wait for reg.exe (callers are already off the main thread): two quick
+    // dictations' fire-and-forget children could land out of order, persisting
+    // the older count last — and failures were invisible.
+    match Command::new("reg")
         .args(["add", r"HKCU\Software\ALAN Echo", "/v", "TrialState", "/t", "REG_SZ", "/d", blob, "/f"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .ok();
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => log::warn!("Trial registry write exited with {}", s),
+        Err(e) => log::warn!("Trial registry write failed to run: {}", e),
+    }
 }
 
 #[cfg(target_os = "windows")]

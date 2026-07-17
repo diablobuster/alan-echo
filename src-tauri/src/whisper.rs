@@ -205,8 +205,25 @@ impl WhisperEngine {
                     ).is_ok() {
                         let mut guard = inner.lock();
                         if guard.generation == generation {
-                            guard.status = Status::Ready;
-                            log::info!("whisper-server ready on port {}", port);
+                            // The port was picked before spawn (TOCTOU): if OUR
+                            // child is dead, whatever accepted that connect is a
+                            // foreign process squatting the port — transcribing
+                            // against it would POST audio to a stranger and fail
+                            // confusingly. Ready requires a live child.
+                            let child_dead = guard
+                                .child
+                                .as_mut()
+                                .map(|c| matches!(c.try_wait(), Ok(Some(_))))
+                                .unwrap_or(true);
+                            if child_dead {
+                                guard.status = Status::Failed(
+                                    "whisper-server exited during startup (its port is in use by another process)".into(),
+                                );
+                                guard.child = None;
+                            } else {
+                                guard.status = Status::Ready;
+                                log::info!("whisper-server ready on port {}", port);
+                            }
                         }
                         return;
                     }

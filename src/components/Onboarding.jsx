@@ -28,7 +28,7 @@ export default function Onboarding({ hotkeys = {}, onDone }) {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       animation: 'echo-fade-in 0.25s ease-out both',
     }}>
-      <div style={{
+      <div role="dialog" aria-modal="true" aria-label="Welcome to ALAN Echo" style={{
         width: 440, maxHeight: '85vh', overflow: 'auto',
         background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
         borderRadius: 'var(--echo-radius)', boxShadow: '0 12px 40px rgba(0,0,0,0.18)',

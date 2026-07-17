@@ -121,9 +121,31 @@ export default function UpdateBanner() {
       )}
 
       {stage === 'error' && (
-        <span style={{ fontSize: 11, color: 'var(--accent-red, #e53e3e)' }}>
-          Update failed — try downloading from the website
-        </span>
+        <>
+          <span style={{ fontSize: 11, color: 'var(--accent-red, #e53e3e)' }}>
+            Update failed — you can retry, or download from the website
+          </span>
+          <button
+            onClick={() => { setStage(null); setPercent(0) }}
+            style={{
+              background: 'none', border: '1px solid var(--border-primary)',
+              borderRadius: 3, color: 'var(--text-secondary)', cursor: 'pointer',
+              fontSize: 11, padding: '3px 10px',
+            }}
+          >
+            Retry
+          </button>
+          <button
+            onClick={() => setDismissed(true)}
+            style={{
+              background: 'none', border: 'none', color: 'var(--text-faint)',
+              cursor: 'pointer', fontSize: 14, padding: '2px 4px',
+            }}
+            aria-label="Dismiss"
+          >
+            &times;
+          </button>
+        </>
       )}
     </div>
   )

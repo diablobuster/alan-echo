@@ -60,6 +60,16 @@ pub fn download_and_launch_update(
     expected_sha256: Option<&str>,
     data_dir: &std::path::Path,
 ) -> Result<(), String> {
+    // The URL and hash both arrive from the webview. The SHA-256 check is
+    // self-referential against a hostile caller (it can hash its own payload),
+    // so pin the host: a compromised webview must not be able to point this
+    // at an attacker server and escalate to native code execution.
+    let allowed = download_url.starts_with("https://www.alanglobalintelligence.com/")
+        || download_url.starts_with("https://alanglobalintelligence.com/");
+    if !allowed {
+        return Err("Update downloads are only allowed from alanglobalintelligence.com".into());
+    }
+
     let installer_path = if cfg!(target_os = "macos") {
         data_dir.join("ALAN-Echo-Update.dmg")
     } else {
@@ -150,10 +160,18 @@ fn launch_installer(app: &AppHandle, dmg_path: &std::path::Path) -> Result<(), S
 }
 
 #[cfg(not(target_os = "macos"))]
-fn launch_installer(_app: &AppHandle, exe_path: &std::path::Path) -> Result<(), String> {
+fn launch_installer(app: &AppHandle, exe_path: &std::path::Path) -> Result<(), String> {
     std::process::Command::new(exe_path)
         .spawn()
         .map_err(|e| format!("Could not launch installer: {}", e))?;
+
+    // process::exit skips the RunEvent::Exit cleanup — shut the engine down
+    // explicitly or every self-update orphans a whisper-server holding the
+    // model in RAM/VRAM and open handles that can make NSIS fail on locked
+    // files.
+    use tauri::Manager;
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    state.whisper.shutdown();
 
     std::thread::sleep(std::time::Duration::from_millis(500));
     std::process::exit(0);

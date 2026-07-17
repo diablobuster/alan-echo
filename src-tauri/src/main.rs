@@ -230,8 +230,11 @@ fn get_trial_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, St
 }
 
 #[tauri::command]
-fn quit_app() {
-    // EULA declined — exit cleanly before any engine/tray initialization matters.
+fn quit_app(state: State<Arc<AppState>>) {
+    // EULA declined. The engine is already starting by this point, and
+    // process::exit skips RunEvent::Exit — shut it down explicitly so no
+    // orphaned whisper-server keeps the model in memory.
+    state.whisper.shutdown();
     std::process::exit(0);
 }
 
@@ -437,17 +440,22 @@ async fn cancel_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>
     .map_err(|e| format!("Task failed: {}", e))
 }
 
-#[tauri::command]
-fn discard_recording(state: State<Arc<AppState>>, wav_path: String) -> Result<(), String> {
-    // Only delete our own recording WAVs inside the data dir.
-    let p = std::path::PathBuf::from(&wav_path);
-    let is_ours = p.parent().map(|d| d == state.data_dir).unwrap_or(false)
+/// True only for our own recording WAVs inside the data dir. Every command
+/// that reads or deletes a webview-supplied path must pass this — the webview
+/// is not trusted with arbitrary filesystem access.
+fn is_our_recording(state: &AppState, wav_path: &str) -> bool {
+    let p = std::path::PathBuf::from(wav_path);
+    p.parent().map(|d| d == state.data_dir).unwrap_or(false)
         && p.file_name()
             .and_then(|n| n.to_str())
             .map(|n| n.starts_with("recording_") && n.ends_with(".wav"))
-            .unwrap_or(false);
-    if is_ours {
-        std::fs::remove_file(&p).ok();
+            .unwrap_or(false)
+}
+
+#[tauri::command]
+fn discard_recording(state: State<Arc<AppState>>, wav_path: String) -> Result<(), String> {
+    if is_our_recording(&state, &wav_path) {
+        std::fs::remove_file(&wav_path).ok();
     }
     Ok(())
 }
@@ -564,6 +572,9 @@ pub fn transcribe_and_deliver(
 #[tauri::command]
 async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_path: String, paste_target: Option<isize>) -> Result<serde_json::Value, String> {
     require_license(&state)?;
+    if !is_our_recording(&state, &wav_path) {
+        return Err("Not a recording file".into());
+    }
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
         // Same serialization as the hotkey path — whisper-server has a single
@@ -674,7 +685,10 @@ fn get_hotkey_info(state: State<Arc<AppState>>) -> Result<serde_json::Value, Str
 }
 
 #[tauri::command]
-async fn read_wav_base64(wav_path: String) -> Result<String, String> {
+async fn read_wav_base64(state: State<'_, Arc<AppState>>, wav_path: String) -> Result<String, String> {
+    if !is_our_recording(&state, &wav_path) {
+        return Err("Not a recording file".into());
+    }
     tokio::task::spawn_blocking(move || {
         let bytes = std::fs::read(&wav_path).map_err(|e| format!("Failed to read WAV: {}", e))?;
         // Mic-test recordings are throwaway; don't litter the data dir.

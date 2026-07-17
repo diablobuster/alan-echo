@@ -21,19 +21,24 @@ static SENTENCE_START_FILLERS: &[&str] = &[
     "all right so", "okay so", "right so", "well", "so", "like", "okay", "ok", "right",
 ];
 
+// Only words that are unambiguous in ordinary speech may live in these lists:
+// each entry is force-recased in EVERY dictation at all non-verbatim levels.
+// "sec" (give me a sec), "may" (modal), "march"/"august" (verbs/adjectives),
+// "meta" (a meta question), and "apple" (the fruit) corrupted normal sentences
+// and were removed.
 static ALWAYS_UPPERCASE: &[&str] = &[
     "api", "apis", "url", "urls", "html", "css", "sql", "ai", "ml", "nlp", "llm", "gpt",
     "pdf", "csv", "json", "xml", "ui", "ux", "id", "ids", "roi", "kpi", "okr",
     "saas", "b2b", "b2c", "ceo", "cto", "cfo", "vp", "svp",
     "aws", "gcp", "gpu", "cpu", "ram", "ssd", "usb", "http", "https", "dns",
-    "etf", "ipo", "sec", "nyse", "nasdaq", "fyi", "asap", "eta",
+    "etf", "ipo", "nyse", "nasdaq", "fyi", "asap", "eta",
 ];
 
 static ALWAYS_CAPITALIZE: &[&str] = &[
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-    "january", "february", "march", "april", "may", "june", "july",
-    "august", "september", "october", "november", "december",
-    "google", "apple", "microsoft", "amazon", "meta", "nvidia", "tesla",
+    "january", "february", "april", "june", "july",
+    "september", "october", "november", "december",
+    "google", "microsoft", "amazon", "nvidia", "tesla",
     "alan", "openai", "anthropic", "python", "javascript",
 ];
 
@@ -42,14 +47,21 @@ static HALLUCINATION_EXACT: &[&str] = &[
     "thanks for watching", "thank you for watching",
 ];
 
-static RE_HALLUCINATIONS: Lazy<Vec<Regex>> = Lazy::new(|| vec![
-    Regex::new(r"(?i)thanks?\s+for\s+(watching|listening)").expect("hallucination regex 1"),
-    Regex::new(r"(?i)please\s+(like\s+and\s+)?subscribe").expect("hallucination regex 2"),
-    Regex::new(r"(?i)see\s+you\s+(in\s+the\s+)?next\s+(video|episode|time)").expect("hallucination regex 3"),
-    Regex::new(r"(?i)don'?t\s+forget\s+to\s+(like|subscribe|comment|share)").expect("hallucination regex 4"),
-    Regex::new(r"(?i)hit\s+the\s+(bell|notification|like)").expect("hallucination regex 5"),
-    Regex::new(r"\[.*?\]").expect("bracket regex"),
-    Regex::new(r"\(.*?\)").expect("paren regex"),
+// Whole-utterance hallucination shapes. These are checked against the ENTIRE
+// transcription only — engine hallucinations on silence/noise are (almost
+// always) the complete output. They must never run as substring removals:
+// that silently deleted legitimate dictated content like "we should ship it
+// (after the demo)" or a dictated "please subscribe me to the newsletter".
+static RE_HALLUCINATION_UTTERANCES: Lazy<Vec<Regex>> = Lazy::new(|| vec![
+    Regex::new(r"(?i)^\s*thanks?\s+for\s+(watching|listening)[\s.,!?]*$").expect("hallucination regex 1"),
+    Regex::new(r"(?i)^\s*please\s+(like\s+and\s+)?subscribe[\s.,!?]*$").expect("hallucination regex 2"),
+    Regex::new(r"(?i)^\s*see\s+you\s+(in\s+the\s+)?next\s+(video|episode|time)[\s.,!?]*$").expect("hallucination regex 3"),
+    Regex::new(r"(?i)^\s*don'?t\s+forget\s+to\s+(like|subscribe|comment|share)[\s.,!?]*$").expect("hallucination regex 4"),
+    Regex::new(r"(?i)^\s*hit\s+the\s+(bell|notification|like)[\s.,!?]*$").expect("hallucination regex 5"),
+    // Output that is nothing but bracketed/parenthesized tags: "[BLANK_AUDIO]",
+    // "(music)", "[music] (applause).", …
+    Regex::new(r"^\s*(?:\[[^\]]*\]|\([^)]*\))(?:[\s.,!?]*(?:\[[^\]]*\]|\([^)]*\)))*[\s.,!?]*$")
+        .expect("bracket-only regex"),
 ]);
 
 // No backreference regex — word repetition handled programmatically in remove_word_repetitions()
@@ -195,11 +207,10 @@ impl TextCleanupEngine {
         if HALLUCINATION_EXACT.contains(&stripped) {
             return String::new();
         }
-        let mut result = text.to_string();
-        for re in RE_HALLUCINATIONS.iter() {
-            result = re.replace_all(&result, "").to_string();
+        if RE_HALLUCINATION_UTTERANCES.iter().any(|re| re.is_match(text)) {
+            return String::new();
         }
-        result = RE_MULTI_SPACE.replace_all(&result, " ").trim().to_string();
+        let result = RE_MULTI_SPACE.replace_all(text, " ").trim().to_string();
         // Check only stop words remain
         let meaningful: Vec<_> = result.split_whitespace()
             .filter(|w| {
@@ -273,7 +284,21 @@ impl TextCleanupEngine {
         let mut result = text.to_string();
         for filler in SENTENCE_START_FILLERS {
             let lower = result.to_lowercase();
+            if lower.len() != result.len() {
+                break; // non-ASCII case folding shifted bytes — bail safely
+            }
             if lower.starts_with(filler) {
+                // Whole-word only: "Solar panels" must not lose its "So",
+                // "Welcome" its "Well", "Okra" its "Ok".
+                let boundary_ok = result.len() == filler.len()
+                    || !result[filler.len()..]
+                        .chars()
+                        .next()
+                        .map(|c| c.is_alphanumeric())
+                        .unwrap_or(false);
+                if !boundary_ok {
+                    continue;
+                }
                 let rest = &result[filler.len()..];
                 let rest = rest.trim_start_matches(|c: char| ", ".contains(c));
                 if !rest.is_empty() {
@@ -418,6 +443,42 @@ mod tests {
         let engine = TextCleanupEngine::new("standard");
         assert_eq!(engine.clean("Thanks for watching!"), "");
         assert_eq!(engine.clean("you"), "");
+        assert_eq!(engine.clean("[BLANK_AUDIO]"), "");
+        assert_eq!(engine.clean("(music) [applause]."), "");
+    }
+
+    #[test]
+    fn sentence_start_filler_requires_word_boundary() {
+        // Regression: "so"/"well"/"ok"/"like"/"right" were sliced off the
+        // front of any word that merely started with them.
+        let engine = TextCleanupEngine::new("standard");
+        assert_eq!(engine.clean("solar panels are great"), "Solar panels are great.");
+        assert_eq!(engine.clean("welcome to the meeting"), "Welcome to the meeting.");
+        assert_eq!(engine.clean("okra is in season"), "Okra is in season.");
+        // ...while genuine fillers still come off.
+        assert_eq!(engine.clean("okay so let's begin"), "Let's begin.");
+        assert_eq!(engine.clean("well, that went fine"), "That went fine.");
+    }
+
+    #[test]
+    fn mid_sentence_parentheticals_and_brackets_survive() {
+        // Regression: \[.*?\] and \(.*?\) ran as substring removals and
+        // silently deleted dictated content.
+        let engine = TextCleanupEngine::new("standard");
+        let out = engine.clean("we should ship it (after the demo) on friday");
+        assert!(out.contains("(after the demo)"), "got: {out}");
+        let out = engine.clean("please subscribe me to the newsletter when you get a chance");
+        assert!(out.to_lowercase().contains("subscribe me to the newsletter"), "got: {out}");
+    }
+
+    #[test]
+    fn common_english_words_not_force_recased() {
+        // Regression: "may"/"march"/"sec"/"meta"/"apple" were in the
+        // force-recase lists and corrupted ordinary sentences.
+        let engine = TextCleanupEngine::new("standard");
+        assert_eq!(engine.clean("you may want to check it"), "You may want to check it.");
+        assert_eq!(engine.clean("give me a sec please"), "Give me a sec please.");
+        assert_eq!(engine.clean("they march forward with the meta analysis"), "They march forward with the meta analysis.");
     }
 
     #[test]

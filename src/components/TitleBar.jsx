@@ -70,8 +70,8 @@ export default function TitleBar({ status = 'ready', elapsed = 0, onSettings, on
         background: 'none', border: 'none', cursor: 'pointer', padding: 6,
         color: 'var(--text-muted)', borderRadius: 4, WebkitAppRegion: 'no-drag',
       }}
-        onMouseEnter={e => e.target.style.background = 'var(--bg-hover)'}
-        onMouseLeave={e => e.target.style.background = 'none'}
+        onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
+        onMouseLeave={e => e.currentTarget.style.background = 'none'}
       >
         <Icon name="gear" size={15} />
       </button>

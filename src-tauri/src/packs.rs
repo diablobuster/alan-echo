@@ -138,8 +138,13 @@ fn pack_usable(data_dir: &Path, kind: PackKind) -> bool {
 
 /// First non-NVIDIA adapter that plausibly runs Vulkan (§5.2: all AMD/Intel
 /// names match on purpose — the beta label and post-install rollback are the
-/// guardrails, not a curated allowlist).
+/// guardrails, not a curated allowlist). Windows-only: the hosted pack ships
+/// a Windows binary, so offering it on macOS (e.g. Intel-Mac "Iris" chipsets)
+/// guaranteed a 100+ MB download ending in "pack is incomplete".
 fn vulkan_candidate(adapters: &[String]) -> Option<String> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
     adapters
         .iter()
         .find(|n| {
@@ -382,7 +387,16 @@ pub fn download_gpu_pack(
                 );
             }
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            // Thread-spawn failure would otherwise leave PROGRESS stuck on
+            // "downloading" and refuse every later install for the session.
+            *PROGRESS.lock() = PackProgress {
+                state: "failed".into(),
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+            e.to_string()
+        })?;
     Ok(())
 }
 
@@ -410,8 +424,28 @@ fn run_install(app: &tauri::AppHandle, state: &Arc<AppState>, kind: PackKind) ->
     }
     let dest = models.join(kind.dir_name());
     if dest.exists() {
-        std::fs::remove_dir_all(&dest)
-            .map_err(|e| format!("Couldn't replace the previous pack: {}", e))?;
+        // The engine may be running the binary inside dest — Windows refuses
+        // to delete a running exe and its loaded DLLs, so a reinstall/repair
+        // of the active pack always failed after the full download. Stop the
+        // engine first and give the child a moment to release its handles;
+        // the reload below brings it back up on the fresh pack.
+        state.whisper.shutdown();
+        let mut last_err = None;
+        for _ in 0..10 {
+            match std::fs::remove_dir_all(&dest) {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(format!("Couldn't replace the previous pack: {}", e));
+        }
     }
     std::fs::rename(&extracted, &dest)
         .map_err(|e| format!("Couldn't move the pack into place: {}", e))?;
@@ -621,6 +655,18 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
                 .map_err(|e| format!("Couldn't write {}: {}", out.display(), e))?;
             std::io::copy(&mut entry, &mut f)
                 .map_err(|e| format!("Extraction failed (out of disk space?): {}", e))?;
+            // Preserve the executable bit — without it the extracted engine
+            // binary is mode 0644 on macOS and every launch fails with
+            // "Permission denied".
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(mode) = entry.unix_mode() {
+                    let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode));
+                } else if out.file_name().and_then(|n| n.to_str()) == Some(PACK_BINARY_NAME) {
+                    let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755));
+                }
+            }
         }
     }
     Ok(())

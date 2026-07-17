@@ -638,7 +638,9 @@ fn model_label(file: &str) -> String {
     } else if file.contains("tiny") {
         "Lite".to_string()
     } else {
-        file.to_string()
+        // Never surface a raw model filename (ggml-*.bin) in the UI — quality
+        // tiers only.
+        "Custom".to_string()
     }
 }
 

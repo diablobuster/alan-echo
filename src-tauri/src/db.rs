@@ -106,7 +106,9 @@ impl TranscriptDB {
 
     pub fn get_page(&self, page: u32, page_size: u32) -> Result<(Vec<Transcript>, i64)> {
         let total: i64 = self.conn.query_row("SELECT COUNT(*) FROM transcripts", [], |r| r.get(0))?;
-        let offset = page * page_size;
+        // u64 math: both values are frontend-controlled and u32 * u32 wraps
+        // in release builds, yielding a wrong OFFSET.
+        let offset = page as u64 * page_size as u64;
         let mut stmt = self.conn.prepare(
             "SELECT id, timestamp, text, raw_text, duration_seconds, character_count, word_count FROM transcripts ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2"
         )?;

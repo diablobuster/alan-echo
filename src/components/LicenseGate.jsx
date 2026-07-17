@@ -91,7 +91,9 @@ export default function LicenseGate({ onActivated }) {
   }
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && key.length >= 24) handleActivate()
+    // Same guard as the button — a double Enter must not fire two concurrent
+    // activations (possible double seat consumption server-side).
+    if (e.key === 'Enter' && key.length >= 24 && !loading && !success) handleActivate()
   }
 
   return (

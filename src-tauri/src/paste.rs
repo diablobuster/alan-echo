@@ -1,14 +1,27 @@
-//! ALAN Echo — auto-paste into the previously focused application.
+//! ALAN Echo — auto-paste into the application the user dictated into.
 //!
-//! The foreground window is captured when recording starts (before the user
-//! interacts with our UI), and after transcription we refocus it and inject
-//! Ctrl+V via SendInput. This must live in Rust: the webview cannot focus
-//! other applications or synthesize global keystrokes.
+//! The foreground window is captured when recording starts; after
+//! transcription we inject Ctrl+V — but ONLY if the user is still in that
+//! app. This module never calls SetForegroundWindow: focus-stealing was the
+//! root of the "my window minimized / flashed / lost focus when transcription
+//! finished" class of bugs. Windows routinely denies SetForegroundWindow to
+//! background processes anyway (foreground-lock), which made the old path
+//! fail with "Could not focus the target window" even when the user was
+//! sitting in the target. If the user has moved to a different app, the
+//! transcript stays on the clipboard and the UI says so — we never yank
+//! windows around.
+//!
+//! Injection also waits for the user's physical modifier keys to clear
+//! instead of blind-injecting Shift/Alt key-ups. A stray Alt-up while the
+//! user is mid-keystroke (e.g. Alt+Tabbing during transcription) can throw
+//! the target app into menu mode — another "my window did something weird"
+//! source. Polling GetAsyncKeyState until Ctrl/Shift/Alt/Win are genuinely
+//! released guarantees the target receives a clean Ctrl+V chord.
 
 #[cfg(target_os = "windows")]
 mod win {
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
     use windows::Win32::Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
@@ -18,11 +31,12 @@ mod win {
         GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT, VK_V,
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
+        VK_SHIFT, VK_V,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
+        GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
     };
 
     pub fn foreground_window() -> isize {
@@ -87,36 +101,62 @@ mod win {
         }
     }
 
+    fn any_modifier_down() -> bool {
+        [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
+            .iter()
+            .any(|&vk| unsafe { (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0 })
+    }
+
+    /// Wait for the user's physical Ctrl/Shift/Alt/Win to clear so the
+    /// injected chord is exactly Ctrl+V. With a GPU engine, transcription can
+    /// finish while the hotkey fingers are still on the keys.
+    fn wait_for_modifier_release(timeout: Duration) -> bool {
+        let start = Instant::now();
+        while any_modifier_down() {
+            if start.elapsed() > timeout {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        true
+    }
+
     pub fn paste_into(hwnd: isize) -> Result<(), String> {
         unsafe {
             let h = HWND(hwnd as *mut core::ffi::c_void);
             if !IsWindow(h).as_bool() {
                 return Err("The target window no longer exists".into());
             }
-            if target_is_higher_integrity(h) {
+
+            let fg = GetForegroundWindow();
+            let same_window = fg == h;
+            // Multi-window apps (browsers, editors) may present a different
+            // top-level HWND for the same app the user never left; pasting
+            // into the focused field of the same process is what they expect.
+            let same_app = !same_window && !fg.0.is_null() && {
+                let mut target_pid = 0u32;
+                GetWindowThreadProcessId(h, Some(&mut target_pid));
+                let mut fg_pid = 0u32;
+                GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+                target_pid != 0 && target_pid == fg_pid
+            };
+            if !same_window && !same_app {
+                return Err("Focus moved to a different app after dictation".into());
+            }
+
+            // Input lands in the *foreground* window, so that's the one that
+            // must pass the UIPI (elevation) check.
+            if target_is_higher_integrity(fg) {
                 return Err(
                     "Target window is elevated; Windows blocks keystroke injection (UIPI)".into(),
                 );
             }
 
-            let _ = SetForegroundWindow(h);
-            // Give the window manager a beat to complete the focus switch.
-            thread::sleep(Duration::from_millis(120));
-            if GetForegroundWindow() != h {
-                // The foreground grant may have just expired; retry once.
-                let _ = SetForegroundWindow(h);
-                thread::sleep(Duration::from_millis(120));
-                if GetForegroundWindow() != h {
-                    // Never inject Ctrl+V into a window the user didn't choose.
-                    return Err("Could not focus the target window".into());
-                }
+            if !wait_for_modifier_release(Duration::from_millis(2000)) {
+                return Err("Modifier keys were still held down".into());
             }
 
-            // The user may still hold Shift from the Ctrl+Shift+Space hotkey;
-            // a held Shift would turn our Ctrl+V into Ctrl+Shift+V.
             let inputs = [
-                key(VK_SHIFT, true),
-                key(VK_MENU, true),
                 key(VK_CONTROL, false),
                 key(VK_V, false),
                 key(VK_V, true),
@@ -156,25 +196,26 @@ mod mac {
         }
     }
 
-    /// Re-focus the application that was frontmost when recording started,
-    /// then simulate Cmd+V via System Events. Requires Accessibility access.
+    /// Simulate Cmd+V into the app that was frontmost when recording started —
+    /// but only if it is STILL frontmost. Same no-focus-stealing policy as
+    /// Windows: if the user moved on, the transcript stays on the clipboard.
+    /// Requires Accessibility access.
     pub fn paste_into(pid: isize) -> Result<(), String> {
         if pid <= 0 {
             return Err("No target application captured".into());
         }
+        if foreground_window() != pid {
+            return Err("Focus moved to a different app after dictation".into());
+        }
 
-        let script = format!(
-            "tell application \"System Events\"\n\
-             set targetProc to first process whose unix id is {}\n\
-             set frontmost of targetProc to true\n\
-             delay 0.15\n\
-             keystroke \"v\" using command down\n\
-             end tell",
-            pid
-        );
+        // NOTE: if the user still holds Shift from the dictation hotkey this
+        // becomes Cmd+Shift+V ("Paste and Match Style") in some apps — the
+        // macOS modifier-release wait lands with the Mac launch work
+        // (docs/2026-06-17-slice8-macos-parity-spec.md §8d).
+        let script = "tell application \"System Events\" to keystroke \"v\" using command down";
 
         let result = Command::new("osascript")
-            .args(["-e", &script])
+            .args(["-e", script])
             .output()
             .map_err(|e| format!("Auto-paste failed: {}", e))?;
 

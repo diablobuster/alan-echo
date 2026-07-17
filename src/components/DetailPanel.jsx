@@ -6,12 +6,22 @@ import { formatTimestamp, formatDuration } from './TranscriptCard'
 export default function DetailPanel({ transcript, onCopy, onDelete, onSaveEdit }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+  // Two-step in-app delete confirmation — window.confirm() is a silent no-op
+  // in the macOS webview, which made Delete do nothing there.
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   // Leaving a transcript (select/delete) always exits edit mode.
   useEffect(() => {
     setEditing(false)
     setDraft(transcript?.text || '')
+    setConfirmingDelete(false)
   }, [transcript?.id])
+
+  useEffect(() => {
+    if (!confirmingDelete) return
+    const t = setTimeout(() => setConfirmingDelete(false), 3000)
+    return () => clearTimeout(t)
+  }, [confirmingDelete])
 
   if (!transcript) {
     return (
@@ -48,8 +58,12 @@ export default function DetailPanel({ transcript, onCopy, onDelete, onSaveEdit }
       setDraft(text)
       return
     }
-    const ok = await onSaveEdit(id, trimmed)
-    if (ok) setEditing(false)
+    try {
+      const ok = await onSaveEdit(id, trimmed)
+      if (ok) setEditing(false)
+    } catch (e) {
+      console.error('Save failed:', e)
+    }
   }
 
   return (
@@ -84,9 +98,14 @@ export default function DetailPanel({ transcript, onCopy, onDelete, onSaveEdit }
               <Icon name="copy" size={12} color="#fff" /> Copy
             </Btn>
             <Btn kind="danger" size="sm" onClick={() => {
-              if (confirm('Delete this transcription? This cannot be undone.')) onDelete()
+              if (!confirmingDelete) {
+                setConfirmingDelete(true)
+                return
+              }
+              setConfirmingDelete(false)
+              onDelete()
             }}>
-              <Icon name="trash" size={12} /> Delete
+              <Icon name="trash" size={12} /> {confirmingDelete ? 'Confirm delete?' : 'Delete'}
             </Btn>
           </>
         )}

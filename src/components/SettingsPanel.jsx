@@ -89,22 +89,51 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
       const d = event.payload
       setModelDownload(d)
       if (d.stage === 'done') {
-        setHasMultilingualModel(true)
+        // The done event carries no model identity — re-ask the backend
+        // instead of assuming the multilingual model just landed (an
+        // English-only download used to falsely flip this flag).
+        invoke('has_multilingual_model').then(v => setHasMultilingualModel(!!v)).catch(() => {})
         setModelDownload(null)
-        setModelError('Model downloaded! Select it again to activate.')
         invoke('list_models').then(m => setModels(m || [])).catch(() => {})
+        const lang = pendingLangRef.current
+        if (lang) {
+          // Commit the language ONLY now that its model is on disk.
+          pendingLangRef.current = null
+          updateSetting('language', lang).then(() => { loadEngineInfo(); startEnginePoll() })
+          setModelError(null)
+        } else {
+          setModelError('Model downloaded! Select it again to activate.')
+        }
       }
       if (d.stage === 'error') {
         setModelError(d.error || 'Download failed')
         setModelDownload(null)
+        pendingLangRef.current = null // language stays unchanged on failure
       }
     })
     return () => { clearInterval(pollRef.current); unlisten.then(fn => fn()) }
   }, [open])
 
+  // Language chosen while its model download is still in flight — committed
+  // only when the download reports done, so a failed download can't leave the
+  // app configured for a language no installed model can transcribe.
+  const pendingLangRef = useRef(null)
+  // What the shared model_download_progress stream is currently carrying —
+  // 'multilingual' (language flow) or 'model' (speech-model picker).
+  const downloadKindRef = useRef('multilingual')
+
   const updateSetting = async (key, value) => {
-    setSettings(prev => ({ ...prev, [key]: value }))
-    try { await invoke('set_setting', { key, value }) } catch (e) { console.error('Save failed:', e) }
+    const prev = settings[key]
+    setSettings(p => ({ ...p, [key]: value }))
+    try {
+      await invoke('set_setting', { key, value })
+    } catch (e) {
+      // Roll back — an optimistic toggle must not show a state the backend
+      // refused (e.g. auto-paste "off" while the backend keeps pasting).
+      setSettings(p => ({ ...p, [key]: prev }))
+      console.error('Save failed:', e)
+      setModelError(String(e))
+    }
   }
 
   const changeModel = async (label) => {
@@ -113,6 +142,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
     const isAvailable = models.find(m => m.label === label)?.available !== false
     if (!isAvailable) {
       const sizes = { Basic: '~148 MB', Standard: '~488 MB', Enhanced: '~1.5 GB', Ultra: '~3.1 GB' }
+      downloadKindRef.current = 'model'
       setModelError(`Downloading ${label} model (${sizes[label] || ''})...`)
       try {
         await invoke('download_model', { name })
@@ -213,16 +243,20 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
               onChange={async e => {
                 const lang = e.target.value
                 if (lang !== 'en' && !hasMultilingualModel) {
+                  // The invoke returns as soon as the download THREAD starts —
+                  // hold the language in pendingLangRef and commit it from the
+                  // 'done' event, never before the model is actually on disk.
                   setModelError(null)
+                  downloadKindRef.current = 'multilingual'
+                  pendingLangRef.current = lang
                   setModelDownload({ stage: 'downloading', percent: 0 })
                   try {
                     await invoke('download_multilingual_model')
                   } catch (err) {
                     setModelError(String(err))
                     setModelDownload(null)
-                    return
+                    pendingLangRef.current = null
                   }
-                  await updateSetting('language', lang)
                   return
                 }
                 setModelError(null)
@@ -251,9 +285,11 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
               borderRadius: 'var(--echo-radius-sm)', fontSize: 11,
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <span style={{ color: 'var(--echo-accent)', fontWeight: 600 }}>Downloading multilingual model</span>
+                <span style={{ color: 'var(--echo-accent)', fontWeight: 600 }}>
+                  {downloadKindRef.current === 'model' ? 'Downloading speech model' : 'Downloading language support'}
+                </span>
                 <span style={{ color: 'var(--text-faint)', fontVariantNumeric: 'tabular-nums' }}>
-                  {modelDownload.downloaded_mb || 0} / {modelDownload.total_mb || '~148'} MB
+                  {modelDownload.downloaded_mb || 0}{modelDownload.total_mb ? ` / ${modelDownload.total_mb} MB` : ' MB'}
                 </span>
               </div>
               <div style={{ width: '100%', height: 4, background: 'var(--bg-tertiary)', borderRadius: 2, overflow: 'hidden' }}>
@@ -369,7 +405,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
             warn={hotkeys.toggle === null}
           />
           <HotkeyRow label="Cancel recording" keys={hotkeys.cancel || 'Unavailable'} warn={!hotkeys.cancel} />
-          <HotkeyRow label="Show dashboard" keys={hotkeys.show || 'Ctrl + Shift + H'} />
+          <HotkeyRow label="Show dashboard" keys={hotkeys.show === null ? 'Unavailable' : (hotkeys.show || 'Ctrl + Shift + H')} warn={hotkeys.show === null} />
           {hotkeys.toggle === null && (
             <div style={{ fontSize: 10, color: 'var(--accent-yellow)', marginTop: 4 }}>
               Dictation hotkey could not be registered — another app may be using it. Use the tray menu's Start Dictation instead.
@@ -491,13 +527,15 @@ function EngineStatus({ engine }) {
     : engine?.status ? `Engine ${engine.status}` : 'Checking engine...'
   // engine_kind reports the binary actually running — a present GPU with the
   // CPU engine active means the acceleration pack isn't installed yet.
+  // Capability language only — never underlying tech/brand names (no GPU
+  // vendor strings, no acceleration-framework names).
   const computeText = engine
     ? (engine.engine_kind === 'cuda'
-        ? `GPU: ${engine.gpu_name}${engine.vram_mb ? ` (${Math.round(engine.vram_mb / 1024)} GB)` : ''} · CUDA active`
+        ? `GPU acceleration active${engine.vram_mb ? ` · ${Math.round(engine.vram_mb / 1024)} GB graphics memory` : ''}`
         : engine.engine_kind === 'vulkan'
-        ? `GPU acceleration · Vulkan active (beta)`
+        ? `GPU acceleration active (beta)`
         : engine.cuda
-        ? `CPU engine · ${engine.cpu_cores} cores (${engine.gpu_name} idle)`
+        ? `CPU engine · ${engine.cpu_cores} cores (GPU acceleration available)`
         : `CPU only · ${engine.cpu_cores} cores`)
     : ''
 
@@ -528,27 +566,28 @@ function EngineStatus({ engine }) {
   )
 }
 
-/** Plain-language consequences of a GPU test result. */
+/** Plain-language consequences of a GPU test result. Capability language
+ *  only — hardware vendor/product names never reach the UI. */
 function gpuVerdictText(r) {
-  const vram = r.vram_mb ? ` (${Math.round(r.vram_mb / 1024)} GB)` : ''
+  const vram = r.vram_mb ? ` (${Math.round(r.vram_mb / 1024)} GB graphics memory)` : ''
   if (r.verdict === 'cuda_ready') {
-    return `${r.nvidia_gpu}${vram} — GPU acceleration is installed and active. Short dictations transcribe in well under a second.`
+    return `Dedicated graphics card${vram} — GPU acceleration is installed and active. Short dictations transcribe in well under a second.`
   }
   if (r.verdict === 'cuda_available') {
-    return `${r.nvidia_gpu}${vram} found — but Echo is using the CPU engine right now. Enable GPU acceleration below to transcribe several times faster.`
+    return `A compatible dedicated graphics card${vram} was found — but Echo is using the CPU engine right now. Enable GPU acceleration below to transcribe several times faster.`
   }
   const other = (r.display_gpus || []).filter(n => !/nvidia/i.test(n))
   if (r.verdict === 'vulkan_ready') {
     const active = r.engine_kind === 'vulkan'
-    return `${other[0] || 'Your GPU'} — the Vulkan GPU pack (beta) is installed${active ? ' and active. Short dictations transcribe in well under a second' : ''}. If anything ever looks wrong, visit alanglobalintelligence.com/echo for support.`
+    return `Your graphics card — the GPU acceleration pack (beta) is installed${active ? ' and active. Short dictations transcribe in well under a second' : ''}. If anything ever looks wrong, visit alanglobalintelligence.com/echo for support.`
   }
   if (r.verdict === 'vulkan_available') {
-    return `We see your ${other[0] || 'graphics card'} — enable the beta Vulkan GPU pack below to transcribe several times faster than on CPU.`
+    return `We see your graphics card — enable the beta GPU acceleration pack below to transcribe several times faster than on CPU.`
   }
-  // cpu_only: name what we DID find so owners of unrecognized cards get a
-  // real answer.
+  // cpu_only: acknowledge what we DID find so owners of unrecognized cards
+  // get a real answer.
   if (other.length > 0) {
-    return `We see ${other.join(', ')}, but Echo can't accelerate on it yet. Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU.`
+    return `We see your graphics hardware, but Echo can't accelerate on it yet. Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU.`
   }
   return `No dedicated GPU found. Echo uses its CPU engine: expect about a second for short dictations on a modern ${r.cpu_cores}-core CPU; very long clips take proportionally longer.`
 }
@@ -637,8 +676,12 @@ function GpuPackRow({ onEngineRestart }) {
 
   useEffect(() => {
     refresh()
-    let unsub = null
-    listen('gpu-pack-progress', (event) => {
+    // Hold the promise, not the resolved fn — if the panel closes before
+    // listen() resolves, an `if (unsub) unsub()` cleanup runs while unsub is
+    // still null and leaks the listener for the window's lifetime.
+    let cancelled = false
+    const unlisten = listen('gpu-pack-progress', (event) => {
+      if (cancelled) return
       const p = event.payload
       setProgress(p)
       if (p.state === 'failed') {
@@ -650,8 +693,8 @@ function GpuPackRow({ onEngineRestart }) {
         refresh()
         onEngineRestart()
       }
-    }).then(fn => { unsub = fn })
-    return () => { if (unsub) unsub() }
+    })
+    return () => { cancelled = true; unlisten.then(fn => fn()) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -670,7 +713,8 @@ function GpuPackRow({ onEngineRestart }) {
   if (!status?.offer) return null
 
   const beta = !!status.beta
-  const gpuLabel = status.offer_gpu || status.gpu_name || 'your GPU'
+  // Never render the vendor/product name of the card — capability terms only.
+  const gpuLabel = 'graphics card'
   const sizeText = status.offer === 'cuda' ? '~440 MB' : '~18 MB'
   const busy = progress && ['downloading', 'extracting', 'restarting'].includes(progress.state)
   const active = status.installed && !busy

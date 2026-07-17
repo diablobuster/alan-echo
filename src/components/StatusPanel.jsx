@@ -96,13 +96,14 @@ export default function StatusPanel({ status, elapsed = 0, cap = 300, hotkeys = 
   )
 }
 
-function Btn({ kind = 'primary', size = 'md', onClick, children, style = {} }) {
+function Btn({ kind = 'primary', size = 'md', onClick, children, style = {}, disabled = false }) {
   const base = {
     display: 'inline-flex', alignItems: 'center', gap: 5,
-    border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+    border: 'none', cursor: disabled ? 'default' : 'pointer', fontFamily: 'var(--font-sans)',
     fontWeight: 500, borderRadius: 'var(--echo-radius-sm)',
     padding: size === 'sm' ? '5px 10px' : '7px 14px',
     fontSize: size === 'sm' ? 11 : 12,
+    opacity: disabled ? 0.55 : 1,
   }
   const kinds = {
     primary: { background: 'var(--echo-accent)', color: '#fff' },
@@ -110,7 +111,7 @@ function Btn({ kind = 'primary', size = 'md', onClick, children, style = {} }) {
     ghost:   { background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border-primary)' },
     danger:  { background: 'transparent', color: 'var(--accent-red)', border: '1px solid color-mix(in srgb, var(--accent-red) 30%, transparent)' },
   }
-  return <button type="button" onClick={onClick} style={{ ...base, ...kinds[kind], ...style }}>{children}</button>
+  return <button type="button" onClick={onClick} disabled={disabled} style={{ ...base, ...kinds[kind], ...style }}>{children}</button>
 }
 
 export { Btn }

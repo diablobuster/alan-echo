@@ -3,6 +3,7 @@
 mod activation;
 mod audio;
 mod db;
+mod dictation;
 mod license;
 mod packs;
 mod paste;
@@ -39,6 +40,7 @@ pub struct AppState {
     pub hotkeys: Mutex<serde_json::Value>,
     pub cancel_accel: Mutex<Option<String>>,
     pub trial_state: Mutex<trial::TrialState>,
+    pub dictation: dictation::Dictation,
     pub data_dir: std::path::PathBuf,
 }
 
@@ -228,8 +230,11 @@ fn get_trial_status(state: State<Arc<AppState>>) -> Result<serde_json::Value, St
 }
 
 #[tauri::command]
-fn quit_app() {
-    // EULA declined — exit cleanly before any engine/tray initialization matters.
+fn quit_app(state: State<Arc<AppState>>) {
+    // EULA declined. The engine is already starting by this point, and
+    // process::exit skips RunEvent::Exit — shut it down explicitly so no
+    // orphaned whisper-server keeps the model in memory.
+    state.whisper.shutdown();
     std::process::exit(0);
 }
 
@@ -284,46 +289,61 @@ fn list_audio_devices() -> Result<Vec<DeviceInfo>, String> {
     audio::list_input_devices()
 }
 
+/// Blocking recorder start shared by the Rust dictation state machine (hotkey
+/// path) and the start_recording command (onboarding/settings mic flows).
+/// Must run on a worker thread — recorder.start() blocks until the
+/// cpal/WASAPI input stream cold-opens (hundreds of ms), and blocking the
+/// main thread freezes WM_HOTKEY delivery.
+pub fn begin_recording(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    // Capture the focused app NOW — this is where the transcript gets pasted.
+    let target = paste::foreground_window();
+
+    // A recording abandoned mid mic-test (its component unmounted) must not
+    // wedge dictation forever: discard the stale capture and start fresh.
+    if state.recorder.is_recording() {
+        if let Ok(stale) = state.recorder.stop() {
+            if let Some(path) = stale.wav_path {
+                std::fs::remove_file(path).ok();
+            }
+        }
+    }
+
+    let device = state.settings.lock().get_str("microphone_device");
+    state.recorder.start(device.as_deref())?;
+
+    // Commit only after a successful start so a failed start (e.g. a mic test
+    // racing a dictation) can never clobber the in-flight paste target.
+    *state.paste_target.lock() = Some(target);
+
+    // Register the cancel hotkey only for the duration of the recording —
+    // Echo must not swallow Ctrl+Shift+X system-wide while idle in the tray.
+    if let Some(accel) = state.cancel_accel.lock().clone() {
+        register_cancel_hotkey_on_main(app, accel);
+    }
+    Ok(())
+}
+
+/// Blocking recorder stop + paste-target handoff, shared like begin_recording.
+/// The target is taken HERE, while it still unambiguously belongs to THIS
+/// recording — a new dictation can then start (overwriting the shared slot)
+/// before this one's transcription finishes without pasting into the wrong
+/// window.
+pub fn end_recording(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<(audio::RecordingResult, Option<isize>), String> {
+    unregister_cancel_hotkey(app, state);
+    let r = state.recorder.stop()?;
+    let target = state.paste_target.lock().take();
+    Ok((r, target))
+}
+
 #[tauri::command]
 async fn start_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    // Run the blocking recorder work OFF the main/event-loop thread. A
-    // *synchronous* Tauri command runs on the main thread, and recorder.start()
-    // blocks until the cpal/WASAPI input stream cold-opens (hundreds of ms). On
-    // Windows the main thread is the loop that pumps WM_HOTKEY, so that block
-    // froze global-shortcut delivery: a second press queued during the freeze
-    // fired only *after* the command returned (status already 'recording') and
-    // immediately stopped the just-started recording — the "press twice and it
-    // cancels itself" symptom. spawn_blocking keeps the event loop free.
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
         require_license(&state)?;
-
-        // Capture the focused app NOW — this is where the transcript gets pasted.
-        let target = paste::foreground_window();
-
-        // A recording abandoned mid mic-test (its component unmounted) must not
-        // wedge dictation forever: discard the stale capture and start fresh.
-        if state.recorder.is_recording() {
-            if let Ok(stale) = state.recorder.stop() {
-                if let Some(path) = stale.wav_path {
-                    std::fs::remove_file(path).ok();
-                }
-            }
-        }
-
-        let device = state.settings.lock().get_str("microphone_device");
-        state.recorder.start(device.as_deref())?;
-
-        // Commit only after a successful start so a failed start (e.g. a mic test
-        // racing a dictation) can never clobber the in-flight paste target.
-        *state.paste_target.lock() = Some(target);
-
-        // Register the cancel hotkey only for the duration of the recording —
-        // Echo must not swallow Ctrl+Shift+X system-wide while idle in the tray.
-        if let Some(accel) = state.cancel_accel.lock().clone() {
-            register_cancel_hotkey_on_main(&app, accel);
-        }
-        Ok(())
+        begin_recording(&app, &state)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -335,9 +355,18 @@ async fn start_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>)
 /// from a spawn_blocking worker could bind the hotkey to the wrong thread, so
 /// always run it on the main thread. Posting is non-blocking.
 fn register_cancel_hotkey_on_main(app: &tauri::AppHandle, accel: String) {
+    use tauri_plugin_global_shortcut::ShortcutState;
     let app_handle = app.clone();
     app.run_on_main_thread(move || {
-        register_emit_hotkey(&app_handle, &accel, "dictate-cancel");
+        app_handle
+            .global_shortcut()
+            .on_shortcut(accel.as_str(), move |app, _shortcut, ev| {
+                if ev.state == ShortcutState::Pressed {
+                    dictation::cancel(app);
+                }
+            })
+            .map_err(|e| log::warn!("Failed to register cancel hotkey {}: {}", accel, e))
+            .ok();
     })
     .ok();
 }
@@ -360,17 +389,9 @@ async fn stop_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) 
     // Off the main thread: recorder.stop() blocks on resample + WAV encode +
     // write (tens-to-hundreds of ms for a long clip), which otherwise froze the
     // hotkey pump and delayed deactivation.
-    //
-    // Take the paste target HERE (at stop), while it still unambiguously belongs
-    // to THIS recording, and hand it back to the frontend. The frontend then
-    // transcribes in the background and passes the target to transcribe() — so a
-    // NEW dictation can start (overwriting the shared paste_target slot) before
-    // this one's transcription finishes, without pasting into the wrong window.
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
-        unregister_cancel_hotkey(&app, &state);
-        let r = state.recorder.stop()?;
-        let target = state.paste_target.lock().take();
+        let (r, target) = end_recording(&app, &state)?;
         Ok(serde_json::json!({
             "wav_path": r.wav_path,
             "duration_seconds": r.duration_seconds,
@@ -380,6 +401,26 @@ async fn stop_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) 
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
+}
+
+// ── Rust-side dictation (hotkey path) ────────────────────────────────
+
+#[tauri::command]
+fn toggle_dictation(app: tauri::AppHandle) {
+    dictation::toggle(&app);
+}
+
+#[tauri::command]
+fn cancel_dictation(app: tauri::AppHandle) {
+    dictation::cancel(&app);
+}
+
+#[tauri::command]
+fn get_dictation_state(state: State<Arc<AppState>>) -> serde_json::Value {
+    serde_json::json!({
+        "recording": state.dictation.is_recording(),
+        "pending": state.dictation.pending_count(),
+    })
 }
 
 #[tauri::command]
@@ -399,17 +440,22 @@ async fn cancel_recording(app: tauri::AppHandle, state: State<'_, Arc<AppState>>
     .map_err(|e| format!("Task failed: {}", e))
 }
 
-#[tauri::command]
-fn discard_recording(state: State<Arc<AppState>>, wav_path: String) -> Result<(), String> {
-    // Only delete our own recording WAVs inside the data dir.
-    let p = std::path::PathBuf::from(&wav_path);
-    let is_ours = p.parent().map(|d| d == state.data_dir).unwrap_or(false)
+/// True only for our own recording WAVs inside the data dir. Every command
+/// that reads or deletes a webview-supplied path must pass this — the webview
+/// is not trusted with arbitrary filesystem access.
+fn is_our_recording(state: &AppState, wav_path: &str) -> bool {
+    let p = std::path::PathBuf::from(wav_path);
+    p.parent().map(|d| d == state.data_dir).unwrap_or(false)
         && p.file_name()
             .and_then(|n| n.to_str())
             .map(|n| n.starts_with("recording_") && n.ends_with(".wav"))
-            .unwrap_or(false);
-    if is_ours {
-        std::fs::remove_file(&p).ok();
+            .unwrap_or(false)
+}
+
+#[tauri::command]
+fn discard_recording(state: State<Arc<AppState>>, wav_path: String) -> Result<(), String> {
+    if is_our_recording(&state, &wav_path) {
+        std::fs::remove_file(&wav_path).ok();
     }
     Ok(())
 }
@@ -484,43 +530,57 @@ async fn test_microphone() -> Result<serde_json::Value, String> {
 
 // ── Transcription commands ───────────────────────────────────────────
 
+/// Blocking transcribe → clean → save → trial-count → paste pipeline, shared
+/// by the Rust dictation state machine and the transcribe command. The WAV is
+/// consumed (deleted) whether transcription succeeds or not — no caller
+/// retries with the same path. The paste target belongs to THIS recording
+/// even if a newer dictation has since started.
+pub fn transcribe_and_deliver(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    wav_path: &str,
+    paste_target: Option<isize>,
+) -> Result<serde_json::Value, String> {
+    let result = state.whisper.transcribe(wav_path);
+    std::fs::remove_file(wav_path).ok();
+    let result = result?;
+
+    let cleaned = state.cleanup.lock().clean(&result.text);
+    if cleaned.is_empty() {
+        return Ok(serde_json::json!({ "text": "", "raw_text": result.text, "empty": true }));
+    }
+
+    let id = state.db.lock().save(&cleaned, Some(&result.text), result.duration_seconds).map_err(|e| e.to_string())?;
+
+    if !state.license.lock().is_licensed() {
+        increment_trial_count(state);
+    }
+
+    let pasted = deliver_text(app, state, &cleaned, paste_target);
+
+    Ok(serde_json::json!({
+        "id": id,
+        "text": cleaned,
+        "raw_text": result.text,
+        "duration_seconds": result.duration_seconds,
+        "word_count": cleaned.split_whitespace().count(),
+        "empty": false,
+        "pasted": pasted,
+    }))
+}
+
 #[tauri::command]
 async fn transcribe(state: State<'_, Arc<AppState>>, app: tauri::AppHandle, wav_path: String, paste_target: Option<isize>) -> Result<serde_json::Value, String> {
     require_license(&state)?;
+    if !is_our_recording(&state, &wav_path) {
+        return Err("Not a recording file".into());
+    }
     let state = Arc::clone(state.inner());
     tokio::task::spawn_blocking(move || {
-        let result = state.whisper.transcribe(&wav_path);
-
-        // The WAV served its purpose whether transcription succeeded or not —
-        // the frontend never retries with the same path.
-        std::fs::remove_file(&wav_path).ok();
-        let result = result?;
-
-        let cleaned = state.cleanup.lock().clean(&result.text);
-        if cleaned.is_empty() {
-            return Ok(serde_json::json!({ "text": "", "raw_text": result.text, "empty": true }));
-        }
-
-        let id = state.db.lock().save(&cleaned, Some(&result.text), result.duration_seconds).map_err(|e| e.to_string())?;
-
-        if !state.license.lock().is_licensed() {
-            increment_trial_count(&state);
-        }
-
-        // The target was captured at recording start and handed back by
-        // stop_recording, so it belongs to THIS recording even if a newer
-        // dictation has since started and overwritten the shared slot.
-        let pasted = deliver_text(&app, &state, &cleaned, paste_target);
-
-        Ok(serde_json::json!({
-            "id": id,
-            "text": cleaned,
-            "raw_text": result.text,
-            "duration_seconds": result.duration_seconds,
-            "word_count": cleaned.split_whitespace().count(),
-            "empty": false,
-            "pasted": pasted,
-        }))
+        // Same serialization as the hotkey path — whisper-server has a single
+        // /inference endpoint.
+        let _serialize = state.dictation.transcribe_lock().lock();
+        transcribe_and_deliver(&app, &state, &wav_path, paste_target)
     }).await.map_err(|e| format!("Task failed: {}", e))?
 }
 
@@ -625,7 +685,10 @@ fn get_hotkey_info(state: State<Arc<AppState>>) -> Result<serde_json::Value, Str
 }
 
 #[tauri::command]
-async fn read_wav_base64(wav_path: String) -> Result<String, String> {
+async fn read_wav_base64(state: State<'_, Arc<AppState>>, wav_path: String) -> Result<String, String> {
+    if !is_our_recording(&state, &wav_path) {
+        return Err("Not a recording file".into());
+    }
     tokio::task::spawn_blocking(move || {
         let bytes = std::fs::read(&wav_path).map_err(|e| format!("Failed to read WAV: {}", e))?;
         // Mic-test recordings are throwaway; don't litter the data dir.
@@ -804,18 +867,29 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 
 // ── Hotkeys ──────────────────────────────────────────────────────────
 
-fn register_emit_hotkey(app: &tauri::AppHandle, accel: &str, event: &'static str) -> bool {
+/// Toggle dictation straight from the hotkey callback — no webview round-trip.
+/// dictation::toggle only spawns a worker thread, so the WM_HOTKEY pump stays
+/// free no matter how long the mic takes to open.
+fn register_toggle_hotkey(app: &tauri::AppHandle, accel: &str) -> bool {
+    use tauri_plugin_global_shortcut::ShortcutState;
+    app.global_shortcut()
+        .on_shortcut(accel, move |app, _shortcut, ev| {
+            if ev.state == ShortcutState::Pressed {
+                dictation::toggle(app);
+            }
+        })
+        .map_err(|e| log::warn!("Failed to register {}: {}", accel, e))
+        .is_ok()
+}
+
+fn register_show_hotkey(app: &tauri::AppHandle, accel: &str) -> bool {
     use tauri_plugin_global_shortcut::ShortcutState;
     app.global_shortcut()
         .on_shortcut(accel, move |app, _shortcut, ev| {
             if ev.state == ShortcutState::Pressed {
                 if let Some(w) = app.get_webview_window("main") {
-                    if event == "show-dashboard" {
-                        w.show().ok();
-                        w.set_focus().ok();
-                    } else {
-                        w.emit(event, ()).ok();
-                    }
+                    w.show().ok();
+                    w.set_focus().ok();
                 }
             }
         })
@@ -1054,6 +1128,7 @@ fn main() {
         hotkeys: Mutex::new(serde_json::Value::Null),
         cancel_accel: Mutex::new(None),
         trial_state: Mutex::new(initial_trial),
+        dictation: dictation::Dictation::new(),
         data_dir: data_dir.clone(),
     });
 
@@ -1181,9 +1256,7 @@ fn main() {
                             }
                         }
                         "dictate" => {
-                            if let Some(w) = app.get_webview_window("main") {
-                                w.emit("dictate-toggle", ()).ok();
-                            }
+                            dictation::toggle(app);
                         }
                         "quit" => {
                             app.exit(0);
@@ -1209,7 +1282,7 @@ fn main() {
             // Cancel is only PROBED here — it gets registered for the duration
             // of each recording so Echo doesn't steal it system-wide while idle.
             let handle = app.handle();
-            let toggle_ok = register_emit_hotkey(handle, "CmdOrCtrl+Shift+Space", "dictate-toggle");
+            let toggle_ok = register_toggle_hotkey(handle, "CmdOrCtrl+Shift+Space");
             let cancel_accel = ["CmdOrCtrl+Shift+X", "CmdOrCtrl+Shift+Backspace"]
                 .iter()
                 .find(|a| {
@@ -1221,7 +1294,7 @@ fn main() {
                     }
                 })
                 .copied();
-            let show_ok = register_emit_hotkey(handle, "CmdOrCtrl+Shift+H", "show-dashboard");
+            let show_ok = register_show_hotkey(handle, "CmdOrCtrl+Shift+H");
             // Re-paste the most recent transcript into the focused app. Bound
             // globally (active while idle) so it works from any app. NOTE:
             // Ctrl+Shift+V is also "paste without formatting" in many
@@ -1293,6 +1366,9 @@ fn main() {
             start_recording,
             stop_recording,
             cancel_recording,
+            toggle_dictation,
+            cancel_dictation,
+            get_dictation_state,
             discard_recording,
             is_recording,
             get_audio_level,

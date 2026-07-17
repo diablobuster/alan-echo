@@ -124,13 +124,31 @@ impl TrialState {
     }
 }
 
+/// Small backwards clock jumps stay locked (someone gaming the daily reset);
+/// anything larger is treated as clock damage, not tampering. Without this
+/// grace window, one dictation while the system clock was transiently in the
+/// future (dead CMOS battery, timezone mishap) ratcheted max_date_seen ahead
+/// and bricked the trial with a false "resets tomorrow" until the real
+/// calendar caught up.
+const CLOCK_SKEW_GRACE_DAYS: i64 = 3;
+
+fn days_ahead(from: &str, to: &str) -> Option<i64> {
+    let f = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d").ok()?;
+    let t = chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d").ok()?;
+    Some((t - f).num_days())
+}
+
 pub fn check_trial(state: &TrialState) -> TrialStatus {
     if state.lifetime_total >= LIFETIME_CAP {
         return TrialStatus::LifetimeExpired;
     }
     let today = today_str();
     if today < state.max_date_seen {
-        return TrialStatus::DailyLimitReached;
+        let skew = days_ahead(&today, &state.max_date_seen).unwrap_or(i64::MAX);
+        if skew <= CLOCK_SKEW_GRACE_DAYS {
+            return TrialStatus::DailyLimitReached;
+        }
+        // max_date_seen is absurdly far ahead — clock anomaly; fall through.
     }
     if state.date == today && state.count >= DAILY_LIMIT {
         return TrialStatus::DailyLimitReached;
@@ -147,6 +165,9 @@ pub fn increment(state: &mut TrialState) {
     state.count += 1;
     state.lifetime_total += 1;
     if today > state.max_date_seen {
+        state.max_date_seen = today;
+    } else if days_ahead(&today, &state.max_date_seen).unwrap_or(0) > CLOCK_SKEW_GRACE_DAYS {
+        // Heal a ratchet left behind by a transiently-future clock.
         state.max_date_seen = today;
     }
 }
@@ -356,14 +377,37 @@ mod tests {
 
     #[test]
     fn clock_rollback_detected() {
+        // A small rollback (yesterday's clock gaming the daily reset) stays
+        // locked: max_date_seen one day ahead of today.
+        let tomorrow = (chrono::Local::now().date_naive() + chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
         let state = TrialState {
+            date: today_str(),
+            count: 0,
+            max_date_seen: tomorrow,
+            lifetime_total: 10,
+            machine_hash: TEST_MACHINE.to_string(),
+        };
+        assert_eq!(check_trial(&state), TrialStatus::DailyLimitReached);
+    }
+
+    #[test]
+    fn far_future_ratchet_is_clock_damage_not_tamper() {
+        // Regression: one dictation under a transiently-future clock (dead
+        // CMOS battery) ratcheted max_date_seen years ahead and bricked the
+        // trial with a false "resets tomorrow". Beyond the grace window the
+        // trial must proceed, and the next increment must heal the ratchet.
+        let mut state = TrialState {
             date: "2099-01-01".into(),
             count: 0,
             max_date_seen: "2099-01-01".into(),
             lifetime_total: 10,
             machine_hash: TEST_MACHINE.to_string(),
         };
-        assert_eq!(check_trial(&state), TrialStatus::DailyLimitReached);
+        assert_eq!(check_trial(&state), TrialStatus::Allowed);
+        increment(&mut state);
+        assert_eq!(state.max_date_seen, today_str());
     }
 
     #[test]

@@ -101,9 +101,16 @@ impl PackKind {
     /// then paste the lowercase hash here; bump on every pack release.
     fn expected_sha256(self) -> Option<&'static str> {
         match self {
-            // TODO(release): pin from the pack release's SHA256SUMS.txt.
-            Self::Cuda => None,
-            Self::Vulkan => None,
+            // Pinned 2026-07-17 from the hosted release assets:
+            //   alan-echo-releases v1.0.0 / ALAN-Echo-GPU-Pack-1.0.0.zip
+            //   alan-echo-releases v1.2.0 / ALAN-Echo-GPU-Pack-Vulkan-1.0.0.zip
+            // Re-pin whenever a new pack zip is published.
+            Self::Cuda => {
+                Some("f29d1903f430ea4375c18ad2e82bbb3beaf7ae496e1910dd15c6f66b64743609")
+            }
+            Self::Vulkan => {
+                Some("84cb3a0c2caa024eb5551f080e0e5010d490543aeb245e2ae248e5fd4ed39977")
+            }
         }
     }
 }

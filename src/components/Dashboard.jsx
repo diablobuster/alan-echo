@@ -300,7 +300,7 @@ export default function Dashboard() {
         <StatusPanel status={panelStatus} elapsed={elapsed} cap={MAX_RECORDING_SECONDS} hotkeys={hotkeys} onToggle={handleToggle} onCancel={handleCancel} />
 
         {error && (
-          <div style={{
+          <div role="alert" style={{
             padding: '8px 12px', background: 'color-mix(in srgb, var(--accent-red) 8%, var(--bg-card))',
             border: '1px solid color-mix(in srgb, var(--accent-red) 20%, transparent)',
             borderRadius: 'var(--echo-radius)', fontSize: 12, color: 'var(--accent-red)',

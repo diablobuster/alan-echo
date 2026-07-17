@@ -136,7 +136,7 @@ export default function LicenseGate({ onActivated }) {
 
         {/* Error */}
         {error && (
-          <div style={{
+          <div role="alert" style={{
             marginTop: 8, fontSize: 11, color: 'var(--accent-red)',
             textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
           }}>
@@ -145,7 +145,7 @@ export default function LicenseGate({ onActivated }) {
           </div>
         )}
         {hint && (
-          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
+          <div aria-live="polite" style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
             {hint}
           </div>
         )}

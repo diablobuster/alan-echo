@@ -92,15 +92,31 @@ pub fn download_and_launch_update(
     let mut file = std::fs::File::create(&installer_path)
         .map_err(|e| format!("Could not create installer file: {}", e))?;
 
+    // Hard ceiling — the installer is ~130 MB; never let a broken origin
+    // stream unbounded bytes onto the user's disk.
+    const MAX_INSTALLER_BYTES: u64 = 1024 * 1024 * 1024;
+
     let mut reader = resp.into_reader();
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 65536];
 
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("Download read error: {}", e))?;
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                drop(file);
+                let _ = std::fs::remove_file(&installer_path);
+                return Err(format!("Download read error: {}", e));
+            }
+        };
         if n == 0 { break; }
         file.write_all(&buf[..n]).map_err(|e| format!("Write error: {}", e))?;
         downloaded += n as u64;
+        if downloaded > MAX_INSTALLER_BYTES {
+            drop(file);
+            let _ = std::fs::remove_file(&installer_path);
+            return Err("Update download exceeded the expected size".into());
+        }
         if total_size > 0 {
             let pct = (downloaded as f64 / total_size as f64 * 100.0) as u32;
             app.emit("update_progress", serde_json::json!({ "stage": "downloading", "percent": pct }))

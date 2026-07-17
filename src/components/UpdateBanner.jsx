@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
@@ -7,19 +7,39 @@ export default function UpdateBanner() {
   const [stage, setStage] = useState(null) // null | 'downloading' | 'launching' | 'error'
   const [percent, setPercent] = useState(0)
   const [dismissed, setDismissed] = useState(false)
+  // Mirror of `stage` readable from the long-lived recheck closures.
+  const stageRef = useRef(null)
+  const applyStage = useCallback((s) => { stageRef.current = s; setStage(s) }, [])
 
   useEffect(() => {
-    invoke('check_for_update').then(info => {
-      if (info?.available) setUpdate(info)
-    }).catch(() => {})
+    // Echo lives in the tray for weeks — a single mount-time check meant the
+    // banner never appeared until a manual restart. Re-check periodically and
+    // whenever the window becomes visible again (the moment a user could
+    // actually see the banner). An in-flight or errored update stage stops
+    // rechecks so we never clobber active download state.
+    const check = () => {
+      if (stageRef.current !== null) return
+      invoke('check_for_update').then(info => {
+        if (info?.available) setUpdate(info)
+      }).catch(() => {})
+    }
+    check()
+    const SIX_HOURS = 6 * 60 * 60 * 1000
+    const timer = setInterval(check, SIX_HOURS)
+    const onVisible = () => { if (document.visibilityState === 'visible') check() }
+    document.addEventListener('visibilitychange', onVisible)
 
     const unlisten = listen('update_progress', (event) => {
       const { stage: s, percent: p, error } = event.payload
-      setStage(s)
+      applyStage(s)
       if (p != null) setPercent(p)
       if (error) console.error('[update]', error)
     })
-    return () => { unlisten.then(fn => fn()) }
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+      unlisten.then(fn => fn())
+    }
   }, [])
 
   if (!update || dismissed) return null
@@ -49,9 +69,9 @@ export default function UpdateBanner() {
           <button
             onClick={() => {
               if (update.download_url) {
-                setStage('downloading')
+                applyStage('downloading')
                 invoke('download_update', { downloadUrl: update.download_url, expectedSha256: update.sha256 || null }).catch(e => {
-                  setStage('error')
+                  applyStage('error')
                   console.error('[update]', e)
                 })
               }
@@ -88,7 +108,7 @@ export default function UpdateBanner() {
 
       {stage === 'downloading' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{
+          <div role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100} aria-label="Update download progress" style={{
             width: 80, height: 4, background: 'var(--border-primary)', borderRadius: 2, overflow: 'hidden',
           }}>
             <div style={{
@@ -126,7 +146,7 @@ export default function UpdateBanner() {
             Update failed — you can retry, or download from the website
           </span>
           <button
-            onClick={() => { setStage(null); setPercent(0) }}
+            onClick={() => { applyStage(null); setPercent(0) }}
             style={{
               background: 'none', border: '1px solid var(--border-primary)',
               borderRadius: 3, color: 'var(--text-secondary)', cursor: 'pointer',

@@ -177,6 +177,15 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
     await updateSetting('theme', theme)
   }
 
+  // Escape closes the panel (keyboard parity with the backdrop click).
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
   if (!open) return null
 
   const activeModelLabel = engine?.model_label
@@ -196,7 +205,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
       }} />
 
       {/* Panel */}
-      <div style={{
+      <div role="dialog" aria-modal="true" aria-label="Settings" style={{
         position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(380px, 85vw)',
         background: 'var(--bg-primary)', borderLeft: '1px solid var(--border-primary)',
         zIndex: 101, display: 'flex', flexDirection: 'column',
@@ -292,7 +301,7 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
                   {modelDownload.downloaded_mb || 0}{modelDownload.total_mb ? ` / ${modelDownload.total_mb} MB` : ' MB'}
                 </span>
               </div>
-              <div style={{ width: '100%', height: 4, background: 'var(--bg-tertiary)', borderRadius: 2, overflow: 'hidden' }}>
+              <div role="progressbar" aria-valuenow={modelDownload.percent || 0} aria-valuemin={0} aria-valuemax={100} aria-label="Model download progress" style={{ width: '100%', height: 4, background: 'var(--bg-tertiary)', borderRadius: 2, overflow: 'hidden' }}>
                 <div style={{
                   width: `${modelDownload.percent || 0}%`, height: '100%',
                   background: 'var(--echo-accent)', borderRadius: 2, transition: 'width 0.3s',

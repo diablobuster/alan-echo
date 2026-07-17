@@ -208,11 +208,13 @@ mod mac {
             return Err("Focus moved to a different app after dictation".into());
         }
 
-        // NOTE: if the user still holds Shift from the dictation hotkey this
-        // becomes Cmd+Shift+V ("Paste and Match Style") in some apps — the
-        // macOS modifier-release wait lands with the Mac launch work
+        // Mitigation for a still-held Shift from the dictation hotkey (which
+        // would turn Cmd+V into "Paste and Match Style" in some apps): a short
+        // settle delay before the keystroke. osascript has no clean way to
+        // poll physical modifier state — the real GetAsyncKeyState-equivalent
+        // wait lands with the native Mac work
         // (docs/2026-06-17-slice8-macos-parity-spec.md §8d).
-        let script = "tell application \"System Events\" to keystroke \"v\" using command down";
+        let script = "delay 0.35\ntell application \"System Events\" to keystroke \"v\" using command down";
 
         let result = Command::new("osascript")
             .args(["-e", script])

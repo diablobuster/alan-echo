@@ -351,6 +351,86 @@ fn recorder_thread(cmd_rx: mpsc::Receiver<RecCmd>) {
     }
 }
 
+// ── Confirmation beeps ───────────────────────────────────────────────
+//
+// Played from Rust so the start/stop chirps are as reliable as the hotkey
+// itself — the webview's AudioContext can be suspended while Echo idles in
+// the tray, which used to silently drop the first beep.
+
+#[derive(Clone, Copy)]
+pub enum Beep {
+    Start,
+    Stop,
+}
+
+pub fn play_beep(sound_enabled: bool, beep: Beep) {
+    if !sound_enabled {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("beep".into())
+        .spawn(move || {
+            if let Err(e) = play_beep_blocking(beep) {
+                log::debug!("Beep skipped: {}", e);
+            }
+        })
+        .ok();
+}
+
+fn play_beep_blocking(beep: Beep) -> Result<(), String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let host = cpal::default_host();
+    let device = host.default_output_device().ok_or("no output device")?;
+    let config = device.default_output_config().map_err(|e| e.to_string())?;
+    if config.sample_format() != cpal::SampleFormat::F32 {
+        return Err(format!("unsupported output format {:?}", config.sample_format()));
+    }
+    let rate = config.sample_rate().0 as f32;
+    let channels = config.channels() as usize;
+
+    // (frequency Hz, start ms, end ms) — mirrors the original UI chirps:
+    // rising single tone on start, two-step descend on stop.
+    let segments: Vec<(f32, f32, f32)> = match beep {
+        Beep::Start => vec![(800.0, 0.0, 120.0)],
+        Beep::Stop => vec![(600.0, 0.0, 80.0), (400.0, 100.0, 180.0)],
+    };
+    let total_ms = segments.iter().fold(0.0f32, |m, s| m.max(s.2));
+
+    let pos = std::sync::Arc::new(AtomicUsize::new(0));
+    let pos_cb = std::sync::Arc::clone(&pos);
+    let stream = device
+        .build_output_stream(
+            &config.config(),
+            move |data: &mut [f32], _| {
+                for frame in data.chunks_mut(channels) {
+                    let i = pos_cb.fetch_add(1, Ordering::Relaxed);
+                    let t_ms = i as f32 * 1000.0 / rate;
+                    let mut v = 0.0f32;
+                    for &(freq, s, e) in &segments {
+                        if t_ms >= s && t_ms < e {
+                            // 4 ms attack/release ramps kill the click edges.
+                            let env = ((t_ms - s) / 4.0).min((e - t_ms) / 4.0).clamp(0.0, 1.0);
+                            let t = (t_ms - s) / 1000.0;
+                            v += (2.0 * std::f32::consts::PI * freq * t).sin() * 0.05 * env;
+                        }
+                    }
+                    for sample in frame {
+                        *sample = v;
+                    }
+                }
+            },
+            |err| log::debug!("Beep stream error: {}", err),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    // Let the tail play out (+ a device-latency cushion) before dropping.
+    std::thread::sleep(std::time::Duration::from_millis(total_ms as u64 + 80));
+    drop(stream);
+    Ok(())
+}
+
 fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     let ratio = from_rate as f64 / to_rate as f64;
     let output_len = (samples.len() as f64 / ratio) as usize;

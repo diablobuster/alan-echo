@@ -36,7 +36,6 @@ export default function Dashboard() {
   const timerRef = useRef(null)
   const statusRef = useRef(status)
   statusRef.current = status
-  const settingsRef = useRef({})
 
   // ── Load data ──────────────────────────────────────────────────────
   const PAGE_SIZE = 100
@@ -79,7 +78,6 @@ export default function Dashboard() {
   const loadSettings = useCallback(async () => {
     try {
       const s = await invoke('get_settings')
-      settingsRef.current = s || {}
       applyTheme(s)
       if (s?.onboarding_complete !== true) setShowOnboarding(true)
     } catch (e) { console.error('Failed to load settings:', e) }
@@ -92,62 +90,6 @@ export default function Dashboard() {
     invoke('get_hotkey_info').then(h => setHotkeys(h || {})).catch(() => {})
     invoke('get_trial_status').then(t => setTrial(t)).catch(() => {})
   }, [loadTranscripts, loadStats, loadSettings])
-
-  // ── Audio beeps ─────────────────────────────────────────────────────
-  const audioCtx = useRef(null)
-  const playBeep = useCallback((type) => {
-    if (settingsRef.current.sound_enabled === false) return
-    try {
-      if (!audioCtx.current) audioCtx.current = new AudioContext()
-      const ctx = audioCtx.current
-      // A backgrounded/hidden webview can suspend the AudioContext; resume it so
-      // the hotkey beep is never silently dropped while Echo lives in the tray.
-      if (ctx.state === 'suspended') ctx.resume()
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.connect(gain)
-      gain.connect(ctx.destination)
-      gain.gain.value = 0.05
-      if (type === 'start') {
-        osc.frequency.value = 800
-        osc.start(); osc.stop(ctx.currentTime + 0.12)
-      } else {
-        osc.frequency.value = 600
-        osc.start(); osc.stop(ctx.currentTime + 0.08)
-        const osc2 = ctx.createOscillator()
-        const gain2 = ctx.createGain()
-        osc2.connect(gain2); gain2.connect(ctx.destination)
-        gain2.gain.value = 0.05; osc2.frequency.value = 400
-        osc2.start(ctx.currentTime + 0.1); osc2.stop(ctx.currentTime + 0.18)
-      }
-    } catch {}
-  }, [])
-
-  // Keep the AudioContext warm so a transiently-suspended context (app idle or
-  // hidden in the tray) doesn't drop the first beep — resume() is async while
-  // playBeep fires synchronously.
-  useEffect(() => {
-    try {
-      if (!audioCtx.current) audioCtx.current = new AudioContext()
-      if (audioCtx.current.state === 'suspended') audioCtx.current.resume()
-    } catch { /* AudioContext not available yet */ }
-  }, [status])
-
-  // ── Tauri event listeners (hotkeys + tray from backend) ────────────
-  useEffect(() => {
-    let cancelled = false
-    const unsub1 = listen('dictate-toggle', () => { if (!cancelled) handleToggleRef.current() })
-    const unsub2 = listen('dictate-cancel', () => { if (!cancelled) handleCancelRef.current() })
-    return () => {
-      cancelled = true
-      unsub1.then(fn => fn())
-      unsub2.then(fn => fn())
-    }
-  }, [])
-
-  // Use refs for handlers so event listeners always call latest version
-  const handleToggleRef = useRef(null)
-  const handleCancelRef = useRef(null)
 
   // ── Recording timer ────────────────────────────────────────────────
   useEffect(() => {
@@ -165,138 +107,81 @@ export default function Dashboard() {
     return () => clearInterval(timerRef.current)
   }, [status])
 
-  // Enforce the recording cap — the progress bar promises 5:00 max.
-  useEffect(() => {
-    if (status === 'recording' && elapsed >= MAX_RECORDING_SECONDS) {
-      handleToggleRef.current()
-    }
-  }, [status, elapsed])
-
-  // ── Dictation state machine ────────────────────────────────────────
-  // statusRef is also written synchronously (not just at render) and an
-  // inflight guard serializes toggles — otherwise rapid hotkey presses
-  // double-invoke start/stop and desync the UI from the recorder.
-  const inflightRef = useRef(false)
+  // ── Dictation (mirrors the Rust state machine) ─────────────────────
+  // The hotkey, recorder, beeps, 5:00 cap, transcription, and paste all run
+  // in Rust — reliable even when this webview is throttled or suspended in
+  // the tray. The UI only mirrors backend state from 'dictation' events, so
+  // the buttons and the hotkey can never disagree about what's happening.
   const applyStatus = useCallback((next) => {
     statusRef.current = next
     setStatus(next)
   }, [])
 
-  const discardWav = (wavPath) => {
-    if (wavPath) invoke('discard_recording', { wavPath }).catch(() => {})
-  }
-
-  // Declared before transcribeInBackground because that callback lists it as a
-  // dependency (the deps array is evaluated at render — referencing it later
-  // would be a temporal-dead-zone crash).
   const fireToast = useCallback((msg) => {
     setToast(msg)
     setTimeout(() => setToast(null), 1800)
   }, [])
 
-  // Background transcription — runs OUTSIDE the inflight guard so the next
-  // dictation can start immediately while this one is still transcribing.
-  // Serialized via txnChain because whisper-server exposes a single /inference
-  // endpoint. Never touches status/statusRef, so it can't clobber a
-  // freshly-started recording.
-  const txnChain = useRef(Promise.resolve())
-  const transcribeInBackground = useCallback((rec) => {
-    setPending(p => p + 1)
-    txnChain.current = txnChain.current.then(async () => {
-      try {
-        const result = await invoke('transcribe', { wavPath: rec.wav_path, pasteTarget: rec.paste_target })
-        if (result?.empty) {
-          setError('Nothing worth keeping was heard — try again')
-        } else if (result?.id) {
-          await loadTranscripts()
-          await loadStats()
-          setFlashId(result.id)
-          setSelectedId(result.id)
-          setTimeout(() => setFlashId(null), 1500)
-          fireToast(result.pasted ? 'Pasted into your app' : 'Copied to clipboard')
-        }
-        invoke('get_trial_status').then(t => setTrial(t)).catch(() => {})
-      } catch (e) {
-        setError('Transcription failed — ' + (e || 'unknown error'))
-        console.error('Transcription error:', e)
-        discardWav(rec?.wav_path)
-      } finally {
-        setPending(p => Math.max(0, p - 1))
+  const handleToggle = useCallback(() => {
+    // Fire-and-forget: Rust serializes/debounces presses and reports back
+    // via 'dictation' events.
+    invoke('toggle_dictation').catch(() => {})
+  }, [])
+
+  const handleCancel = useCallback(() => {
+    invoke('cancel_dictation').catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    // Sync on mount in case the webview (re)loaded mid-recording.
+    invoke('get_dictation_state').then(s => {
+      if (cancelled || !s) return
+      applyStatus(s.recording ? 'recording' : 'ready')
+      setPending(s.pending || 0)
+    }).catch(() => {})
+    const unsub = listen('dictation', (e) => {
+      if (cancelled) return
+      const p = e?.payload || {}
+      switch (p.type) {
+        case 'recording-started':
+          setError(null)
+          applyStatus('recording')
+          break
+        case 'recording-stopped':
+          applyStatus('ready')
+          break
+        case 'pending':
+          setPending(p.count ?? 0)
+          break
+        case 'transcript':
+          if (p.empty) {
+            setError('Nothing worth keeping was heard — try again')
+          } else if (p.id) {
+            loadTranscripts()
+            loadStats()
+            setFlashId(p.id)
+            setSelectedId(p.id)
+            setTimeout(() => setFlashId(null), 1500)
+            fireToast(p.pasted ? 'Pasted into your app' : 'Copied to clipboard')
+          }
+          invoke('get_trial_status').then(t => setTrial(t)).catch(() => {})
+          break
+        case 'error':
+          setError(p.message || 'Something went wrong')
+          break
+        default:
+          break
       }
     })
-  }, [loadTranscripts, loadStats, fireToast])
-
-  const handleToggle = useCallback(async () => {
-    if (inflightRef.current) return
-    inflightRef.current = true
-    try {
-      const s = statusRef.current
-      if (s === 'ready') {
-        setError(null)
-        // Beep on the keypress, not after the mic cold-opens. applyStatus stays
-        // AFTER the await so a failed start never shows "recording".
-        playBeep('start')
-        try {
-          await invoke('start_recording')
-          applyStatus('recording')
-        } catch (e) {
-          setError('Microphone error — ' + (e || 'check your audio device'))
-          console.error('Recording error:', e)
-        }
-      } else if (s === 'recording') {
-        // Stop is fast (off-main). Release the inflight guard the moment it
-        // returns and transcribe in the BACKGROUND — pressing to start the next
-        // dictation right after finishing is no longer dropped (the old guard
-        // spanned the entire multi-second transcription: the "press twice" bug).
-        playBeep('stop')
-        let rec
-        try {
-          rec = await invoke('stop_recording')
-        } catch (e) {
-          setError('Recording failed — ' + (e || 'unknown error'))
-          console.error('Stop error:', e)
-          applyStatus('ready')
-          return
-        }
-        applyStatus('ready')
-        if (rec?.duration_seconds != null && rec.duration_seconds < 0.5) {
-          discardWav(rec?.wav_path)
-          setError('Recording too short — try a full sentence')
-          return
-        }
-        if (!rec?.has_speech) {
-          discardWav(rec?.wav_path)
-          setError('No speech detected — try again')
-          return
-        }
-        if (!rec?.wav_path) {
-          setError('Recording failed')
-          return
-        }
-        transcribeInBackground(rec)
-      }
-    } finally {
-      inflightRef.current = false
-    }
-  }, [applyStatus, playBeep, transcribeInBackground])
-
-  const handleCancel = useCallback(async () => {
-    if (inflightRef.current) return
-    if (statusRef.current === 'recording') {
-      try { await invoke('cancel_recording') } catch {}
-      applyStatus('ready')
-    }
-  }, [applyStatus])
-
-  // Keep refs updated
-  handleToggleRef.current = handleToggle
-  handleCancelRef.current = handleCancel
+    return () => { cancelled = true; unsub.then(fn => fn()) }
+  }, [applyStatus, loadTranscripts, loadStats, fireToast])
 
   // Escape cancels a recording while the dashboard itself is focused.
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape' && statusRef.current === 'recording') {
-        handleCancelRef.current()
+        invoke('cancel_dictation').catch(() => {})
       }
     }
     window.addEventListener('keydown', onKey)

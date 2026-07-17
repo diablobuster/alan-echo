@@ -55,3 +55,22 @@ Log-confirmed on this machine (`echo.log` 2026-07-16 19:10:18: "Auto-paste faile
 4. Paste behavior change to document in support copy: if focus moved to a different app during transcription, Echo no longer yanks focus — transcript stays on the clipboard ("Copied to clipboard" toast).
 5. Audit LOWs deliberately deferred: whisper-server port TOCTOU, silent row-drop in db decode, `reg add` fire-and-forget race, download size caps, a11y batch (dialog semantics/focus traps/aria-live), Splash raw `model_label` (now "Custom", acceptable).
 6. Re-pin `packs.rs` hashes whenever a new pack zip is published (see memory: echo-release-process).
+
+---
+
+# Addendum — v1.3.1 (same day)
+
+Owner-directed follow-up: "fix everything fixable now, then update the Mac version."
+
+**Shipped (PR #8, squash-merged):**
+- Update banner re-checks every 6 h + on window visibility (tray-resident apps never re-checked after launch — field-hit by the owner within hours of 1.3.0)
+- whisper-server Ready requires a live child (port-squatter TOCTOU)
+- Undecodable db rows logged instead of silently dropped; trial registry writes waited on; download hard ceilings (pack 2 GB / installer 1 GB) + partial cleanup on interrupted downloads
+- a11y: Escape closes Settings, dialog/alert roles, progressbar semantics on all three download bars
+- macOS paste: 0.35 s settle delay before Cmd+V (held-Shift mitigation until native modifier polling)
+
+**Mac version updated 1.2.3 → 1.3.1** via the existing `build-macos.yml` CI (workflow_dispatch, macos-14, run 29596342915): first Mac build carrying the full v1.3.x fix set. Still unsigned/un-notarized (blocked on Apple Developer enrollment) — right-click → Open remains required on first launch.
+
+**Release/verification:** tag `v1.3.1` on alan-echo-releases holds both artifacts — Windows exe SHA-256 `0ff84016…d20ecc` (129 MB), Mac DMG `0c01b37d…6360b` (135 MB). All nine Vercel prod envs flipped byte-clean (bash printf, not PowerShell pipes), production redeployed, and BOTH platform endpoints + BOTH served binaries verified end-to-end: served bytes hash exactly to the advertised values.
+
+**Still open (owner decisions/actions):** code signing (cert purchase), telemetry/crash reporting (conflicts with local-private positioning — needs a product call), Apple Developer enrollment for notarization, real-keyboard shakedown of 1.3.x, copyright filing (due 2026-09-10), Mac build untested on physical Apple hardware.

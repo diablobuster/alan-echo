@@ -145,14 +145,10 @@ impl Uia {
         Self::wait_pick(r)
     }
 
-    /// Like `pick`, for a plain (not swallowed) click while reading: rejected with
-    /// `NOT_TEXT_CLICK` when it is on a link, button, field, menu, etc.; no retry.
-    pub fn click_pick(&self, x: i32, y: i32) -> Result<Vec<String>, String> {
-        let (t, r) = mpsc::channel();
-        self.tx
-            .send(Req::ClickPick(x, y, t))
-            .map_err(|_| "text reader is not running".to_string())?;
-        Self::wait_pick(r)
+    /// A Send handle for click lookups, so the controller can run them on another
+    /// thread (a hung target app then stalls only that thread).
+    pub fn click_fetcher(&self) -> ClickFetcher {
+        ClickFetcher { tx: self.tx.clone() }
     }
 
     fn wait_pick(r: Receiver<Result<Vec<String>, String>>) -> Result<Vec<String>, String> {
@@ -188,6 +184,23 @@ impl Uia {
     /// Scroll the source so token `src_idx` is visible (rule 4). Fire-and-forget.
     pub fn scroll_to(&self, src_idx: usize) {
         let _ = self.tx.send(Req::Scroll(src_idx));
+    }
+}
+
+/// See `Uia::click_fetcher`.
+pub struct ClickFetcher {
+    tx: Sender<Req>,
+}
+
+impl ClickFetcher {
+    /// Like `Uia::pick`, for a plain (not swallowed) click while reading: rejected with
+    /// `NOT_TEXT_CLICK` when it is on a link, button, field, menu, etc.; no retry.
+    pub fn pick(&self, x: i32, y: i32) -> Result<Vec<String>, String> {
+        let (t, r) = mpsc::channel();
+        self.tx
+            .send(Req::ClickPick(x, y, t))
+            .map_err(|_| "text reader is not running".to_string())?;
+        Uia::wait_pick(r)
     }
 }
 

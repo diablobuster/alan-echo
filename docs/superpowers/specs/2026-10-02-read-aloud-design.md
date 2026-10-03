@@ -37,8 +37,8 @@ Press `Ctrl+Shift+E`, then click any word in the active window. Echo reads aloud
 | 3 | Hover | The word under the cursor gets a soft outline. |
 | 4 | Click a word | Starts reading from that word. The brass highlight follows the spoken word, and the page scrolls to keep it in view. The **Now Reading pill** appears. |
 | 5 | Switch to another app | Audio continues. The highlight hides while the source window is hidden or minimized and comes back when you return. The pill stays on top. |
-| 6 | Click another word in the page (or press `Ctrl+Shift+E` again and click one) | Jumps there immediately, cutting the current audio. A plain click (not a drag) on ordinary text in the source window jumps; the click still reaches the app. Clicks on links, buttons, fields, menus etc. never jump. |
-| 6b | Scroll the page by hand (wheel, or the scroll bar) | **Follow** turns off: reading continues, the highlight still shows when the spoken word is on screen, but Echo stops scrolling the page. The pill shows **Go to word**, which scrolls back to the spoken word and turns follow on again. Any jump also turns follow on. |
+| 6 | Click another word in the page (or press `Ctrl+Shift+E` again and click one) | Jumps there immediately, cutting the current audio. A plain click (not a drag, not a double-click, no Shift/Ctrl/Alt) on ordinary text in the source window jumps after the double-click time; the click still reaches the app. Clicks on links, buttons, fields, menus etc. never jump. |
+| 6b | Scroll the page by hand (wheel, keys, touchpad or scroll bar) | **Follow** turns off: reading continues, the highlight still shows when the spoken word is on screen, but Echo stops scrolling the page. The pill shows **Go to word**, which scrolls back to the spoken word and turns follow on again. Any jump also turns follow on. |
 | 7 | Press `Esc` in pick mode | Cancels pick mode. Reading carries on if it was already going. |
 | 8 | Click ✕ on the pill, or reach the end of the text | Stops reading and tears down the overlay and pill. After 2 idle minutes the voice engine unloads. |
 

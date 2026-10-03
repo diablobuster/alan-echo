@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetMessageW, GetWindowThreadProcessId, PeekMessageW,
     PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK,
     HOOKPROC, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_USER,
+    WM_MOUSEMOVE, WM_QUIT, WM_USER,
 };
 
 type Cb = Box<dyn Fn(i32, i32) + Send>;
@@ -204,14 +204,22 @@ impl Drop for PickHook {
 
 // ── Watch hook (observe-only, alive only while a read session is active) ──────────
 
-/// A mouse event seen by the watch hook. `t` = the event's time stamp in ms
-/// (`MSLLHOOKSTRUCT::time`, wraps); coordinates are physical screen pixels.
+/// A left-button event seen by the watch hook. `t` = the event's time stamp in ms
+/// (`MSLLHOOKSTRUCT::time`, wraps); coordinates are physical screen pixels; `mods` =
+/// Shift, Ctrl or Alt was held (selection / app shortcuts: never a jump).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MouseEv {
-    Down { x: i32, y: i32, t: u32 },
-    Up { x: i32, y: i32, t: u32 },
-    /// Vertical or horizontal wheel.
-    Wheel { x: i32, y: i32 },
+    Down { x: i32, y: i32, t: u32, mods: bool },
+    Up { x: i32, y: i32, t: u32, mods: bool },
+}
+
+/// Shift, Ctrl or Alt is down right now (async state: the hook thread has no input
+/// queue of its own, so GetKeyState would not see it).
+fn modifiers_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+    [VK_SHIFT, VK_CONTROL, VK_MENU]
+        .iter()
+        .any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } as u16 & 0x8000 != 0)
 }
 
 type WatchCb = Box<dyn Fn(MouseEv) + Send>;
@@ -228,9 +236,8 @@ unsafe extern "system" fn watch_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
         let info = &*(l.0 as *const MSLLHOOKSTRUCT);
         let (x, y, t) = (info.pt.x, info.pt.y, info.time);
         let ev = match w.0 as u32 {
-            WM_LBUTTONDOWN => Some(MouseEv::Down { x, y, t }),
-            WM_LBUTTONUP => Some(MouseEv::Up { x, y, t }),
-            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => Some(MouseEv::Wheel { x, y }),
+            WM_LBUTTONDOWN => Some(MouseEv::Down { x, y, t, mods: modifiers_held() }),
+            WM_LBUTTONUP => Some(MouseEv::Up { x, y, t, mods: modifiers_held() }),
             _ => None, // moves are not reported (no traffic while the mouse just moves)
         };
         if let Some(ev) = ev {
@@ -243,7 +250,7 @@ unsafe extern "system" fn watch_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
     CallNextHookEx(HHOOK::default(), code, w, l)
 }
 
-/// Observe-only WH_MOUSE_LL hook: reports left down/up and wheel events, swallows
+/// Observe-only WH_MOUSE_LL hook: reports left down/up events, swallows
 /// nothing. The callback runs inside the hook proc, so it must only send to a channel.
 /// Only one may be alive at a time (a second `install` returns an inactive no-op).
 /// Drop to uninstall it.
@@ -299,6 +306,55 @@ pub fn is_double_click(prev_up: Option<(i32, i32, u32)>, down: (i32, i32, u32), 
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Press {
+    x: i32,
+    y: i32,
+    t: u32,
+    /// In the source window, no modifier, not part of a double/triple click.
+    ok: bool,
+}
+
+/// Turns the watch hook's left down/up events into click-to-jump decisions. Pure (no
+/// clock: hook time stamps only), so it is unit-tested. A click is only *scheduled* on
+/// its up; the controller fires it once the double-click time has passed with no
+/// second press (`down` returning true cancels it).
+#[derive(Debug, Default)]
+pub struct ClickTracker {
+    press: Option<Press>,
+    last_up: Option<(i32, i32, u32)>,
+    pending: Option<(i32, i32)>,
+}
+
+impl ClickTracker {
+    /// A left down. Returns true when it cancelled a pending click (a double-click).
+    pub fn down(&mut self, x: i32, y: i32, t: u32, in_source: bool, mods: bool, dbl_ms: u32, slop: i32) -> bool {
+        let multi = is_double_click(self.last_up, (x, y, t), dbl_ms, slop);
+        let cancelled = multi && self.pending.take().is_some();
+        // a new down replaces any press whose up was lost
+        self.press = Some(Press { x, y, t, ok: in_source && !mods && !multi });
+        cancelled
+    }
+
+    /// A left up. Returns the point to jump to once the double-click time has passed.
+    pub fn up(&mut self, x: i32, y: i32, t: u32, mods: bool, slop: i32) -> Option<(i32, i32)> {
+        let p = self.press.take()?;
+        self.last_up = Some((x, y, t));
+        let jump = p.ok && !mods && is_click((p.x, p.y, p.t), (x, y, t), slop);
+        self.pending = jump.then_some((p.x, p.y));
+        self.pending
+    }
+
+    /// The double-click time passed: the pending click (if still wanted) is a jump.
+    pub fn fire(&mut self) -> Option<(i32, i32)> {
+        self.pending.take()
+    }
+
+    pub fn reset(&mut self) {
+        *self = ClickTracker::default();
+    }
+}
+
 #[cfg(test)]
 mod click_tests {
     use super::*;
@@ -334,6 +390,66 @@ mod click_tests {
         assert!(!is_double_click(up, (201, 51, 5600), 500, 6), "too late: a new click");
         assert!(!is_double_click(up, (260, 51, 5200), 500, 6), "elsewhere: a new click");
         assert!(!is_double_click(None, (201, 51, 5200), 500, 6));
+    }
+
+    const DBL: u32 = 500;
+
+    fn click(c: &mut ClickTracker, x: i32, y: i32, t: u32) -> Option<(i32, i32)> {
+        c.down(x, y, t, true, false, DBL, 6);
+        c.up(x, y, t + 80, false, 6)
+    }
+
+    #[test]
+    fn single_click_is_scheduled_then_fires() {
+        let mut c = ClickTracker::default();
+        assert_eq!(click(&mut c, 100, 100, 1000), Some((100, 100)));
+        assert_eq!(c.fire(), Some((100, 100)));
+        assert_eq!(c.fire(), None, "fires once");
+    }
+
+    #[test]
+    fn double_click_cancels_the_first_click_and_never_jumps() {
+        let mut c = ClickTracker::default();
+        assert_eq!(click(&mut c, 100, 100, 1000), Some((100, 100)));
+        assert!(c.down(101, 100, 1250, true, false, DBL, 6), "second down cancels");
+        assert_eq!(c.up(101, 100, 1320, false, 6), None, "the second click is not a jump");
+        assert_eq!(c.fire(), None);
+        // a triple click: the third press is part of it too
+        assert!(!c.down(101, 100, 1500, true, false, DBL, 6));
+        assert_eq!(c.up(101, 100, 1560, false, 6), None);
+    }
+
+    #[test]
+    fn a_later_click_is_a_new_jump() {
+        let mut c = ClickTracker::default();
+        click(&mut c, 100, 100, 1000);
+        c.fire();
+        assert_eq!(click(&mut c, 100, 100, 3000), Some((100, 100)));
+    }
+
+    #[test]
+    fn modifier_or_other_window_or_drag_never_jumps() {
+        let mut c = ClickTracker::default();
+        c.down(10, 10, 0, true, true, DBL, 6);
+        assert_eq!(c.up(10, 10, 50, true, 6), None, "shift/ctrl/alt + click (select / shortcut)");
+        c.down(10, 10, 5000, true, false, DBL, 6);
+        assert_eq!(c.up(10, 10, 5050, true, 6), None, "modifier pressed before the up");
+        c.down(10, 10, 9000, false, false, DBL, 6);
+        assert_eq!(c.up(10, 10, 9050, false, 6), None, "not the source window");
+        c.down(10, 10, 13000, true, false, DBL, 6);
+        assert_eq!(c.up(60, 10, 13050, false, 6), None, "a drag");
+        assert_eq!(c.fire(), None);
+    }
+
+    #[test]
+    fn lost_up_or_stray_up_cannot_stick() {
+        let mut c = ClickTracker::default();
+        assert_eq!(c.up(10, 10, 50, false, 6), None, "an up with no down");
+        c.down(10, 10, 100, true, false, DBL, 6); // its up is lost
+        assert_eq!(c.up(10, 10, 100 + CLICK_MAX_MS + 1000, false, 6), None, "a stale press is not a click");
+        c.down(10, 10, 9000, true, false, DBL, 6); // replaced by a new press
+        c.reset();
+        assert_eq!(c.up(10, 10, 9050, false, 6), None, "reset forgets the press");
     }
 }
 

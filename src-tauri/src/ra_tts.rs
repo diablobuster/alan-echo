@@ -683,6 +683,25 @@ mod tests {
         out
     }
 
+    /// Real misaki: "mid-year" comes back split around a hyphen token, and our assembly
+    /// (what the model is fed) has no multi-space gap between the halves.
+    #[test]
+    fn real_g2p_hyphenated_word_has_no_gap() {
+        let g = real_g2p();
+        let words = ["a", "mid-year", "plan"];
+        let fed = g2p_words(g, &words);
+        let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+        let (_, tokens) = g.g2p(&fed.join(" ")).expect("g2p");
+        let toks: Vec<(&str, Option<&str>, bool)> =
+            tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
+        let tt: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        let owner = ra_timing::align(&fed, &tt);
+        let owned_by_mid = owner.iter().filter(|o| **o == Some(1)).count();
+        assert!(owned_by_mid >= 2 && tt.iter().any(|t| is_hyphen(t)), "misaki splits mid-year: {toks:?}");
+        let s = joined(&token_phonemes(&toks, &owner));
+        assert!(!s.contains("  "), "multi-space gap in {s:?} (tokens {toks:?})");
+    }
+
     #[test]
     fn all_caps_sentence_reads_words_not_letters() {
         let s = ["THE", "PRESIDENT", "AND", "THE", "SENATE", "MET", "ON", "TUESDAY", "FOR", "NEW", "TALKS"];

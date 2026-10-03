@@ -3,11 +3,13 @@
 //! Moves pass through to the target app; the left click (down + its up) is
 //! swallowed so the app never sees it. Callbacks run inside the hook proc, which
 //! Windows drops if it takes ~300 ms+, so they must only send to a channel.
-//! Only one `PickHook` may be alive at a time (callbacks live in statics).
+//! Only one `PickHook` may be alive at a time (callbacks live in statics); a second
+//! `install` while one is alive returns an inactive no-op hook.
 #![allow(dead_code)] // wired up by the Read Aloud controller task
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
@@ -24,6 +26,11 @@ static MOVE: OnceLock<Mutex<Option<Cb>>> = OnceLock::new();
 static CLICK: OnceLock<Mutex<Option<Cb>>> = OnceLock::new();
 /// Set when we swallowed a left-down, so we also swallow its matching up.
 static SWALLOW_UP: AtomicBool = AtomicBool::new(false);
+/// True while a `PickHook` owns the statics above.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// How long `drop` waits for the up of a swallowed click (so it is swallowed too).
+const UP_WAIT: Duration = Duration::from_millis(500);
 
 fn slot(s: &'static OnceLock<Mutex<Option<Cb>>>) -> &'static Mutex<Option<Cb>> {
     s.get_or_init(|| Mutex::new(None))
@@ -31,6 +38,10 @@ fn slot(s: &'static OnceLock<Mutex<Option<Cb>>>) -> &'static Mutex<Option<Cb>> {
 
 /// Live WH_MOUSE_LL hook. Drop to uninstall it and end its message loop.
 pub struct PickHook {
+    /// This instance owns the statics (false for the no-op hook of a rejected install).
+    owner: bool,
+    /// The hook was actually installed.
+    active: bool,
     thread_id: u32,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -49,10 +60,10 @@ unsafe extern "system" fn hook_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT 
                 if let Some(cb) = slot(&CLICK).lock().as_ref() {
                     cb(x, y);
                 }
-                SWALLOW_UP.store(true, Ordering::Relaxed);
+                SWALLOW_UP.store(true, Ordering::Release);
                 return LRESULT(1);
             }
-            WM_LBUTTONUP if SWALLOW_UP.swap(false, Ordering::Relaxed) => return LRESULT(1),
+            WM_LBUTTONUP if SWALLOW_UP.swap(false, Ordering::AcqRel) => return LRESULT(1),
             _ => {}
         }
     }
@@ -64,9 +75,18 @@ impl PickHook {
         on_move: impl Fn(i32, i32) + Send + 'static,
         on_click: impl Fn(i32, i32) + Send + 'static,
     ) -> PickHook {
+        if INSTALLED.swap(true, Ordering::AcqRel) {
+            log::warn!("read-aloud: pick hook already installed; ignoring second install");
+            return PickHook {
+                owner: false,
+                active: false,
+                thread_id: 0,
+                thread: None,
+            };
+        }
         *slot(&MOVE).lock() = Some(Box::new(on_move));
         *slot(&CLICK).lock() = Some(Box::new(on_click));
-        SWALLOW_UP.store(false, Ordering::Relaxed);
+        SWALLOW_UP.store(false, Ordering::Release);
         let (tx, rx) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("ra-hook".into())
@@ -75,40 +95,71 @@ impl PickHook {
                 // Make sure this thread has a message queue before anyone posts WM_QUIT.
                 let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
                 let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), HINSTANCE::default(), 0);
+                let ok = hook.is_ok();
                 if let Err(e) = &hook {
                     log::warn!("read-aloud: mouse hook install failed: {e}");
                 }
-                let _ = tx.send(GetCurrentThreadId());
+                let _ = tx.send((GetCurrentThreadId(), ok));
+                let Ok(h) = hook else { return };
                 // GetMessageW returns 0 on WM_QUIT and -1 on error; stop on both.
                 while GetMessageW(&mut msg, None, 0, 0).0 > 0 {}
-                if let Ok(h) = hook {
-                    let _ = UnhookWindowsHookEx(h);
-                }
+                let _ = UnhookWindowsHookEx(h);
             });
-        let (thread_id, thread) = match thread {
-            Ok(t) => (rx.recv().unwrap_or(0), Some(t)),
+        let (thread_id, active, thread) = match thread {
+            Ok(t) => {
+                let (id, ok) = rx.recv().unwrap_or((0, false));
+                (id, ok, Some(t))
+            }
             Err(e) => {
                 log::warn!("read-aloud: could not spawn mouse hook thread: {e}");
-                (0, None)
+                (0, false, None)
             }
         };
-        PickHook { thread_id, thread }
+        PickHook {
+            owner: true,
+            active,
+            thread_id,
+            thread,
+        }
+    }
+
+    /// True when the WH_MOUSE_LL hook is really installed (false if Windows refused it,
+    /// or this was a second `install` while another hook was alive).
+    pub fn is_active(&self) -> bool {
+        self.active
     }
 }
 
 impl Drop for PickHook {
     fn drop(&mut self) {
+        if !self.owner {
+            return;
+        }
+        let on_hook_thread =
+            self.thread_id != 0 && unsafe { GetCurrentThreadId() } == self.thread_id;
+        // A swallowed left-down whose up has not arrived yet: keep the hook alive briefly
+        // so the up is swallowed too (otherwise the app sees an up without a down).
+        // Never block the hook thread itself.
+        if self.active && !on_hook_thread {
+            let t = Instant::now();
+            while SWALLOW_UP.load(Ordering::Acquire) && t.elapsed() < UP_WAIT {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         if self.thread_id != 0 {
             unsafe {
                 let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
             }
         }
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            if !on_hook_thread {
+                let _ = t.join();
+            }
         }
         *slot(&MOVE).lock() = None;
         *slot(&CLICK).lock() = None;
-        SWALLOW_UP.store(false, Ordering::Relaxed);
+        SWALLOW_UP.store(false, Ordering::Release);
+        INSTALLED.store(false, Ordering::Release);
     }
 }
 
@@ -265,11 +316,42 @@ mod tests {
         let click = crx.recv_timeout(Duration::from_secs(2));
         let during = counts();
         println!("hooked: move {mv:?} click {click:?} downs/ups {during:?}");
-        drop(hook);
+        let active = hook.is_active();
+        // A second install while one is alive is a logged no-op.
+        let second = PickHook::install(|_, _| {}, |_, _| {});
+        let second_active = second.is_active();
+        drop(second); // must not uninstall the first one
+
+        // Task 8 pattern: drop the hook right after on_click, before the up arrives.
+        // Drop must wait for the up and swallow it.
+        let sz = std::mem::size_of::<INPUT>() as i32;
+        unsafe {
+            SendInput(&[mouse(MOUSEEVENTF_LEFTDOWN, 0, 0)], sz);
+        }
+        let click2 = crx.recv_timeout(Duration::from_secs(2));
+        let dropper = std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            drop(hook);
+            t.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(120));
+        unsafe {
+            SendInput(&[mouse(MOUSEEVENTF_LEFTUP, 0, 0)], sz);
+        }
+        let drop_took = dropper.join().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let early_drop = counts();
+        println!(
+            "second install active={second_active}; early drop: click {click2:?}, drop waited {drop_took:?}, downs/ups {early_drop:?}"
+        );
 
         click_at(cx, cy);
         let after = counts();
         println!("after drop: downs/ups {after:?}");
+        // Re-install works after a drop (guard released).
+        let again = PickHook::install(|_, _| {}, |_, _| {});
+        let again_active = again.is_active();
+        drop(again);
 
         unsafe {
             let _ = SetCursorPos(saved.x, saved.y);
@@ -285,6 +367,18 @@ mod tests {
             "click at cursor in physical px"
         );
         assert_eq!(during, base, "hooked click (down AND up) must be swallowed");
+        assert!(active, "hook installed");
+        assert!(!second_active, "second install is a no-op");
+        assert!(
+            click2.is_ok(),
+            "first hook still alive after the no-op drop"
+        );
+        assert_eq!(early_drop, base, "up after an early drop is swallowed too");
+        assert!(
+            drop_took < Duration::from_millis(500),
+            "drop waited only for the up"
+        );
+        assert!(again_active, "can install again after drop");
         assert_eq!(
             after,
             (base.0 + 1, base.1 + 1),

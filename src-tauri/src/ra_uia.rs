@@ -6,7 +6,9 @@
 #![allow(dead_code)] // wired up by the Read Aloud controller task
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 
 use windows::core::VARIANT;
@@ -18,11 +20,14 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Ole::{
     SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
 };
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetAncestor, GetClassNameW, GetWindowThreadProcessId, WindowFromPoint, GA_ROOT,
+};
 
 /// A rectangle in physical screen pixels.
 #[derive(Clone, Debug, serde::Serialize, PartialEq)]
@@ -51,41 +56,52 @@ enum Req {
 /// Handle to the UIA worker thread. Dropping it ends the worker.
 pub struct Uia {
     tx: Sender<Req>,
-    hwnd: isize,
+    /// Top-level window of the current read (the warmed window until a pick succeeds).
+    source: Arc<AtomicIsize>,
 }
 
-/// Raw tokens returned per `pick` / `more` call.
-const BATCH: usize = 2000;
+/// Raw tokens returned by `pick` (small, so speech can start fast; ~0.7 ms/word in Chromium).
+const FIRST_BATCH: usize = 200;
+/// Raw tokens per `more` call (keeps the worker free for `rects`/`hover` between batches).
+const MORE_BATCH: usize = 400;
 /// Max ancestors walked from the point element looking for a TextPattern.
 const MAX_ANCESTORS: usize = 30;
+/// Error text for "nothing with a TextPattern here" — the only pick error that is retried.
+const NO_TEXT: &str = "no TextPattern under the point";
 
 impl Uia {
-    /// Spawn the worker and start warming the UIA connection to `hwnd` now (rule 1).
-    /// Non-blocking.
+    /// Spawn the worker and start warming the UIA connection to `hwnd` (the foreground
+    /// window at hotkey time) now (rule 1). Non-blocking.
     pub fn start(hwnd: isize) -> Uia {
         let (tx, rx) = mpsc::channel();
+        let source = Arc::new(AtomicIsize::new(hwnd));
+        let src = source.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("ra-uia".into())
-            .spawn(move || worker(hwnd, rx))
+            .spawn(move || worker(hwnd, src, rx))
         {
             log::warn!("read-aloud: could not spawn UIA worker: {e}");
         }
-        Uia { tx, hwnd }
+        Uia { tx, source }
     }
 
+    /// Top-level window being read: the one under the last successful `pick`
+    /// (before any pick: the window passed to `start`).
     pub fn source_hwnd(&self) -> isize {
-        self.hwnd
+        self.source.load(Ordering::Acquire)
     }
 
-    /// Word rects under the point, or `None` (no word, not a text element, or > 50 ms).
+    /// Word rects under the point, or `None` (no word, not a text element, our own
+    /// window, or > 50 ms).
     pub fn hover(&self, x: i32, y: i32) -> Option<Vec<Rect>> {
         let (t, r) = mpsc::channel();
         self.tx.send(Req::Hover(x, y, t)).ok()?;
         r.recv_timeout(Duration::from_millis(50)).ok().flatten()
     }
 
-    /// Validate the click (rules 2/3) and return raw tokens from the clicked word
-    /// forward (≤ 2000). Token `i` ↔ source index `i` for `rects`/`scroll_to`.
+    /// Validate the click (rules 2/3) on whatever window is under the point and return
+    /// raw tokens from the clicked word forward (≤ 200). Token `i` ↔ source index `i`
+    /// for `rects`/`scroll_to`. A failed pick keeps the previous read.
     pub fn pick(&self, x: i32, y: i32) -> Result<Vec<String>, String> {
         let (t, r) = mpsc::channel();
         self.tx
@@ -98,7 +114,8 @@ impl Uia {
         }
     }
 
-    /// Next ≤ 2000 raw tokens (empty at the end). Source indices continue.
+    /// Next ≤ 400 raw tokens; source indices continue. Only an EMPTY result means the
+    /// end of the document (a short batch does not).
     pub fn more(&self) -> Vec<String> {
         let (t, r) = mpsc::channel();
         if self.tx.send(Req::More(t)).is_err() {
@@ -123,37 +140,67 @@ impl Uia {
     }
 }
 
-struct State {
-    uia: IUIAutomation,
-    chromium: bool,
-    /// Word range per source index (rule 7: all from the one TextPattern picked at click time).
-    ranges: Vec<IUIAutomationTextRange>,
-    /// Last word range handed out; `more` walks forward from here (rule 8).
-    cursor: Option<IUIAutomationTextRange>,
-    /// Source window's root element (fallback search scope).
+/// The window currently probed by hover/pick: the top-level window under the point.
+struct Target {
+    hwnd: isize,
     root: Option<IUIAutomationElement>,
-    /// Cached TextPattern elements under `root`, for apps whose point element has no
-    /// TextPattern ancestor (Win11 Notepad: the point hits a WinUI `InputSiteWindowClass`
-    /// pane that is a sibling of the RichEdit document).
-    /// Plus when it was (re)built, so a miss refreshes at most once a second (hovering
-    /// over non-text must not run a whole-tree FindAll on every mouse move).
+    chromium: bool,
+    /// Cached TextPattern elements of `root` (non-Chromium only), for apps whose point
+    /// element has no TextPattern ancestor (Win11 Notepad: the point hits a WinUI
+    /// `InputSiteWindowClass` pane that is a sibling of the RichEdit document), plus
+    /// when it was built, so a miss refreshes at most once a second.
     fallback: Option<(Vec<IUIAutomationElement>, std::time::Instant)>,
 }
 
-fn worker(hwnd: isize, rx: Receiver<Req>) {
+/// The current read: everything from the one TextPattern picked at click time (rule 7).
+#[derive(Default)]
+struct Read {
+    hwnd: isize,
+    chromium: bool,
+    /// Word range per source index.
+    ranges: Vec<IUIAutomationTextRange>,
+    /// Last word range handed out; `more` walks forward from here (rule 8).
+    cursor: Option<IUIAutomationTextRange>,
+}
+
+struct State {
+    uia: IUIAutomation,
+    own_pid: u32,
+    target: Target,
+    read: Read,
+    source: Arc<AtomicIsize>,
+}
+
+fn worker(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
     unsafe {
         // Physical pixels regardless of the process manifest; the LL mouse hook
         // also reports per-monitor-aware coordinates.
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let com_ok = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-    run(hwnd, rx);
+    run(hwnd, source, rx);
     if com_ok {
         unsafe { CoUninitialize() };
     }
 }
 
-fn run(hwnd: isize, rx: Receiver<Req>) {
+fn is_chromium(h: HWND) -> bool {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(h, &mut buf) }.clamp(0, buf.len() as i32) as usize;
+    String::from_utf16_lossy(&buf[..n]).starts_with("Chrome_WidgetWin")
+}
+
+fn make_target(uia: &IUIAutomation, hwnd: isize) -> Target {
+    let h = HWND(hwnd as *mut _);
+    Target {
+        hwnd,
+        root: unsafe { uia.ElementFromHandle(h) }.ok(),
+        chromium: is_chromium(h),
+        fallback: None,
+    }
+}
+
+fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
     let uia: IUIAutomation =
         match unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) } {
             Ok(u) => u,
@@ -162,20 +209,17 @@ fn run(hwnd: isize, rx: Receiver<Req>) {
                 return; // dropping rx makes every call fail fast
             }
         };
-    let h = HWND(hwnd as *mut _);
-    let chromium = {
-        let mut buf = [0u16; 64];
-        let n = unsafe { GetClassNameW(h, &mut buf) }.clamp(0, buf.len() as i32) as usize;
-        String::from_utf16_lossy(&buf[..n]).starts_with("Chrome_WidgetWin")
-    };
-    let root = warm_up(&uia, h);
+    let target = make_target(&uia, hwnd);
+    warm_up(&uia, &target);
     let mut st = State {
         uia,
-        chromium,
-        ranges: Vec::new(),
-        cursor: None,
-        root,
-        fallback: None,
+        own_pid: unsafe { GetCurrentProcessId() },
+        target,
+        read: Read {
+            hwnd,
+            ..Default::default()
+        },
+        source,
     };
 
     let mut pending: VecDeque<Req> = VecDeque::new();
@@ -199,33 +243,34 @@ fn run(hwnd: isize, rx: Receiver<Req>) {
                 }
                 let _ = t.send(word_at(&mut st, x, y).ok().map(|(_, r)| r));
             }
-            // If the caller already timed out (reply undeliverable), roll the read state
-            // back so source indices stay aligned with the tokens the caller actually has.
+            // If the caller already timed out (reply undeliverable), roll the read back so
+            // source indices stay aligned with the tokens the caller actually has.
             Req::Pick(x, y, t) => {
-                let saved = (std::mem::take(&mut st.ranges), st.cursor.take());
+                let saved = std::mem::take(&mut st.read);
                 let res = pick(&mut st, x, y);
                 let failed = res.is_err();
                 if t.send(res).is_err() || failed {
-                    (st.ranges, st.cursor) = saved; // a rejected/lost pick keeps the old read
+                    st.read = saved; // a rejected/lost pick keeps the old read
                 }
+                st.source.store(st.read.hwnd, Ordering::Release);
             }
             Req::More(t) => {
-                let (len, cur) = (st.ranges.len(), st.cursor.clone());
-                if t.send(read_forward(&mut st, BATCH)).is_err() {
-                    st.ranges.truncate(len);
-                    st.cursor = cur;
+                let (len, cur) = (st.read.ranges.len(), st.read.cursor.clone());
+                if t.send(read_forward(&mut st.read, MORE_BATCH)).is_err() {
+                    st.read.ranges.truncate(len);
+                    st.read.cursor = cur;
                 }
             }
             Req::Rects(src, t) => {
                 let v = src
                     .iter()
-                    .filter_map(|&i| st.ranges.get(i))
+                    .filter_map(|&i| st.read.ranges.get(i))
                     .flat_map(rects_of)
                     .collect();
                 let _ = t.send(v);
             }
             Req::Scroll(i) => {
-                if let Some(r) = st.ranges.get(i) {
+                if let Some(r) = st.read.ranges.get(i) {
                     scroll(&st, r);
                 }
             }
@@ -235,17 +280,16 @@ fn run(hwnd: isize, rx: Receiver<Req>) {
 
 /// Rule 1: touch the window's tree so Chromium builds its accessibility tree now
 /// (first contact costs ~1.8 s), not when the user clicks.
-fn warm_up(uia: &IUIAutomation, h: HWND) -> Option<IUIAutomationElement> {
-    let t = std::time::Instant::now();
-    let root = unsafe { uia.ElementFromHandle(h) }.ok()?;
+fn warm_up(uia: &IUIAutomation, t: &Target) {
+    let start = std::time::Instant::now();
+    let Some(root) = t.root.as_ref() else { return };
     unsafe {
         let _ = root.CurrentName();
         if let Ok(c) = text_pattern_condition(uia) {
             let _ = root.FindFirst(TreeScope_Descendants, &c);
         }
     }
-    log::info!("read-aloud: UIA warm-up {} ms", t.elapsed().as_millis());
-    Some(root)
+    log::info!("read-aloud: UIA warm-up {} ms", start.elapsed().as_millis());
 }
 
 fn text_pattern_condition(uia: &IUIAutomation) -> windows::core::Result<IUIAutomationCondition> {
@@ -254,48 +298,80 @@ fn text_pattern_condition(uia: &IUIAutomation) -> windows::core::Result<IUIAutom
     }
 }
 
-/// Cap on cached fallback candidates (a browser page can expose many).
+/// Point the probe at the top-level window under (x, y). Rejects our own windows
+/// (overlay, panels) and empty desktop space. Re-targets when the window changed.
+fn retarget(st: &mut State, x: i32, y: i32) -> Result<(), String> {
+    let root = root_at(x, y).ok_or("no window under the point")?;
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
+    if pid == st.own_pid {
+        return Err("point is over our own window".into());
+    }
+    let h = root.0 as isize;
+    if h != st.target.hwnd {
+        st.target = make_target(&st.uia, h);
+    }
+    Ok(())
+}
+
+fn root_at(x: i32, y: i32) -> Option<HWND> {
+    let w = unsafe { WindowFromPoint(POINT { x, y }) };
+    if w.is_invalid() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(w, GA_ROOT) };
+    (!root.is_invalid()).then_some(root)
+}
+
+/// Cap on cached fallback candidates.
 const MAX_FALLBACK: i32 = 200;
 
-/// Smallest TextPattern element under the source window whose rect contains the point.
+/// Smallest TextPattern element of the target window whose rect contains the point.
+/// Only for non-Chromium targets, and only while that window is the one actually under
+/// the point (so text hidden under a covering window is never read).
 fn fallback_at(st: &mut State, x: i32, y: i32) -> Option<(IUIAutomationTextPattern, Rect)> {
+    if st.target.chromium || root_at(x, y).map(|h| h.0 as isize) != Some(st.target.hwnd) {
+        return None;
+    }
     for refresh in [false, true] {
         let stale = st
+            .target
             .fallback
             .as_ref()
-            .map_or(true, |(_, at)| at.elapsed() > Duration::from_secs(1));
+            .is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(1));
         if refresh && !stale {
             return None;
         }
-        if refresh || st.fallback.is_none() {
-            let root = st.root.as_ref()?;
+        if refresh || st.target.fallback.is_none() {
+            let root = st.target.root.as_ref()?;
             let cond = text_pattern_condition(&st.uia).ok()?;
             let all = unsafe { root.FindAll(TreeScope_Descendants, &cond) }.ok()?;
             let n = unsafe { all.Length() }.unwrap_or(0).min(MAX_FALLBACK);
             let els = (0..n)
                 .filter_map(|i| unsafe { all.GetElement(i) }.ok())
                 .collect();
-            st.fallback = Some((els, std::time::Instant::now()));
+            st.target.fallback = Some((els, std::time::Instant::now()));
         }
         let best = st
+            .target
             .fallback
             .as_ref()?
             .0
             .iter()
             .filter_map(|e| {
+                // Hidden tabs (Notepad keeps one editor per tab, all with the same
+                // rect) report IsOffscreen; only the visible one counts.
+                if unsafe { e.CurrentIsOffscreen() }
+                    .map(|b| b.as_bool())
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
                 let r = to_rect(unsafe { e.CurrentBoundingRectangle() }.ok()?);
                 contains(std::slice::from_ref(&r), x as f64, y as f64).then_some((e, r))
             })
             .min_by(|a, b| (a.1.w * a.1.h).total_cmp(&(b.1.w * b.1.h)));
         if let Some((e, r)) = best {
-            if st.chromium {
-                let doc = unsafe { st.uia.ControlViewWalker() }
-                    .map(|w| in_document(&w, e))
-                    .unwrap_or(false);
-                if !doc {
-                    return None;
-                }
-            }
             if let Ok(tp) =
                 unsafe { e.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
             {
@@ -316,12 +392,13 @@ fn to_rect(b: windows::Win32::Foundation::RECT) -> Rect {
 }
 
 /// Nearest element at/above the point that has a TextPattern, plus its bounding rect;
-/// falls back to a TextPattern element of the source window that contains the point.
+/// falls back to a TextPattern element of the target window that contains the point.
 fn text_pattern_at(
     st: &mut State,
     x: i32,
     y: i32,
 ) -> Result<(IUIAutomationTextPattern, Rect), String> {
+    retarget(st, x, y)?;
     let mut el = unsafe { st.uia.ElementFromPoint(POINT { x, y }) }.map_err(|e| e.to_string())?;
     let walker = unsafe { st.uia.ControlViewWalker() }.map_err(|e| e.to_string())?;
     for _ in 0..MAX_ANCESTORS {
@@ -330,7 +407,7 @@ fn text_pattern_at(
         {
             // Rule 3 (browser chrome): Chromium's omnibox also has a TextPattern; only
             // text inside the page's Document counts.
-            if st.chromium && !in_document(&walker, &el) {
+            if st.target.chromium && !in_document(&walker, &el) {
                 return Err("browser UI, not page text".into());
             }
             let b = unsafe { el.CurrentBoundingRectangle() }.map_err(|e| e.to_string())?;
@@ -341,7 +418,7 @@ fn text_pattern_at(
             Err(_) => break,
         }
     }
-    fallback_at(st, x, y).ok_or_else(|| "no TextPattern under the point".into())
+    fallback_at(st, x, y).ok_or_else(|| NO_TEXT.into())
 }
 
 /// True when `el` is, or sits inside, a Document control (web page content).
@@ -379,32 +456,38 @@ fn word_at(st: &mut State, x: i32, y: i32) -> Result<(IUIAutomationTextRange, Ve
     Ok((r, rects))
 }
 
+/// Starts a new read in `st.read` (the caller saved and cleared the old one).
 fn pick(st: &mut State, x: i32, y: i32) -> Result<Vec<String>, String> {
-    // Rule 1: Chromium's first query can come back empty — retry once.
+    // Rule 1: Chromium's first query can come back empty — retry once, but only for
+    // "nothing there"; rule 2/3 rejections are final.
     let (r, _) = match word_at(st, x, y) {
         Ok(v) => v,
-        Err(_) => {
+        Err(e) if e == NO_TEXT => {
             std::thread::sleep(Duration::from_millis(150));
             word_at(st, x, y)?
         }
+        Err(e) => return Err(e),
     };
     // Rule 7: everything for this read comes from this one range's source.
-    // (The caller cleared `ranges`/`cursor` and restores them if this pick fails.)
     let first = unsafe { r.GetText(-1) }
         .map(|b| b.to_string())
         .unwrap_or_default();
-    st.ranges.push(r.clone());
-    st.cursor = Some(r);
-    let mut out = Vec::with_capacity(BATCH);
+    st.read = Read {
+        hwnd: st.target.hwnd,
+        chromium: st.target.chromium,
+        ranges: vec![r.clone()],
+        cursor: Some(r),
+    };
+    let mut out = Vec::with_capacity(FIRST_BATCH);
     out.push(first);
-    out.extend(read_forward(st, BATCH - 1));
+    out.extend(read_forward(&mut st.read, FIRST_BATCH - 1));
     Ok(out)
 }
 
 /// Rule 8: walk forward word by word from the cursor; never re-query visible ranges.
-fn read_forward(st: &mut State, n: usize) -> Vec<String> {
+fn read_forward(read: &mut Read, n: usize) -> Vec<String> {
     let mut out = Vec::new();
-    let Some(cur) = st.cursor.as_ref() else {
+    let Some(cur) = read.cursor.as_ref() else {
         return out;
     };
     let Ok(r) = (unsafe { cur.Clone() }) else {
@@ -424,8 +507,8 @@ fn read_forward(st: &mut State, n: usize) -> Vec<String> {
         let text = unsafe { keep.GetText(-1) }
             .map(|b| b.to_string())
             .unwrap_or_default();
-        st.ranges.push(keep.clone());
-        st.cursor = Some(keep);
+        read.ranges.push(keep.clone());
+        read.cursor = Some(keep);
         out.push(text);
     }
     out
@@ -473,7 +556,7 @@ unsafe fn read_f64_array(sa: *mut SAFEARRAY) -> Vec<f64> {
 
 fn scroll(st: &State, r: &IUIAutomationTextRange) {
     unsafe {
-        if st.chromium {
+        if st.read.chromium {
             // Rule 4: Chromium ignores word-range ScrollIntoView. Measured on Edge 2026-10-02:
             // the paragraph *range* ScrollIntoView was also a no-op, while ScrollItemPattern on
             // the word's enclosing element (the <p>) scrolled it into view. Use that first and
@@ -541,489 +624,8 @@ mod tests {
         assert!(!contains(&r, 15.0, 25.0));
         assert!(!contains(&[], 0.0, 0.0));
     }
-
-    // ---- Manual check (Spike A parity) against Win11 Notepad -----------------------
-    // Run: cargo test ra_uia -- --ignored --nocapture
-    // Opens its own Notepad window on a temp file, queries it, closes only that window.
-    // (The PickHook click-swallow check lives in ra_hook's own manual test.)
-    // Refuses to run if any Notepad is already open.
-
-    use std::process::Command;
-    use std::time::Instant;
-    use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MENU,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
-        SetForegroundWindow, ShowWindow, SW_RESTORE, WM_CLOSE,
-    };
-
-    fn notepad_pids() -> Vec<u32> {
-        let out = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq notepad.exe", "/FO", "CSV", "/NH"])
-            .output()
-            .expect("tasklist");
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.split("\",\"").nth(1).and_then(|p| p.parse().ok()))
-            .collect()
-    }
-
-    fn find_window(title_part: &str) -> Option<HWND> {
-        struct Ctx<'a> {
-            needle: &'a str,
-            found: Option<HWND>,
-        }
-        unsafe extern "system" fn cb(h: HWND, l: LPARAM) -> BOOL {
-            let ctx = &mut *(l.0 as *mut Ctx);
-            if IsWindowVisible(h).as_bool() {
-                let mut buf = [0u16; 512];
-                let n = GetWindowTextW(h, &mut buf).max(0) as usize;
-                if String::from_utf16_lossy(&buf[..n]).contains(ctx.needle) {
-                    ctx.found = Some(h);
-                    return BOOL(0);
-                }
-            }
-            BOOL(1)
-        }
-        let mut ctx = Ctx {
-            needle: title_part,
-            found: None,
-        };
-        unsafe {
-            let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut Ctx as isize));
-        }
-        ctx.found
-    }
-
-    /// Closes the Notepad window we opened (and only it) and deletes the temp file.
-    struct Cleanup {
-        hwnd: Option<HWND>,
-        pid: u32,
-        file: std::path::PathBuf,
-        preexisting: Vec<u32>,
-    }
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            if let Some(h) = self.hwnd {
-                unsafe {
-                    let _ = PostMessageW(h, WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-                std::thread::sleep(Duration::from_millis(1500));
-            }
-            if self.pid != 0
-                && !self.preexisting.contains(&self.pid)
-                && notepad_pids().contains(&self.pid)
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &self.pid.to_string(), "/F"])
-                    .output();
-            }
-            let _ = std::fs::remove_file(&self.file);
-        }
-    }
-
-    #[test]
-    #[ignore]
-    #[allow(clippy::zombie_processes)] // notepad.exe stub hands off; we close by window
-    fn uia_notepad_manual() {
-        unsafe {
-            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
-        let preexisting = notepad_pids();
-        assert!(
-            preexisting.is_empty(),
-            "close Notepad first; this test must not touch your windows"
-        );
-
-        let stem = format!("ra_uia_test_{}", std::process::id());
-        let file = std::env::temp_dir().join(format!("{stem}.txt"));
-        let para = |n: usize| {
-            format!("Paragraph{n} alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima.")
-        };
-        std::fs::write(
-            &file,
-            format!("{}\r\n\r\n{}\r\n\r\n{}\r\n", para(0), para(1), para(2)),
-        )
-        .unwrap();
-        let mut guard = Cleanup {
-            hwnd: None,
-            pid: 0,
-            file: file.clone(),
-            preexisting,
-        };
-
-        Command::new("notepad.exe")
-            .arg(&file)
-            .spawn()
-            .expect("launch notepad");
-        let t0 = Instant::now();
-        let hwnd = loop {
-            if let Some(h) = find_window(&stem) {
-                break h;
-            }
-            assert!(
-                t0.elapsed() < Duration::from_secs(15),
-                "Notepad window not found"
-            );
-            std::thread::sleep(Duration::from_millis(200));
-        };
-        let mut pid = 0u32;
-        unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
-        guard.hwnd = Some(hwnd);
-        guard.pid = pid;
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-            let _ = SetForegroundWindow(hwnd);
-            keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        }
-        std::thread::sleep(Duration::from_millis(1000));
-
-        // Ground truth from a separate UIA client on this thread (as the spike's probe.py does).
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
-        let uia: IUIAutomation =
-            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.unwrap();
-        let root = unsafe { uia.ElementFromHandle(hwnd) }.unwrap();
-        let cond = unsafe {
-            uia.CreatePropertyCondition(UIA_IsTextPatternAvailablePropertyId, &VARIANT::from(true))
-        }
-        .unwrap();
-        // Like the spike: of all TextPattern elements, take the one with the longest text.
-        let all =
-            unsafe { root.FindAll(TreeScope_Descendants, &cond) }.expect("TextPattern elements");
-        let (doc_el, tp) = (0..unsafe { all.Length() }.unwrap_or(0))
-            .filter_map(|i| unsafe { all.GetElement(i) }.ok())
-            .filter_map(|e| {
-                let tp: IUIAutomationTextPattern =
-                    unsafe { e.GetCurrentPatternAs(UIA_TextPatternId) }.ok()?;
-                let n = unsafe { tp.DocumentRange().ok()?.GetText(200_000).ok()?.len() };
-                Some((n, e, tp))
-            })
-            .max_by_key(|(n, _, _)| *n)
-            .map(|(_, e, tp)| (e, tp))
-            .expect("a TextPattern element with text");
-        let el_rect = to_rect(unsafe { doc_el.CurrentBoundingRectangle() }.unwrap());
-        let w5 = unsafe {
-            let r = tp.DocumentRange().unwrap();
-            r.MoveEndpointByRange(
-                TextPatternRangeEndpoint_End,
-                &r,
-                TextPatternRangeEndpoint_Start,
-            )
-            .unwrap();
-            r.Move(TextUnit_Word, 4).unwrap();
-            r.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
-            r
-        };
-        let w5_text = unsafe { w5.GetText(-1) }.unwrap().to_string();
-        let w5_rects = rects_of(&w5);
-        println!("element {el_rect:?}\n5th word {w5_text:?} rects {w5_rects:?}");
-        assert!(!w5_rects.is_empty(), "5th word has no rect");
-        let cx = (w5_rects[0].x + w5_rects[0].w / 2.0) as i32;
-        let cy = (w5_rects[0].y + w5_rects[0].h / 2.0) as i32;
-        if let Ok(e) = unsafe { uia.ElementFromPoint(POINT { x: cx, y: cy }) } {
-            unsafe {
-                println!(
-                    "ElementFromPoint({cx},{cy}) -> class {:?} type {:?} name {:?} hwnd {:?}",
-                    e.CurrentClassName().map(|s| s.to_string()),
-                    e.CurrentControlType().map(|t| t.0),
-                    e.CurrentName().map(|s| s.to_string()),
-                    e.CurrentNativeWindowHandle()
-                );
-            }
-        }
-
-        // --- the code under test ---
-        let t = Instant::now();
-        let ra = Uia::start(hwnd.0 as isize);
-        assert_eq!(ra.source_hwnd(), hwnd.0 as isize);
-        let tokens = ra.pick(cx, cy).expect("pick on the 5th word");
-        println!(
-            "pick: {} tokens in {} ms (incl. warm-up): {:?}",
-            tokens.len(),
-            t.elapsed().as_millis(),
-            &tokens[..tokens.len().min(16)]
-        );
-        assert_eq!(
-            tokens[0].trim(),
-            w5_text.trim(),
-            "pick returned the wrong word"
-        );
-        assert!(
-            tokens.len() >= 10,
-            "expected >= 10 tokens, got {}",
-            tokens.len()
-        );
-        assert!(
-            tokens.iter().any(|t| t.contains("Paragraph2")),
-            "walk should reach the 3rd paragraph"
-        );
-
-        let r0 = ra.rects(vec![0]);
-        println!("rects(0) = {r0:?}");
-        assert!(
-            !r0.is_empty() && contains(&r0, cx as f64, cy as f64),
-            "rects(0) must cover the click"
-        );
-        let multi = ra.rects(vec![0, 1, 2]);
-        assert!(multi.len() >= 3, "3 words -> >= 3 rects, got {multi:?}");
-        assert!(ra.rects(vec![999_999]).is_empty());
-
-        let more = ra.more();
-        println!("more() -> {} tokens", more.len());
-        assert!(more.is_empty(), "short doc: everything came back in pick()");
-
-        // hover: 50 ms budget; allow a few tries in case the first one is cold.
-        let mut hov = None;
-        for _ in 0..5 {
-            hov = ra.hover(cx, cy);
-            if hov.is_some() {
-                break;
-            }
-        }
-        println!("hover = {hov:?}");
-        assert!(
-            hov.map(|v| contains(&v, cx as f64, cy as f64))
-                .unwrap_or(false),
-            "hover must return the word under the point"
-        );
-
-        // Rule 2: blank area below the text (inside the element) is rejected.
-        let blank = (el_rect.x as i32 + 40, (el_rect.y + el_rect.h) as i32 - 30);
-        let res = ra.pick(blank.0, blank.1);
-        println!("pick on blank area {blank:?} -> {res:?}");
-        assert!(
-            res.is_err(),
-            "click below the last line must be rejected (rule 2)"
-        );
-        assert!(ra.hover(blank.0, blank.1).is_none());
-        // Rule 3: above the text element (Notepad's tab strip / menu) is rejected.
-        let above = (el_rect.x as i32 + 40, el_rect.y as i32 - 40);
-        let res = ra.pick(above.0, above.1);
-        println!("pick above the element {above:?} -> {res:?}");
-        assert!(
-            res.is_err(),
-            "click outside the text element must be rejected (rule 3)"
-        );
-
-        ra.scroll_to(0); // non-Chromium path: must not hang the worker
-        assert!(
-            !ra.rects(vec![0]).is_empty(),
-            "worker still alive after scroll_to; old read kept"
-        );
-        drop(ra);
-    }
-
-    /// Kills only processes whose command line contains our private profile dir.
-    struct BrowserCleanup {
-        hwnd: Option<HWND>,
-        profile: std::path::PathBuf,
-        page: std::path::PathBuf,
-    }
-    impl Drop for BrowserCleanup {
-        fn drop(&mut self) {
-            if let Some(h) = self.hwnd {
-                unsafe {
-                    let _ = PostMessageW(h, WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-                std::thread::sleep(Duration::from_millis(2000));
-            }
-            let needle = self.profile.to_string_lossy().replace('\'', "''");
-            let ps = format!(
-                "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{needle}') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
-            );
-            let _ = Command::new("powershell")
-                .args(["-NoProfile", "-Command", &ps])
-                .output();
-            std::thread::sleep(Duration::from_millis(500));
-            let _ = std::fs::remove_dir_all(&self.profile);
-            let _ = std::fs::remove_file(&self.page);
-        }
-    }
-
-    /// Manual: Chromium (Edge by default; set RA_BROWSER to chrome.exe's path for Chrome).
-    /// Launches a separate browser instance on a private temp profile; never touches the
-    /// user's own browser windows. Run: cargo test uia_browser -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    #[allow(clippy::zombie_processes)] // cleaned up by BrowserCleanup
-    fn uia_browser_manual() {
-        unsafe {
-            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
-        let exe = std::env::var("RA_BROWSER").unwrap_or_else(|_| {
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".into()
-        });
-        let tag = format!("RaUiaBrowser{}", std::process::id());
-        let dir = std::env::temp_dir();
-        let page = dir.join(format!("{tag}.html"));
-        let profile = dir.join(format!("{tag}-profile"));
-        let words = [
-            "children", "bridges", "stone", "carried", "quiet", "golden", "clouds", "ancient",
-            "valleys", "river",
-        ];
-        let mut body = String::new();
-        for p in 0..40 {
-            body.push_str(&format!("<p>Paragraph{p:02} begins here."));
-            for i in 0..80 {
-                body.push(' ');
-                body.push_str(words[(p * 7 + i * 3) % words.len()]);
-            }
-            body.push_str(".</p>\n");
-        }
-        std::fs::write(
-            &page,
-            format!("<!doctype html><html><head><meta charset=utf-8><title>{tag}</title><style>body{{font:18px Georgia;max-width:700px;margin:40px auto}}</style></head><body><h1>Read aloud test</h1>\n{body}</body></html>"),
-        )
-        .unwrap();
-        let mut guard = BrowserCleanup {
-            hwnd: None,
-            profile: profile.clone(),
-            page: page.clone(),
-        };
-
-        Command::new(&exe)
-            .arg(format!("--user-data-dir={}", profile.display()))
-            .args([
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--new-window",
-                "--window-size=1100,900",
-            ])
-            .arg(format!(
-                "file:///{}",
-                page.display().to_string().replace('\\', "/")
-            ))
-            .spawn()
-            .expect("launch browser");
-        let t0 = Instant::now();
-        let hwnd = loop {
-            if let Some(h) = find_window(&tag) {
-                break h;
-            }
-            assert!(
-                t0.elapsed() < Duration::from_secs(20),
-                "browser window not found"
-            );
-            std::thread::sleep(Duration::from_millis(250));
-        };
-        guard.hwnd = Some(hwnd);
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-            let _ = SetForegroundWindow(hwnd);
-            keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        }
-        std::thread::sleep(Duration::from_millis(1500));
-
-        // Ground truth: rect of "Paragraph03" via a separate UIA client.
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
-        let uia: IUIAutomation =
-            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.unwrap();
-        let cond = text_pattern_condition(&uia).unwrap();
-        let mut target = None;
-        let mut hwnd = hwnd;
-        for _ in 0..40 {
-            std::thread::sleep(Duration::from_millis(250));
-            // Edge may swap its startup window; re-find it by title each time.
-            if let Some(h) = find_window(&tag) {
-                hwnd = h;
-            }
-            let Ok(root) = (unsafe { uia.ElementFromHandle(hwnd) }) else {
-                continue;
-            };
-            let Ok(all) = (unsafe { root.FindAll(TreeScope_Descendants, &cond) }) else {
-                continue;
-            };
-            for i in 0..unsafe { all.Length() }.unwrap_or(0) {
-                let Ok(e) = (unsafe { all.GetElement(i) }) else {
-                    continue;
-                };
-                let Ok(tp) = (unsafe {
-                    e.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-                }) else {
-                    continue;
-                };
-                let Ok(doc) = (unsafe { tp.DocumentRange() }) else {
-                    continue;
-                };
-                if let Ok(r) =
-                    unsafe { doc.FindText(&windows::core::BSTR::from("Paragraph03"), false, false) }
-                {
-                    let rc = rects_of(&r);
-                    if !rc.is_empty() {
-                        target = Some(rc[0].clone());
-                        break;
-                    }
-                }
-            }
-            if target.is_some() {
-                break;
-            }
-        }
-        let w = target.expect("Paragraph03 on screen");
-        let (cx, cy) = ((w.x + w.w / 2.0) as i32, (w.y + w.h / 2.0) as i32);
-        println!("Paragraph03 at {w:?}");
-        guard.hwnd = Some(hwnd);
-        let t = Instant::now();
-        let ra = Uia::start(hwnd.0 as isize);
-
-        let tokens = ra.pick(cx, cy).expect("pick in browser");
-        println!(
-            "pick: {} tokens, {} ms since Uia::start (incl. its warm-up; the test's own UIA client already woke Chromium); first {:?}",
-            tokens.len(),
-            t.elapsed().as_millis(),
-            &tokens[..tokens.len().min(8)]
-        );
-        assert!(tokens[0].contains("Paragraph03"), "clicked word");
-        assert_eq!(tokens.len(), BATCH, "a long page fills a whole batch");
-        let t = Instant::now();
-        let more = ra.more();
-        println!(
-            "more(): {} tokens in {} ms; last {:?}",
-            more.len(),
-            t.elapsed().as_millis(),
-            more.last()
-        );
-        assert!(!more.is_empty());
-        assert!(
-            ra.more().is_empty() || ra.more().is_empty(),
-            "eventually empty at the end"
-        );
-
-        let r0 = ra.rects(vec![0]);
-        assert!(
-            contains(&r0, cx as f64, cy as f64),
-            "rects(0) covers the click: {r0:?}"
-        );
-        let far = 1500;
-        let before = ra.rects(vec![far]);
-        let t = Instant::now();
-        ra.scroll_to(far);
-        std::thread::sleep(Duration::from_millis(1000));
-        let after = ra.rects(vec![far]);
-        println!("token {far} {:?}: rects before scroll {before:?}, after {after:?} (scroll+1s wait {} ms)", tokens[far], t.elapsed().as_millis());
-        assert!(
-            !after.is_empty(),
-            "rule 4: paragraph scroll brings the word on screen"
-        );
-
-        // Rule 3: the browser toolbar/tab strip (just below the window's top edge) is rejected.
-        let mut wr = windows::Win32::Foundation::RECT::default();
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
-        }
-        let res = ra.pick(wr.left + 300, wr.top + 60);
-        println!("pick on toolbar -> {res:?}");
-        assert!(res.is_err());
-        drop(ra);
-    }
 }
+
+#[cfg(test)]
+#[path = "ra_uia_manual_tests.rs"]
+mod manual_tests;

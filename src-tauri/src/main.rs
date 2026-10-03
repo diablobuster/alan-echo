@@ -35,7 +35,6 @@ mod ra_tts;
 #[cfg(target_os = "windows")]
 mod ra_names;
 #[cfg(target_os = "windows")]
-#[allow(dead_code)] // wired into ra_tts by Task 5
 mod ra_homograph;
 #[cfg(target_os = "windows")]
 mod read_aloud;

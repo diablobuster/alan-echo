@@ -4,7 +4,6 @@
 //! sorted spans over word indices (end exclusive). Number spans (`ra_norm_num`) win
 //! over text spans (`ra_norm_text`) when they overlap. `prepare` and `fold` are the
 //! character fixes callers apply before G2P. Pure, static tables, never panics.
-#![cfg_attr(not(test), allow(dead_code))] // wired into ra_tts::g2p_words by Task 5
 
 use std::borrow::Cow;
 
@@ -86,6 +85,7 @@ pub fn prepare(word: &str) -> Cow<'_, str> {
 /// Latin accent fold for one character: Latin-1 letters (À–ÿ), Latin Extended-A
 /// (Ā–ſ) and Romanian comma-below Ș ș Ț ț, to ASCII. Keeps the case
 /// (`É` → "E", `Æ` → "AE", `ß` → "ss"). `None` for ASCII and everything else.
+#[cfg_attr(not(test), allow(dead_code))] // for ra_names' accent fold (phase 3 Task 3)
 pub fn fold(c: char) -> Option<&'static str> {
     let lower = match c {
         '\u{C0}'..='\u{C5}' | '\u{E0}'..='\u{E5}' | '\u{100}'..='\u{105}' => "a",
@@ -217,6 +217,44 @@ mod tests {
         let w = ["he", "moved", "to", "St.", "Louis", "in", "the", "U.S."];
         assert_eq!(spans(&w), vec![span(3, 4, "saint"), span(7, 8, "U S.")]);
         assert!(spans(&[]).is_empty());
+    }
+
+    /// Numbers win on overlap, so a symbol glued to a number is read by the number
+    /// pass and must keep the symbol's word.
+    #[test]
+    fn prefix_symbols_survive_the_numbers_win_merge() {
+        for (w, want) in [
+            ("±2", "plus or minus two"),
+            ("§230", "section two hundred thirty"),
+            ("#1", "number one"),
+            ("√2", "square root of two"),
+            ("¶4", "paragraph four"),
+            ("№5", "number five"),
+        ] {
+            assert_eq!(spans(&["see", w, "here"]), vec![span(1, 2, want)], "{w}");
+        }
+        assert_eq!(spans(&["-5°C"]), vec![span(0, 1, "minus five degrees Celsius")]);
+        assert_eq!(spans(&["under", "§230."]), vec![span(1, 2, "section two hundred thirty.")]);
+    }
+
+    /// One unit table: glued units come from the number pass, which also knows
+    /// every glueable unit of the text pass's table.
+    #[test]
+    fn glued_and_spaced_units_read_alike() {
+        for (glued, spaced, want) in [
+            ("5mAh", ["5", "mAh"], "milliamp hours"),
+            ("3kWh", ["3", "kWh"], "kilowatt hours"),
+            ("60fps", ["60", "fps"], "frames per second"),
+            ("20°C", ["20", "°C"], "degrees Celsius"),
+            ("8TB", ["8", "TB"], "terabytes"),
+            ("12dB", ["12", "dB"], "decibels"),
+        ] {
+            let g = spans(&[glued]);
+            assert_eq!(g.len(), 1, "{glued}: {g:?}");
+            assert!(g[0].spoken.ends_with(want), "{glued}: {g:?}");
+            let s = spans(&spaced);
+            assert_eq!(s.last().map(|x| x.spoken.as_str()), Some(want), "{spaced:?}: {s:?}");
+        }
     }
 
     #[test]

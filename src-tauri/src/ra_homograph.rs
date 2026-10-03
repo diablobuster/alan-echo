@@ -94,7 +94,8 @@ fn context(word: &str, prev: Option<&str>, next: Option<&str>) -> Option<bool> {
         "read" if hit(prev, VERB_BEFORE) => Some(false),
         "read" if hit(prev, PAST_BEFORE) => Some(true),
         "lead" if hit(next, &["pipe", "pipes", "paint", "poisoning", "pencil", "pencils", "exposure", "levels", "contamination", "shot", "weights", "bullet", "bullets"]) => Some(true),
-        "lead" => Some(false),
+        // "the lead", "will lead", "lead to": the verb/noun "leed". No cue: misaki and the tag.
+        "lead" if hit(prev, VERB_BEFORE) || hit(prev, NOUN_BEFORE) || hit(next, &["to"]) => Some(false),
         "live" if hit(next, &["music", "show", "shows", "stream", "streams", "event", "events", "broadcast", "coverage", "performance", "audience", "album", "concert", "feed", "wire", "ammunition", "bait"]) => Some(true),
         "live" if hit(prev, VERB_BEFORE) => Some(false),
         "wind" | "tear" if hit(next, &["up", "down", "apart", "off", "open", "through", "into"]) => Some(true),
@@ -370,6 +371,17 @@ mod tests {
         assert_eq!(reading("live", "VBP", None, Some("stream")), Some("lˈa\u{200D}ɪv"));
         assert_eq!(reading("record", "NN", Some("to"), None), Some("ɹᵻkˈɔː\u{200D}ɹd"));
         assert_eq!(reading("record", "VB", Some("the"), None), None);
+    }
+
+    #[test]
+    fn lead_without_a_cue_keeps_misaki_and_the_tag() {
+        // no context word: misaki's own reading (None), not a forced "leed"
+        assert_eq!(reading("lead", "NN", None, None), None);
+        assert_eq!(reading("lead", "VBD", Some("Mr."), Some("Smith")), None);
+        // the cues still decide
+        assert_eq!(reading("lead", "NN", Some("will"), Some("us")), Some("lˈiːd"));
+        assert_eq!(reading("lead", "VB", None, Some("to")), Some("lˈiːd"));
+        assert_eq!(reading("lead", "NN", None, Some("pipes")), Some("lˈɛd"));
     }
 
     #[test]

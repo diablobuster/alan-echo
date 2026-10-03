@@ -35,9 +35,19 @@ mod ra_tts;
 #[cfg(target_os = "windows")]
 mod ra_names;
 #[cfg(target_os = "windows")]
+mod ra_homograph;
+#[cfg(target_os = "windows")]
 mod read_aloud;
 #[cfg(target_os = "windows")]
 mod ra_g2pen;
+#[cfg(target_os = "windows")]
+mod ra_numwords;
+#[cfg(target_os = "windows")]
+mod ra_norm_num;
+#[cfg(target_os = "windows")]
+mod ra_norm_text;
+#[cfg(target_os = "windows")]
+mod ra_norm;
 #[cfg(all(test, target_os = "windows"))]
 mod ra_perf;
 

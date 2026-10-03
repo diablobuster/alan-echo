@@ -1,0 +1,920 @@
+# Self-written stress sentences for the glitch hunt (source<TAB>text). Ours; safe to commit.
+stress:brand	Analysts at Apple downgraded Tencent to neutral.
+stress:brand	Microsoft announced a new partnership with TikTok on Monday.
+stress:brand	Analysts at Nvidia downgraded Blizzard to neutral.
+stress:brand	Analysts at Amazon downgraded Pinterest to neutral.
+stress:brand	Shares of Alphabet rose after the earnings report.
+stress:brand	Google announced a new partnership with FedEx on Monday.
+stress:brand	Meta announced a new partnership with Perplexity on Monday.
+stress:brand	The Tesla app was the most downloaded this week.
+stress:brand	Regulators are investigating Berkshire and Activision over pricing.
+stress:brand	Analysts at JPMorgan downgraded ASML to neutral.
+stress:brand	Shares of ExxonMobil rose after the earnings report.
+stress:brand	Analysts at Chevron downgraded Tinto to neutral.
+stress:brand	Walmart announced a new partnership with Nintendo on Monday.
+stress:brand	Costco announced a new partnership with Shopify on Monday.
+stress:brand	UnitedHealth announced a new partnership with HubSpot on Monday.
+stress:brand	The Pfizer app was the most downloaded this week.
+stress:brand	Moderna's chief executive spoke at the conference.
+stress:brand	Analysts at AbbVie downgraded Huawei to neutral.
+stress:brand	Analysts at Merck downgraded AbbVie to neutral.
+stress:brand	Analysts at Eli downgraded Caterpillar to neutral.
+stress:brand	Lilly announced a new partnership with eBay on Monday.
+stress:brand	Novo announced a new partnership with Mattel on Monday.
+stress:brand	Analysts at Nordisk downgraded Samsung to neutral.
+stress:brand	Analysts at Comcast downgraded Midjourney to neutral.
+stress:brand	Verizon's chief executive spoke at the conference.
+stress:brand	Shares of AT&T rose after the earnings report.
+stress:brand	Analysts at T-Mobile downgraded Perplexity to neutral.
+stress:brand	Disney's chief executive spoke at the conference.
+stress:brand	Analysts at Netflix downgraded Kroger to neutral.
+stress:brand	The Spotify app was the most downloaded this week.
+stress:brand	Uber announced a new partnership with AbbVie on Monday.
+stress:brand	Shares of Lyft rose after the earnings report.
+stress:brand	Analysts at Airbnb downgraded Porsche to neutral.
+stress:brand	DoorDash's chief executive spoke at the conference.
+stress:brand	Shares of Instacart rose after the earnings report.
+stress:brand	Shopify's chief executive spoke at the conference.
+stress:brand	Stripe announced a new partnership with Warner on Monday.
+stress:brand	Analysts at Square downgraded Amazon to neutral.
+stress:brand	Block announced a new partnership with Fidelity on Monday.
+stress:brand	The PayPal app was the most downloaded this week.
+stress:brand	Analysts at Venmo downgraded Samsung to neutral.
+stress:brand	Shares of Zelle rose after the earnings report.
+stress:brand	Visa's chief executive spoke at the conference.
+stress:brand	Regulators are investigating Mastercard and Patagonia over pricing.
+stress:brand	Salesforce's chief executive spoke at the conference.
+stress:brand	Oracle announced a new partnership with Deere on Monday.
+stress:brand	The SAP app was the most downloaded this week.
+stress:brand	Regulators are investigating Adobe and Morgan over pricing.
+stress:brand	Intuit's chief executive spoke at the conference.
+stress:brand	ServiceNow's chief executive spoke at the conference.
+stress:brand	Regulators are investigating Snowflake and ArcelorMittal over pricing.
+stress:brand	Shares of Palantir rose after the earnings report.
+stress:brand	Regulators are investigating Datadog and Twitch over pricing.
+stress:brand	The CrowdStrike app was the most downloaded this week.
+stress:brand	The Cloudflare app was the most downloaded this week.
+stress:brand	Analysts at Okta downgraded Shell to neutral.
+stress:brand	Zscaler announced a new partnership with Lego on Monday.
+stress:brand	The MongoDB app was the most downloaded this week.
+stress:brand	Shares of Atlassian rose after the earnings report.
+stress:brand	HubSpot's chief executive spoke at the conference.
+stress:brand	Zoom announced a new partnership with UPS on Monday.
+stress:brand	Slack's chief executive spoke at the conference.
+stress:brand	Dropbox announced a new partnership with 3M on Monday.
+stress:brand	Box announced a new partnership with Patagonia on Monday.
+stress:brand	Analysts at DocuSign downgraded AMD to neutral.
+stress:brand	Twilio announced a new partnership with Citigroup on Monday.
+stress:brand	The Workday app was the most downloaded this week.
+stress:brand	Regulators are investigating Autodesk and Wipro over pricing.
+stress:brand	Analysts at Broadcom downgraded SoftBank to neutral.
+stress:brand	Regulators are investigating Qualcomm and Kraft over pricing.
+stress:brand	Shares of AMD rose after the earnings report.
+stress:brand	Intel announced a new partnership with Cigna on Monday.
+stress:brand	Micron's chief executive spoke at the conference.
+stress:brand	The TSMC app was the most downloaded this week.
+stress:brand	Analysts at ASML downgraded H&M to neutral.
+stress:brand	Analysts at Samsung downgraded PepsiCo to neutral.
+stress:brand	Analysts at Sony downgraded Rosneft to neutral.
+stress:brand	Regulators are investigating Nintendo and DeepMind over pricing.
+stress:brand	Toyota announced a new partnership with Zoom on Monday.
+stress:brand	Regulators are investigating Honda and Comcast over pricing.
+stress:brand	Regulators are investigating Hyundai and TSMC over pricing.
+stress:brand	Shares of Volkswagen rose after the earnings report.
+stress:brand	BMW's chief executive spoke at the conference.
+stress:brand	Shares of Mercedes-Benz rose after the earnings report.
+stress:brand	Regulators are investigating Porsche and Hulu over pricing.
+stress:brand	Regulators are investigating Ferrari and H&M over pricing.
+stress:brand	Shares of Stellantis rose after the earnings report.
+stress:brand	Ford's chief executive spoke at the conference.
+stress:brand	Regulators are investigating GM and Volkswagen over pricing.
+stress:brand	Shares of Rivian rose after the earnings report.
+stress:brand	Regulators are investigating Lucid and Nvidia over pricing.
+stress:brand	Boeing announced a new partnership with Alphabet on Monday.
+stress:brand	Analysts at Airbus downgraded Citigroup to neutral.
+stress:brand	Analysts at Lockheed downgraded Mondelez to neutral.
+stress:brand	The Raytheon app was the most downloaded this week.
+stress:brand	Shares of Caterpillar rose after the earnings report.
+stress:brand	Regulators are investigating Deere and Chewy over pricing.
+stress:brand	The 3M app was the most downloaded this week.
+stress:brand	Honeywell's chief executive spoke at the conference.
+stress:brand	The Siemens app was the most downloaded this week.
+stress:brand	Philips announced a new partnership with Airbus on Monday.
+stress:brand	Unilever announced a new partnership with Delta on Monday.
+stress:brand	Nestlé announced a new partnership with Perplexity on Monday.
+stress:brand	PepsiCo announced a new partnership with Chevron on Monday.
+stress:brand	Coca-Cola's chief executive spoke at the conference.
+stress:brand	Analysts at McDonald's downgraded Spotify to neutral.
+stress:brand	Starbucks announced a new partnership with Roku on Monday.
+stress:brand	Analysts at Chipotle downgraded Hasbro to neutral.
+stress:brand	Nike announced a new partnership with Vale on Monday.
+stress:brand	Adidas announced a new partnership with Block on Monday.
+stress:brand	Lululemon's chief executive spoke at the conference.
+stress:brand	The Patagonia app was the most downloaded this week.
+stress:brand	Analysts at Target downgraded Venmo to neutral.
+stress:brand	Regulators are investigating Kroger and Samsung over pricing.
+stress:brand	Walgreens's chief executive spoke at the conference.
+stress:brand	Shares of CVS rose after the earnings report.
+stress:brand	The Humana app was the most downloaded this week.
+stress:brand	Shares of Cigna rose after the earnings report.
+stress:brand	Anthem's chief executive spoke at the conference.
+stress:brand	Aetna's chief executive spoke at the conference.
+stress:brand	Regulators are investigating Goldman and Tyson over pricing.
+stress:brand	Morgan announced a new partnership with Airbus on Monday.
+stress:brand	The Stanley app was the most downloaded this week.
+stress:brand	Shares of Citigroup rose after the earnings report.
+stress:brand	Shares of Wells rose after the earnings report.
+stress:brand	Fargo announced a new partnership with Tyson on Monday.
+stress:brand	Regulators are investigating BlackRock and Siemens over pricing.
+stress:brand	Regulators are investigating Vanguard and Mercedes-Benz over pricing.
+stress:brand	The Fidelity app was the most downloaded this week.
+stress:brand	Shares of Schwab rose after the earnings report.
+stress:brand	Shares of Robinhood rose after the earnings report.
+stress:brand	Coinbase's chief executive spoke at the conference.
+stress:brand	Binance announced a new partnership with Emirates on Monday.
+stress:brand	Kraken announced a new partnership with H&M on Monday.
+stress:brand	Regulators are investigating OpenSea and TSMC over pricing.
+stress:brand	The Anthropic app was the most downloaded this week.
+stress:brand	The OpenAI app was the most downloaded this week.
+stress:brand	Regulators are investigating DeepMind and Lucid over pricing.
+stress:brand	Analysts at Mistral downgraded Robinhood to neutral.
+stress:brand	The Cohere app was the most downloaded this week.
+stress:brand	Regulators are investigating Perplexity and Aramco over pricing.
+stress:brand	Analysts at Midjourney downgraded Adidas to neutral.
+stress:brand	ByteDance's chief executive spoke at the conference.
+stress:brand	Analysts at TikTok downgraded Broadcom to neutral.
+stress:brand	Analysts at Tencent downgraded JD.com to neutral.
+stress:brand	Alibaba announced a new partnership with Unity on Monday.
+stress:brand	Baidu's chief executive spoke at the conference.
+stress:brand	The JD.com app was the most downloaded this week.
+stress:brand	Analysts at Xiaomi downgraded Rakuten to neutral.
+stress:brand	Huawei's chief executive spoke at the conference.
+stress:brand	Lenovo announced a new partnership with Gucci on Monday.
+stress:brand	Regulators are investigating Foxconn and ServiceNow over pricing.
+stress:brand	Regulators are investigating Infosys and OpenSea over pricing.
+stress:brand	Shares of Wipro rose after the earnings report.
+stress:brand	Analysts at Reliance downgraded MongoDB to neutral.
+stress:brand	The Aramco app was the most downloaded this week.
+stress:brand	Regulators are investigating Gazprom and Adobe over pricing.
+stress:brand	Analysts at Rosneft downgraded Samsung to neutral.
+stress:brand	Regulators are investigating Shell and 3M over pricing.
+stress:brand	The BP app was the most downloaded this week.
+stress:brand	Shares of TotalEnergies rose after the earnings report.
+stress:brand	Equinor announced a new partnership with Visa on Monday.
+stress:brand	Glencore's chief executive spoke at the conference.
+stress:brand	Analysts at Rio downgraded Samsung to neutral.
+stress:brand	Tinto announced a new partnership with Prada on Monday.
+stress:brand	Regulators are investigating BHP and CVS over pricing.
+stress:brand	The Vale app was the most downloaded this week.
+stress:brand	Regulators are investigating ArcelorMittal and Meta over pricing.
+stress:brand	Analysts at Maersk downgraded T-Mobile to neutral.
+stress:brand	FedEx announced a new partnership with Xiaomi on Monday.
+stress:brand	Analysts at UPS downgraded Rio to neutral.
+stress:brand	Regulators are investigating DHL and Salesforce over pricing.
+stress:brand	Delta's chief executive spoke at the conference.
+stress:brand	The JetBlue app was the most downloaded this week.
+stress:brand	Shares of Ryanair rose after the earnings report.
+stress:brand	Lufthansa announced a new partnership with Costco on Monday.
+stress:brand	Emirates's chief executive spoke at the conference.
+stress:brand	The Etsy app was the most downloaded this week.
+stress:brand	The eBay app was the most downloaded this week.
+stress:brand	Analysts at Wayfair downgraded Uniqlo to neutral.
+stress:brand	The Chewy app was the most downloaded this week.
+stress:brand	Regulators are investigating Peloton and HubSpot over pricing.
+stress:brand	The Roku app was the most downloaded this week.
+stress:brand	The Pinterest app was the most downloaded this week.
+stress:brand	Snap announced a new partnership with Zoom on Monday.
+stress:brand	Reddit's chief executive spoke at the conference.
+stress:brand	Shares of Discord rose after the earnings report.
+stress:brand	The Twitch app was the most downloaded this week.
+stress:brand	Analysts at Hulu downgraded Equinor to neutral.
+stress:brand	Analysts at Paramount downgraded Amazon to neutral.
+stress:brand	Warner announced a new partnership with Shopify on Monday.
+stress:brand	Regulators are investigating Bros and McDonald's over pricing.
+stress:brand	The Lionsgate app was the most downloaded this week.
+stress:brand	Electronic announced a new partnership with Novo on Monday.
+stress:brand	Arts's chief executive spoke at the conference.
+stress:brand	The Activision app was the most downloaded this week.
+stress:brand	Blizzard announced a new partnership with Schwab on Monday.
+stress:brand	Shares of Ubisoft rose after the earnings report.
+stress:brand	Roblox announced a new partnership with Lilly on Monday.
+stress:brand	Analysts at Unity downgraded Snowflake to neutral.
+stress:brand	Analysts at Epic downgraded Kering to neutral.
+stress:brand	Games announced a new partnership with Porsche on Monday.
+stress:brand	Valve's chief executive spoke at the conference.
+stress:brand	The SoftBank app was the most downloaded this week.
+stress:brand	Rakuten announced a new partnership with McDonald's on Monday.
+stress:brand	The LVMH app was the most downloaded this week.
+stress:brand	The Hermès app was the most downloaded this week.
+stress:brand	Shares of Kering rose after the earnings report.
+stress:brand	Analysts at Gucci downgraded ASML to neutral.
+stress:brand	Prada announced a new partnership with Prada on Monday.
+stress:brand	Analysts at Burberry downgraded Glencore to neutral.
+stress:brand	Shares of Zara rose after the earnings report.
+stress:brand	H&M's chief executive spoke at the conference.
+stress:brand	Uniqlo's chief executive spoke at the conference.
+stress:brand	Shares of IKEA rose after the earnings report.
+stress:brand	The Lego app was the most downloaded this week.
+stress:brand	Analysts at Mattel downgraded Tesla to neutral.
+stress:brand	Analysts at Hasbro downgraded Wells to neutral.
+stress:brand	Kellogg's's chief executive spoke at the conference.
+stress:brand	Analysts at Kraft downgraded Verizon to neutral.
+stress:brand	Regulators are investigating Heinz and Midjourney over pricing.
+stress:brand	Mondelez's chief executive spoke at the conference.
+stress:brand	Hershey announced a new partnership with Paramount on Monday.
+stress:brand	Shares of Tyson rose after the earnings report.
+stress:brand	Cargill announced a new partnership with Datadog on Monday.
+stress:camel	Shares of TechReview rose after the earnings report.
+stress:camel	Regulators are investigating LinkedIn and WeChat over pricing.
+stress:camel	PayPal's chief executive spoke at the conference.
+stress:camel	Shares of OpenAI rose after the earnings report.
+stress:camel	Regulators are investigating iPhone and SolarWinds over pricing.
+stress:camel	The iPad app was the most downloaded this week.
+stress:camel	iPod announced a new partnership with OnlyFans on Monday.
+stress:camel	iCloud's chief executive spoke at the conference.
+stress:camel	iMessage announced a new partnership with FaceTime on Monday.
+stress:camel	macOS's chief executive spoke at the conference.
+stress:camel	iOS announced a new partnership with GPT-4o on Monday.
+stress:camel	watchOS's chief executive spoke at the conference.
+stress:camel	tvOS's chief executive spoke at the conference.
+stress:camel	The YouTube app was the most downloaded this week.
+stress:camel	Shares of GitHub rose after the earnings report.
+stress:camel	GitLab announced a new partnership with ThinkPad on Monday.
+stress:camel	The DoorDash app was the most downloaded this week.
+stress:camel	FedEx announced a new partnership with MacArthur on Monday.
+stress:camel	Regulators are investigating PlayStation and iPad over pricing.
+stress:camel	Shares of SoundCloud rose after the earnings report.
+stress:camel	WordPress's chief executive spoke at the conference.
+stress:camel	Shares of JavaScript rose after the earnings report.
+stress:camel	Regulators are investigating TypeScript and MongoDB over pricing.
+stress:camel	Regulators are investigating PowerPoint and SmartThings over pricing.
+stress:camel	Analysts at OneDrive downgraded ThinkPad to neutral.
+stress:camel	SharePoint's chief executive spoke at the conference.
+stress:camel	Regulators are investigating BlackRock and GPT-4o over pricing.
+stress:camel	Regulators are investigating BlackBerry and TechCrunch over pricing.
+stress:camel	WeChat announced a new partnership with CrowdStrike on Monday.
+stress:camel	WhatsApp announced a new partnership with WhatsApp on Monday.
+stress:camel	Regulators are investigating DeepMind and iCloud over pricing.
+stress:camel	Shares of DeepSeek rose after the earnings report.
+stress:camel	SpaceX announced a new partnership with DeSantis on Monday.
+stress:camel	Shares of HubSpot rose after the earnings report.
+stress:camel	MongoDB announced a new partnership with SmartThings on Monday.
+stress:camel	Regulators are investigating PostgreSQL and OneDrive over pricing.
+stress:camel	Analysts at MySQL downgraded AirDrop to neutral.
+stress:camel	Analysts at NoSQL downgraded SmartThings to neutral.
+stress:camel	Regulators are investigating DevOps and DevOps over pricing.
+stress:camel	eBay's chief executive spoke at the conference.
+stress:camel	eToro's chief executive spoke at the conference.
+stress:camel	Regulators are investigating ZoomInfo and AirPods over pricing.
+stress:camel	Analysts at SolarWinds downgraded HubSpot to neutral.
+stress:camel	CrowdStrike announced a new partnership with NerdWallet on Monday.
+stress:camel	Shares of ServiceNow rose after the earnings report.
+stress:camel	Shares of DocuSign rose after the earnings report.
+stress:camel	The DreamWorks app was the most downloaded this week.
+stress:camel	MasterCard announced a new partnership with CrowdStrike on Monday.
+stress:camel	Analysts at SunPower downgraded AirDrop to neutral.
+stress:camel	FirstEnergy's chief executive spoke at the conference.
+stress:camel	JetBlue announced a new partnership with HuffPost on Monday.
+stress:camel	AirPods's chief executive spoke at the conference.
+stress:camel	MacBook's chief executive spoke at the conference.
+stress:camel	Regulators are investigating ChatGPT and watchOS over pricing.
+stress:camel	Regulators are investigating GPT-4o and LinkedIn over pricing.
+stress:camel	ThinkPad's chief executive spoke at the conference.
+stress:camel	The CloudFlare app was the most downloaded this week.
+stress:camel	The RingCentral app was the most downloaded this week.
+stress:camel	QuickBooks's chief executive spoke at the conference.
+stress:camel	Regulators are investigating TurboTax and MacArthur over pricing.
+stress:camel	NerdWallet's chief executive spoke at the conference.
+stress:camel	WeWork announced a new partnership with SmartThings on Monday.
+stress:camel	Analysts at SoftBank downgraded PostgreSQL to neutral.
+stress:camel	The CoreWeave app was the most downloaded this week.
+stress:camel	Analysts at SuperMicro downgraded JavaScript to neutral.
+stress:camel	Regulators are investigating AppLovin and CrowdStrike over pricing.
+stress:camel	MicroStrategy announced a new partnership with ThinkPad on Monday.
+stress:camel	Analysts at McKinsey downgraded ThinkPad to neutral.
+stress:camel	Analysts at McDonald downgraded RadeonPro to neutral.
+stress:camel	The MacArthur app was the most downloaded this week.
+stress:camel	O'Brien announced a new partnership with WordPress on Monday.
+stress:camel	Shares of DiCaprio rose after the earnings report.
+stress:camel	Analysts at LeBron downgraded macOS to neutral.
+stress:camel	Regulators are investigating DeSantis and OnlyFans over pricing.
+stress:camel	Analysts at McConnell downgraded CrowdStrike to neutral.
+stress:camel	VanEck's chief executive spoke at the conference.
+stress:camel	SmartThings announced a new partnership with NewsGuard on Monday.
+stress:camel	The FaceTime app was the most downloaded this week.
+stress:camel	AirDrop's chief executive spoke at the conference.
+stress:camel	CarPlay announced a new partnership with FaceTime on Monday.
+stress:camel	Shares of HomePod rose after the earnings report.
+stress:camel	The GeForce app was the most downloaded this week.
+stress:camel	Regulators are investigating RadeonPro and eToro over pricing.
+stress:camel	TikTok announced a new partnership with GitHub on Monday.
+stress:camel	Regulators are investigating InstaCart and watchOS over pricing.
+stress:camel	Analysts at BuzzFeed downgraded MicroStrategy to neutral.
+stress:camel	The HuffPost app was the most downloaded this week.
+stress:camel	Shares of TechCrunch rose after the earnings report.
+stress:camel	FiveThirtyEight's chief executive spoke at the conference.
+stress:camel	Regulators are investigating NewsGuard and MasterCard over pricing.
+stress:camel	Regulators are investigating OnlyFans and MasterCard over pricing.
+stress:camel	KickStarter announced a new partnership with O'Brien on Monday.
+stress:camel	IndieGoGo's chief executive spoke at the conference.
+stress:camel	GoFundMe's chief executive spoke at the conference.
+stress:ticker	Traders bought AAPL, MSFT and NVDA at the open.
+stress:ticker	(AAPL) fell 3% while NYSE: NVDA gained.
+stress:ticker	Traders bought AMZN, GOOGL and META at the open.
+stress:ticker	(AMZN) fell 3% while NYSE: META gained.
+stress:ticker	Traders bought TSLA, BRK.B and JPM at the open.
+stress:ticker	(TSLA) fell 3% while NYSE: JPM gained.
+stress:ticker	Traders bought XOM, UNH and LLY at the open.
+stress:ticker	(XOM) fell 3% while NYSE: LLY gained.
+stress:ticker	Traders bought V, MA and AVGO at the open.
+stress:ticker	(V) fell 3% while NYSE: AVGO gained.
+stress:ticker	Traders bought NFLX, COST and PEP at the open.
+stress:ticker	(NFLX) fell 3% while NYSE: PEP gained.
+stress:ticker	Traders bought KO, WMT and DIS at the open.
+stress:ticker	(KO) fell 3% while NYSE: DIS gained.
+stress:ticker	Traders bought INTC, AMD and QCOM at the open.
+stress:ticker	(INTC) fell 3% while NYSE: QCOM gained.
+stress:ticker	Traders bought PLTR, SNOW and CRM at the open.
+stress:ticker	(PLTR) fell 3% while NYSE: CRM gained.
+stress:ticker	Traders bought ORCL, SPY and QQQ at the open.
+stress:ticker	(ORCL) fell 3% while NYSE: QQQ gained.
+stress:ticker	Traders bought VOO, IWM and TLT at the open.
+stress:ticker	(VOO) fell 3% while NYSE: TLT gained.
+stress:ticker	Traders bought GLD, BTC and ETH at the open.
+stress:ticker	(GLD) fell 3% while NYSE: ETH gained.
+stress:leader	Reporters asked Joe Biden about the deal.
+stress:leader	Donald Trump said on Tuesday that talks would continue.
+stress:leader	Reporters asked Kamala Harris about the deal.
+stress:leader	In a statement, JD Vance rejected the proposal.
+stress:leader	Nancy Pelosi's office declined to comment.
+stress:leader	Chuck Schumer's office declined to comment.
+stress:leader	In a statement, Mitch McConnell rejected the proposal.
+stress:leader	Reporters asked Mike Johnson about the deal.
+stress:leader	Hakeem Jeffries said on Tuesday that talks would continue.
+stress:leader	Alexandria Ocasio-Cortez said on Tuesday that talks would continue.
+stress:leader	Ron DeSantis's office declined to comment.
+stress:leader	Reporters asked Gavin Newsom about the deal.
+stress:leader	Pete Buttigieg said on Tuesday that talks would continue.
+stress:leader	Reporters asked Marco Rubio about the deal.
+stress:leader	Reporters asked Elizabeth Warren about the deal.
+stress:leader	Bernie Sanders said on Tuesday that talks would continue.
+stress:leader	In a statement, Volodymyr Zelenskyy rejected the proposal.
+stress:leader	Reporters asked Vladimir Putin about the deal.
+stress:leader	Xi Jinping said on Tuesday that talks would continue.
+stress:leader	Emmanuel Macron said on Tuesday that talks would continue.
+stress:leader	Reporters asked Olaf Scholz about the deal.
+stress:leader	Keir Starmer said on Tuesday that talks would continue.
+stress:leader	Rishi Sunak's office declined to comment.
+stress:leader	Reporters asked Giorgia Meloni about the deal.
+stress:leader	In a statement, Narendra Modi rejected the proposal.
+stress:leader	Benjamin Netanyahu said on Tuesday that talks would continue.
+stress:leader	Recep Tayyip Erdoğan said on Tuesday that talks would continue.
+stress:leader	Justin Trudeau said on Tuesday that talks would continue.
+stress:leader	Reporters asked Mark Carney about the deal.
+stress:leader	In a statement, Claudia Sheinbaum rejected the proposal.
+stress:leader	In a statement, Luiz Inácio Lula da Silva rejected the proposal.
+stress:leader	In a statement, Javier Milei rejected the proposal.
+stress:leader	Reporters asked Fumio Kishida about the deal.
+stress:leader	In a statement, Shigeru Ishiba rejected the proposal.
+stress:leader	Yoon Suk Yeol said on Tuesday that talks would continue.
+stress:leader	Lee Jae-myung's office declined to comment.
+stress:leader	Reporters asked Kim Jong Un about the deal.
+stress:leader	Mohammed bin Salman said on Tuesday that talks would continue.
+stress:leader	Ali Khamenei said on Tuesday that talks would continue.
+stress:leader	Reporters asked Masoud Pezeshkian about the deal.
+stress:leader	Cyril Ramaphosa's office declined to comment.
+stress:leader	Reporters asked Bola Tinubu about the deal.
+stress:leader	In a statement, Ursula von der Leyen rejected the proposal.
+stress:leader	António Guterres's office declined to comment.
+stress:leader	In a statement, Jerome Powell rejected the proposal.
+stress:leader	Janet Yellen said on Tuesday that talks would continue.
+stress:leader	Reporters asked Scott Bessent about the deal.
+stress:leader	Christine Lagarde's office declined to comment.
+stress:leader	Kristalina Georgieva said on Tuesday that talks would continue.
+stress:leader	Jensen Huang's office declined to comment.
+stress:leader	Reporters asked Satya Nadella about the deal.
+stress:leader	Sundar Pichai said on Tuesday that talks would continue.
+stress:leader	Tim Cook said on Tuesday that talks would continue.
+stress:leader	Elon Musk said on Tuesday that talks would continue.
+stress:leader	In a statement, Mark Zuckerberg rejected the proposal.
+stress:leader	Reporters asked Sam Altman about the deal.
+stress:leader	Dario Amodei said on Tuesday that talks would continue.
+stress:leader	Reporters asked Jamie Dimon about the deal.
+stress:leader	Warren Buffett said on Tuesday that talks would continue.
+stress:leader	Lisa Su said on Tuesday that talks would continue.
+stress:leader	Andy Jassy said on Tuesday that talks would continue.
+stress:leader	In a statement, Larry Fink rejected the proposal.
+stress:leader	In a statement, Ken Griffin rejected the proposal.
+stress:leader	Cathie Wood's office declined to comment.
+stress:leader	Reporters asked Masayoshi Son about the deal.
+stress:place	Flights to Kyiv were cancelled on Sunday.
+stress:place	Officials in Kharkiv reported heavy rain overnight.
+stress:place	Officials in Zaporizhzhia reported heavy rain overnight.
+stress:place	Flights to Mariupol were cancelled on Sunday.
+stress:place	Flights to Gaza were cancelled on Sunday.
+stress:place	The summit will be held in Rafah next spring.
+stress:place	Flights to Tel Aviv were cancelled on Sunday.
+stress:place	Officials in Tehran reported heavy rain overnight.
+stress:place	The summit will be held in Riyadh next spring.
+stress:place	The summit will be held in Doha next spring.
+stress:place	Officials in Beijing reported heavy rain overnight.
+stress:place	Flights to Shenzhen were cancelled on Sunday.
+stress:place	Officials in Shanghai reported heavy rain overnight.
+stress:place	Flights to Taipei were cancelled on Sunday.
+stress:place	The summit will be held in Seoul next spring.
+stress:place	The summit will be held in Pyongyang next spring.
+stress:place	The summit will be held in Tokyo next spring.
+stress:place	Flights to Osaka were cancelled on Sunday.
+stress:place	Flights to Mumbai were cancelled on Sunday.
+stress:place	Flights to Bengaluru were cancelled on Sunday.
+stress:place	Officials in New Delhi reported heavy rain overnight.
+stress:place	Officials in Karachi reported heavy rain overnight.
+stress:place	Officials in Dhaka reported heavy rain overnight.
+stress:place	The summit will be held in Jakarta next spring.
+stress:place	The summit will be held in Manila next spring.
+stress:place	Flights to Hanoi were cancelled on Sunday.
+stress:place	The summit will be held in Ho Chi Minh City next spring.
+stress:place	Officials in Bangkok reported heavy rain overnight.
+stress:place	The summit will be held in Kuala Lumpur next spring.
+stress:place	Flights to Singapore were cancelled on Sunday.
+stress:place	Flights to Sydney were cancelled on Sunday.
+stress:place	Officials in Auckland reported heavy rain overnight.
+stress:place	Officials in Nairobi reported heavy rain overnight.
+stress:place	Flights to Lagos were cancelled on Sunday.
+stress:place	Flights to Johannesburg were cancelled on Sunday.
+stress:place	The summit will be held in Cairo next spring.
+stress:place	Flights to Addis Ababa were cancelled on Sunday.
+stress:place	The summit will be held in Khartoum next spring.
+stress:place	The summit will be held in Istanbul next spring.
+stress:place	The summit will be held in Ankara next spring.
+stress:place	The summit will be held in Athens next spring.
+stress:place	Officials in Rome reported heavy rain overnight.
+stress:place	Flights to Milan were cancelled on Sunday.
+stress:place	The summit will be held in Madrid next spring.
+stress:place	The summit will be held in Barcelona next spring.
+stress:place	The summit will be held in Lisbon next spring.
+stress:place	The summit will be held in Paris next spring.
+stress:place	Officials in Marseille reported heavy rain overnight.
+stress:place	Officials in Brussels reported heavy rain overnight.
+stress:place	The summit will be held in Amsterdam next spring.
+stress:place	The summit will be held in Berlin next spring.
+stress:place	Officials in Munich reported heavy rain overnight.
+stress:place	Flights to Frankfurt were cancelled on Sunday.
+stress:place	The summit will be held in Warsaw next spring.
+stress:place	Flights to Prague were cancelled on Sunday.
+stress:place	The summit will be held in Budapest next spring.
+stress:place	Officials in Vienna reported heavy rain overnight.
+stress:place	Flights to Zurich were cancelled on Sunday.
+stress:place	Flights to Geneva were cancelled on Sunday.
+stress:place	Flights to Stockholm were cancelled on Sunday.
+stress:place	Officials in Oslo reported heavy rain overnight.
+stress:place	Officials in Helsinki reported heavy rain overnight.
+stress:place	Officials in Reykjavik reported heavy rain overnight.
+stress:place	Officials in Dublin reported heavy rain overnight.
+stress:place	Flights to Edinburgh were cancelled on Sunday.
+stress:place	Flights to London were cancelled on Sunday.
+stress:place	Officials in Montreal reported heavy rain overnight.
+stress:place	Flights to Toronto were cancelled on Sunday.
+stress:place	The summit will be held in Vancouver next spring.
+stress:place	Flights to Mexico City were cancelled on Sunday.
+stress:place	Officials in Guadalajara reported heavy rain overnight.
+stress:place	Flights to Bogotá were cancelled on Sunday.
+stress:place	Officials in Caracas reported heavy rain overnight.
+stress:place	The summit will be held in Lima next spring.
+stress:place	Officials in Santiago reported heavy rain overnight.
+stress:place	Officials in Buenos Aires reported heavy rain overnight.
+stress:place	The summit will be held in São Paulo next spring.
+stress:place	The summit will be held in Rio de Janeiro next spring.
+stress:place	Officials in Albuquerque reported heavy rain overnight.
+stress:place	The summit will be held in Tucson next spring.
+stress:place	The summit will be held in Phoenix next spring.
+stress:place	Flights to Boise were cancelled on Sunday.
+stress:place	Flights to Spokane were cancelled on Sunday.
+stress:place	Officials in Poughkeepsie reported heavy rain overnight.
+stress:place	The summit will be held in Worcester next spring.
+stress:place	Flights to Schenectady were cancelled on Sunday.
+stress:place	The summit will be held in Sault Ste. Marie next spring.
+stress:place	The summit will be held in Des Moines next spring.
+stress:place	Officials in Baton Rouge reported heavy rain overnight.
+stress:place	The summit will be held in Chattanooga next spring.
+stress:place	The summit will be held in Tallahassee next spring.
+stress:place	Officials in Pensacola reported heavy rain overnight.
+stress:place	Flights to Kalamazoo were cancelled on Sunday.
+stress:place	Officials in Ypsilanti reported heavy rain overnight.
+stress:place	Officials in Wilkes-Barre reported heavy rain overnight.
+stress:place	The summit will be held in Cheyenne next spring.
+stress:place	The summit will be held in Juneau next spring.
+stress:place	The summit will be held in Honolulu next spring.
+stress:place	The summit will be held in Kauai next spring.
+stress:acronym	The FBI and the NSA both cited CIA data.
+stress:acronym	The IRS and the FDA both cited SEC data.
+stress:acronym	The CDC and the EPA both cited NIH data.
+stress:acronym	The DOJ and the DHS both cited DOD data.
+stress:acronym	The FAA and the FTC both cited FCC data.
+stress:acronym	The NLRB and the CPI both cited GDP data.
+stress:acronym	The PCE and the ROI both cited PPI data.
+stress:acronym	The EBITDA and the IPO both cited EPS data.
+stress:acronym	The ETF and the SPAC both cited REIT data.
+stress:acronym	The CEO and the COO both cited CFO data.
+stress:acronym	The CTO and the NATO both cited NASA data.
+stress:acronym	The OPEC and the WHO both cited UNICEF data.
+stress:acronym	The IMF and the ECB both cited WTO data.
+stress:acronym	The BOJ and the FOMC both cited PBOC data.
+stress:acronym	The FDIC and the NASDAQ both cited NYSE data.
+stress:acronym	The AI and the LLM both cited ML data.
+stress:acronym	The GPU and the RAM both cited CPU data.
+stress:acronym	The SSD and the SDK both cited API data.
+stress:acronym	The SaaS and the VPN both cited IoT data.
+stress:acronym	The HTML and the JSON both cited CSS data.
+stress:acronym	The SQL and the HTTP both cited URL data.
+stress:acronym	The HTTPS and the USB both cited PDF data.
+stress:acronym	The HDMI and the OLED both cited LED data.
+stress:acronym	The LCD and the DAO both cited NFT data.
+stress:acronym	The DeFi and the DEI both cited ESG data.
+stress:acronym	The HR and the Q&A both cited PR data.
+stress:acronym	The FAQ and the FYI both cited ASAP data.
+stress:acronym	The DIY and the ETA both cited TBD data.
+stress:acronym	The RSVP and the NASCAR both cited AWOL data.
+stress:acronym	The NCAA and the NBA both cited NFL data.
+stress:acronym	The MLB and the MLS both cited NHL data.
+stress:acronym	The FIFA and the BBC both cited UEFA data.
+stress:acronym	The CNN and the PBS both cited NPR data.
+stress:acronym	The ABC and the CBS both cited NBC data.
+stress:acronym	The MSNBC and the ESPN both cited HBO data.
+stress:acronym	The AARP and the ACLU both cited NAACP data.
+stress:acronym	The NRA and the COVID-19 both cited AFL-CIO data.
+stress:acronym	The SARS and the AIDS both cited HIV data.
+stress:acronym	The MRI and the ICU both cited CT data.
+stress:acronym	The ER and the RNA both cited DNA data.
+stress:acronym	The mRNA and the ADHD both cited PTSD data.
+stress:acronym	The OCD and the BMI both cited OCD data.
+stress:money	The deal values the startup at US$32.47 trillion, or roughly 3.98% above its last round.
+stress:money	The company raised $232.94 trillion in its latest funding round.
+stress:money	The company raised £397 in its latest funding round.
+stress:money	The fine of £328.46 is the largest the SEC has imposed this year.
+stress:money	Microsoft paid £60.2 trillion for the acquisition, its largest since LinkedIn.
+stress:money	Gas prices hit US$608 million a gallon in California on Tuesday.
+stress:money	Shares closed at €30.7, up from $108M a year earlier.
+stress:money	Nvidia's market cap topped €18.5 million, briefly passing Apple.
+stress:money	The deal values the startup at $612, or roughly 0.2% above its last round.
+stress:money	Analysts expect revenue of C$229.61 for the quarter, against $612 last year.
+stress:money	The company raised €511.34M in its latest funding round.
+stress:money	Analysts expect revenue of C$515 million for the quarter, against C$910 million last year.
+stress:money	The deal values the startup at C$910 million, or roughly 9.4% above its last round.
+stress:money	Analysts expect revenue of C$515 million for the quarter, against €802.58 billion last year.
+stress:money	The company raised €424M in its latest funding round.
+stress:money	Analysts expect revenue of €30.7 for the quarter, against $98.8 last year.
+stress:money	Microsoft paid $90.89 million for the acquisition, its largest since LinkedIn.
+stress:money	The fine of US$69.6B is the largest the SEC has imposed this year.
+stress:money	Gas prices hit $240 trillion a gallon in California on Tuesday.
+stress:money	Nvidia's market cap topped C$28.4bn, briefly passing Apple.
+stress:money	Nvidia's market cap topped €38.6 million, briefly passing Apple.
+stress:money	Gas prices hit €493M a gallon in California on Tuesday.
+stress:money	Nvidia's market cap topped $38.0K, briefly passing Apple.
+stress:money	Microsoft paid $108M for the acquisition, its largest since LinkedIn.
+stress:money	The deal values the startup at ¥949.91 million, or roughly +21% above its last round.
+stress:money	The deal values the startup at €493M, or roughly 52% above its last round.
+stress:money	The company raised $302 in its latest funding round.
+stress:money	The fine of $49.6T is the largest the SEC has imposed this year.
+stress:money	The deal values the startup at $612, or roughly +10% above its last round.
+stress:money	Nvidia's market cap topped C$125.05 trillion, briefly passing Apple.
+stress:money	Analysts expect revenue of £59.7 for the quarter, against C$19.4B last year.
+stress:money	Shares closed at US$608 million, up from €18.5 million a year earlier.
+stress:money	Gas prices hit €424M a gallon in California on Tuesday.
+stress:money	Nvidia's market cap topped £88.5, briefly passing Apple.
+stress:money	Microsoft paid €424M for the acquisition, its largest since LinkedIn.
+stress:money	The deal values the startup at C$515 million, or roughly 56% above its last round.
+stress:money	Gas prices hit C$515 million a gallon in California on Tuesday.
+stress:money	Gas prices hit $98.8 a gallon in California on Tuesday.
+stress:money	The deal values the startup at $339, or roughly 4.59% above its last round.
+stress:money	The deal values the startup at £328.46, or roughly -1.7% above its last round.
+stress:money	The deal values the startup at €493M, or roughly +3% above its last round.
+stress:money	Microsoft paid C$19.4B for the acquisition, its largest since LinkedIn.
+stress:money	Microsoft paid €18.5 million for the acquisition, its largest since LinkedIn.
+stress:money	The fine of US$225.79T is the largest the SEC has imposed this year.
+stress:money	The company raised $33.9 trillion in its latest funding round.
+stress:money	Microsoft paid $86.2 for the acquisition, its largest since LinkedIn.
+stress:money	Shares closed at $240 trillion, up from US$225.79T a year earlier.
+stress:money	Shares closed at €38.6 million, up from €18.5 million a year earlier.
+stress:money	The company raised €30.7 in its latest funding round.
+stress:money	The fine of $280M is the largest the SEC has imposed this year.
+stress:money	Microsoft paid €64.1B for the acquisition, its largest since LinkedIn.
+stress:money	Microsoft paid $228 million for the acquisition, its largest since LinkedIn.
+stress:money	The company raised US$25.9K in its latest funding round.
+stress:money	Analysts expect revenue of £33.1M for the quarter, against $339 last year.
+stress:money	The company raised $240 trillion in its latest funding round.
+stress:money	The deal values the startup at £60.2 trillion, or roughly +8% above its last round.
+stress:money	Shares closed at $612, up from US$69.6B a year earlier.
+stress:money	Gas prices hit ¥41.1B a gallon in California on Tuesday.
+stress:money	Gas prices hit $228 million a gallon in California on Tuesday.
+stress:money	Analysts expect revenue of €30.7 for the quarter, against $651K last year.
+stress:money	Nvidia's market cap topped €30.7, briefly passing Apple.
+stress:money	Gas prices hit €64.1B a gallon in California on Tuesday.
+stress:money	Analysts expect revenue of C$229.61 for the quarter, against €424M last year.
+stress:money	Shares closed at $22.9, up from $651K a year earlier.
+stress:money	The company raised US$225.79T in its latest funding round.
+stress:money	Nvidia's market cap topped $33.9 trillion, briefly passing Apple.
+stress:money	The fine of US$518 is the largest the SEC has imposed this year.
+stress:numbers	Inflation rose +18% in March, while unemployment held at 77%.
+stress:numbers	Inflation rose 3.76% in March, while unemployment held at 1.4%.
+stress:numbers	The 10-year Treasury yield climbed to 8.45%, its highest since 2010.
+stress:numbers	The 10-year Treasury yield climbed to 6.67%, its highest since 2019.
+stress:numbers	The S&P 500 gained 12% on the day, closing at 7,868,214.
+stress:numbers	The S&P 500 gained -2.4% on the day, closing at 8,861,346.
+stress:numbers	Turnout was -7.2%, with 1,917,647 ballots counted by 9 p.m..
+stress:numbers	Turnout was 14.1%, with 4,775,911 ballots counted by midnight.
+stress:numbers	The bill passed 66-43 in the Senate on 12/31.
+stress:numbers	The bill passed 47-41 in the Senate on 3/14.
+stress:numbers	Earnings per share came in at 5.17% versus the $6.89 consensus.
+stress:numbers	Earnings per share came in at 3.39% versus the $5.55 consensus.
+stress:numbers	About 31,992 people were evacuated, according to officials.
+stress:numbers	About 4,356,646 people were evacuated, according to officials.
+stress:numbers	The rate cut of 75 basis points was the first since 2000.
+stress:numbers	The rate cut of 25 basis points was the first since 2010.
+stress:numbers	The vote was 63 to 22, with 5 abstentions.
+stress:numbers	The vote was 46 to 21, with 94 abstentions.
+stress:numbers	GDP grew at an annualized 30% pace in Q1 1999.
+stress:numbers	GDP grew at an annualized 4.31% pace in Q1 2019.
+stress:numbers	The model has 405B parameters and a 8K context window.
+stress:numbers	The model has 70B parameters and a 32K context window.
+stress:numbers	Its ratio of 2.32 beat the 2.05 target set in FY25.
+stress:numbers	Its ratio of 1.35 beat the 2.14 target set in FY25.
+stress:numbers	Population: 7,428,973; area: 10,433 sq km; density: 40 per km².
+stress:numbers	Population: 7,532,662; area: 55,446 sq km; density: 7 per km².
+stress:numbers	Version 2.0 ships on March 3, replacing version 16.
+stress:numbers	Version 1.80 ships on July 4th, replacing version 1.9.
+stress:numbers	Pi is roughly 3.14159, and e is about 2.718.
+stress:numbers	The 14th amendment and the 12th district were both cited.
+stress:numbers	The 4th amendment and the 32nd district were both cited.
+stress:numbers	She finished 4th out of 8 runners in the 2008 race.
+stress:numbers	She finished 1st out of 22 runners in the 2026 race.
+stress:numbers	The 1920s saw a boom, but the 1930s brought a bust.
+stress:numbers	Q3 results beat estimates; H2 guidance was raised.
+stress:numbers	Q4 results beat estimates; H2 guidance was raised.
+stress:numbers	The odds were 3:1, and the ratio of men to women was 2:3.
+stress:numbers	Room 1204, Floor 12, Building 7B, Gate C23, Seat 14A.
+stress:numbers	The score was 24-17 at halftime and 31-28 at the end.
+stress:numbers	Temperatures hit 104°F (40°C) in Phoenix on 3/14.
+stress:numbers	Mortgage rates fell to 6.85% from 7.12% the week before.
+stress:numbers	The fund returned 1,234.5% since 2009, or 23.4% a year.
+stress:numbers	A 1/2 cup of flour, 3/4 tsp of salt and 2 1/2 cups of milk.
+stress:numbers	Chapter XIV, Section IV and Louis XVI are covered in Part II.
+stress:numbers	World War II ended in 1945; Henry VIII had six wives; Super Bowl LVIII was in Las Vegas.
+stress:numbers	The 2nd, 3rd, 21st, 22nd, 101st and 1000th entries were flagged.
+stress:numbers	Call 1-800-555-0199 or (212) 555-0147, ext. 42, before 9:30 a.m.
+stress:numbers	Her number is +44 20 7946 0958 and his is 555-123-4567.
+stress:numbers	Visit https://www.example.com/news?id=42 or email press@example.org for details.
+stress:numbers	The docs are at github.com/openai/whisper and docs.python.org/3/library.
+stress:numbers	Follow @elonmusk and @AOC, or search #Election2024 and #AI on X.
+stress:numbers	Download speeds hit 1.2 Gbps, about 150 MB/s, on the 5G network.
+stress:numbers	The car gets 35 mpg on the highway and tops out at 155 mph.
+stress:numbers	The trail is 12.5 km long, roughly 7.8 mi, with 800 m of climbing.
+stress:numbers	The phone has 8 GB of RAM, a 256GB SSD and a 4,500 mAh battery.
+stress:numbers	The chip runs at 3.2 GHz and draws 65 W at full load.
+stress:numbers	Mix 500 mg of the compound into 2 L of water at 25 °C.
+stress:numbers	The patient weighed 72 kg, stood 1.8 m tall and ran 5k in 22 min.
+stress:numbers	x + y = 10, x − y = 4, so x × y = 21 and x ÷ y = 2.33.
+stress:numbers	If a > b and b ≥ c, then a > c; also 2^10 = 1024 and √16 = 4.
+stress:numbers	The error was ±0.5%, and the result was ≈ 3.14.
+stress:numbers	The 3 a.m. call came at 03:15 UTC, or 11:15 p.m. EST.
+stress:numbers	Doors open at 7:30pm; the show starts at 8 PM sharp.
+stress:numbers	The meeting is 9:00–10:30 AM on Mon, 3/14, and again 4/1.
+stress:numbers	The filing is dated 2025-03-14 and the deadline is 12/31/2025.
+stress:numbers	On January 6, 2021, and on 9/11, the nation stopped.
+stress:numbers	Born 14 July 1789, died March 3rd, 1850.
+stress:numbers	The 1990s, the '80s and the 2020s were all mentioned.
+stress:numbers	In 2025, 1999, 1066, 2000, 2008, 1776, 1901 and 2010 the numbers differed.
+stress:numbers	The firm filed its 10-K and 10-Q, plus an 8-K and a 13F, with the SEC.
+stress:numbers	Form W-2, form 1099-NEC and Schedule K-1 are due by April 15.
+stress:numbers	The F-35, the Su-57 and the MiG-29 flew over the B-52.
+stress:numbers	Covid-19, H5N1 and SARS-CoV-2 were discussed alongside mpox.
+stress:numbers	Flight UA 2471 departs from JFK Terminal 4 at gate B12.
+stress:numbers	The S&P 500, the Nasdaq-100 and the FTSE 100 all fell.
+stress:numbers	Its P/E ratio is 31x, its EV/EBITDA is 18.5x and its P/B is 4.2.
+stress:numbers	The model hit 92.3% on MMLU and 87% on HumanEval at pass@1.
+stress:numbers	The iPhone 16 Pro Max, Galaxy S24 Ultra and Pixel 9 Pro XL were tested.
+stress:numbers	Windows 11 24H2, macOS 15.1 and iOS 18.2 shipped this fall.
+stress:numbers	PS5, Xbox Series X and Switch 2 sales were compared.
+stress:numbers	Python 3.12, Node.js 20 and Rust 1.80 were released.
+stress:numbers	The Boeing 737 MAX 9 and Airbus A321neo were grounded.
+stress:numbers	The B-2 bomber and the M1 Abrams tank were featured.
+stress:numbers	The ISBN 978-0-13-468599-1 and DOI 10.1000/xyz123 were cited.
+stress:abbrev	Dr. Lisa Cook met Mr. Powell and Mrs. Yellen on Main St. near the bank.
+stress:abbrev	Gen. Milley and Lt. Col. Vindman testified before Sen. Grassley and Rep. Jordan.
+stress:abbrev	The co-founder, Jr., and his father, Sr., both worked at Acme Corp. and Smith Bros. Inc.
+stress:abbrev	Prof. Chen published Fig. 3 and Table 2, i.e. the results, e.g. the margins, etc.
+stress:abbrev	The vs. matchup, Lakers vs. Celtics, drew 20 million viewers on Jan. 5.
+stress:abbrev	Mt. Everest and St. Louis are mentioned in vol. 2, ch. 7, p. 114 of the report.
+stress:abbrev	Approx. 40 pct. of respondents, incl. retirees, said no. 1 was cost.
+stress:abbrev	The U.S. and the U.K. signed a deal; the E.U. is reviewing it.
+stress:abbrev	Ft. Worth, Pt. Reyes and Ste. Genevieve are all approx. 3 hrs. away.
+stress:abbrev	Send it to Dept. of Commerce, Attn: Ms. Garcia, Ste. 400, Washington, D.C.
+stress:abbrev	Mon., Tues., Wed. and Thurs. are booked; Fri. is open until 5 p.m.
+stress:abbrev	He holds a Ph.D. from MIT, an M.B.A. from Wharton and a B.A. from Yale.
+stress:abbrev	The St. Patrick's Day parade on 5th Ave. starts at 11 a.m. sharp.
+stress:abbrev	Gov. Newsom, Sec. Blinken and Amb. Thomas-Greenfield spoke at the U.N.
+stress:abbrev	Capt. Sullenberger and Sgt. Pepper are not related, est. 1967.
+stress:homograph	I read the report yesterday, and today I will read it again.
+stress:homograph	The lead investigator found lead in the water supply.
+stress:homograph	They live near the stadium where the band plays live every Friday.
+stress:homograph	The wind was too strong to wind the sail back in.
+stress:homograph	She will present the award to the present champion as a present.
+stress:homograph	The bass player caught a striped bass on Sunday.
+stress:homograph	We must polish the Polish furniture before the guests arrive.
+stress:homograph	He wound the bandage around the wound carefully.
+stress:homograph	The dove dove into the bushes when the hawk appeared.
+stress:homograph	They refuse to move the refuse out of the alley.
+stress:homograph	The farm used to produce produce for the city markets.
+stress:homograph	Please close the door; the store is close to closing.
+stress:homograph	A minute later, the minute details of the deal leaked.
+stress:homograph	Officials object to the object found near the border.
+stress:homograph	The record shows she will record a new album this year.
+stress:homograph	The contract says the market will contract by 2 percent.
+stress:homograph	Investors desert the bond market like soldiers desert a post in the desert.
+stress:homograph	I tear up every time a tear runs down his face.
+stress:homograph	Does the herd of does graze near the river?
+stress:homograph	The project will project revenue into the next decade.
+stress:homograph	Upset fans could upset the incumbent in the primary.
+stress:homograph	The invalid argument rendered the invalid's claim invalid.
+stress:homograph	We conduct audits; their conduct was beyond reproach.
+stress:homograph	The rebels rebel against the new permit rules; the permit was denied.
+stress:homograph	Tiny sow bugs crawled where farmers sow their seed.
+stress:punct	Wait... what did he just say?
+stress:punct	The answer — and this matters — is no.
+stress:punct	The answer -- and this matters -- is no.
+stress:punct	Prices rose (sharply) in the spring [citation needed].
+stress:punct	“We will not back down,” she said. ‘Never.’
+stress:punct	"It's over," he said, "and it's not coming back."
+stress:punct	• First, cut costs. • Second, raise prices. • Third, wait.
+stress:punct	- Item one \n - Item two \n - Item three
+stress:punct	1. Open the app. 2. Tap Settings. 3. Choose Privacy.
+stress:punct	Step 1: plug it in; step 2: turn it on; step 3: profit!
+stress:punct	Note: this is a draft & subject to change; see p. 4.
+stress:punct	Rock & roll, R&D, AT&T, P&G, S&P and M&A all use an ampersand.
+stress:punct	The cost/benefit ratio and the and/or clause were debated.
+stress:punct	Read it here → then go back ← to the start.
+stress:punct	I ❤️ NY 🗽 and the 🚀 emoji means to the moon.
+stress:punct	The stock went 📈 then 📉 and investors were 😬.
+stress:punct	OMG, LOL, BRB and TBH are common in texts.
+stress:punct	© 2025 Apple Inc. All rights reserved. iPhone® is a trademark™.
+stress:punct	The so-called “Magnificent Seven” — Apple, Microsoft, Alphabet, Amazon, Nvidia, Meta and Tesla — led.
+stress:punct	Section § 230 and paragraph ¶ 4 were cited.
+stress:punct	Temperatures were in the mid-80s; it was a once-in-a-lifetime, state-of-the-art, well-known event.
+stress:punct	The year-over-year, quarter-on-quarter and month-to-date figures were up.
+stress:punct	Pre-tax, post-merger, non-GAAP, co-CEO and ex-president were all used.
+stress:punct	Mother-in-law, twenty-one, and a well-to-do, self-made, twenty-something founder.
+stress:punct	Don't, won't, can't, shouldn't've, y'all, it's, its, they're and o'clock.
+stress:punct	The company's, the companies', James's and Jesus' possessions were listed.
+stress:punct	Trump's tariffs, Biden's bill, Musk's X and Zuckerberg's Meta made news.
+stress:punct	AI's promise, the CEO's pay and NASA's budget were debated.
+stress:punct	She said — wait for it — “no.”
+stress:punct	Is it 50/50? Maybe 60/40. Either way, it's a toss-up.
+stress:punct	Hmm... uh, well, um, OK, I guess.
+stress:punct	THE MARKET CRASHED TODAY AS INVESTORS FLED TECH STOCKS.
+stress:punct	BREAKING: FED CUTS RATES BY 50 BASIS POINTS, POWELL SAYS MORE TO COME.
+stress:punct	NVIDIA, APPLE AND MICROSOFT LED THE NASDAQ HIGHER ON FRIDAY.
+stress:punct	WARNING: DO NOT OPERATE HEAVY MACHINERY WHILE TAKING THIS MEDICATION.
+stress:punct	The CEO said, in ALL CAPS, that the plan was GREAT and the critics were WRONG.
+stress:acronym_rule	The ISS crew returned after the IRS and the FDA cleared the paperwork.
+stress:acronym_rule	Her IRAs and the ISS's budget were both cited by the CEO and the CFO.
+stress:acronym_rule	An IPO at the NYSE and an ETF from the SEC filing drew the ICU staff.
+stress:acronym_rule	NASA and NATO met with OPEC while FEMA and OSHA reviewed the SPACs.
+stress:acronym_rule	The GOP and the DOJ asked the NIH and the NSA about the CIA report.
+stress:acronym_rule	ESPN, CNN, NPR and the BBC covered the NFL, NBA, MLB and UFC games.
+stress:acronym_rule	IBM, HP, AMD and TSMC sold USB and HDMI parts through an ISP and a VPN.
+stress:acronym_rule	A JPEG, a GIF and some JSON were sent ASAP to the DARPA team.
+stress:acronym_rule	MIT, UCLA and NYU signed an IOU with the LLC.
+stress:acronym_rule	The ICE agents and the DOGE staff met at HUD about GAAP rules.
+stress:acronym_rule	Please do NOT open the box, it is VERY fragile.
+stress:acronym_rule	THE NEW LAW HITS BUS FIRMS HARD.
+stress:acronym_rule	ISS CREW RETURNS HOME AFTER SIX MONTHS.
+stress:acronym_rule	FBI AND CIA PROBE WIDENS.
+stress:final_review	On Jan. 5, 2024, it closed.
+stress:final_review	On Nov. 6 the board met.
+stress:final_review	The deadline is Sept. 30 this year.
+stress:final_review	I met Jan. She said hi.
+stress:final_review	Critics gave it 10/10 and readers gave it 4/5.
+stress:final_review	His blood pressure was 120/80 mmHg at rest.
+stress:final_review	A 60/40 portfolio is common.
+stress:round1	The students took the SAT, ACT and AP exams in the same month.
+stress:round1	She was rushed to the ER, moved to the ICU and later treated at the VA.
+stress:round1	The pilot gave an ETA of noon, and the ERA debate resumed after lunch.
+stress:round1	Her IRAs, the ISS's budget, the CEO and the CFO were all on the agenda.
+stress:round1	The FBI, the DOJ and the DHS briefed the GOP leaders on Tuesday.
+stress:round1	The EPA and the FDA signed a pact with the USDA and the CDC.
+stress:round1	The SEC fined the LLC after the IPO filing missed the deadline.
+stress:round1	The IMF and the WTO met with the ECB and the BOJ in Geneva.
+stress:round1	The FAA grounded the jets while the NTSB checked the data.
+stress:round1	The NIH and the CDC said the HIV and RSV cases rose in the fall.
+stress:round1	An MRI, a CT scan and an EKG were ordered by the MD on call.
+stress:round1	The patient with ADHD and PTSD was seen by an RN and an EMT.
+stress:round1	The NBA, the NFL and the NHL each signed TV deals with ESPN and NBC.
+stress:round1	The MVP of the NCAA final was drafted by an MLB team.
+stress:round1	The PGA and the LPGA agreed to share a tour with the ATP.
+stress:round1	The CPU, GPU and SSD prices fell as the AI boom cooled.
+stress:round1	The API returned a JSON error, so the SDK logged a URL and a DNS fault.
+stress:round1	AWS and GCP both cut prices for their LLM and GPU rentals.
+stress:round1	The VPN blocked the SSH port, so the IT team opened a TCP route.
+stress:round1	The CPI and the PPI rose, and the PCE index followed in May.
+stress:round1	The FOMC held rates while the ECB and the BOE cut theirs.
+stress:round1	Her 401(k) and IRA both beat the S&P 500 and the DJIA this year.
+stress:round1	The ETF tracks the NYSE and the NASDAQ, with an APR near 5%.
+stress:round1	The ACLU and the AARP sued the HHS over the new rule.
+stress:round1	The DMV, the IRS and the SSA all closed early on Friday.
+stress:round1	The UN, the EU and the WHO issued a joint statement on AIDS and COVID.
+stress:round1	The NATO summit and the OPEC meeting fell on the same day.
+stress:round1	FEMA and NOAA warned of a hurricane while NASA delayed the launch.
+stress:round1	The UAW and GM reached a deal before the UAW deadline.
+stress:round1	The OLED and LCD panels were both made by LG in the UK.
+stress:round1	This is NOT okay.
+stress:round1	It was HUGE, and the crowd went WILD.
+stress:round1	That was a BIG deal for the whole town.
+stress:round1	I'm SORRY, but the answer is still NO.
+stress:round1	Did you see the NEWS today?
+stress:round1	Follow the MONEY and you will find the truth.
+stress:round1	We are DONE with this project.
+stress:round1	I am SO tired of the FAKE reviews.
+stress:round1	He was LATE again, and the boss was NOT happy.
+stress:round1	It is HARD to say, but I'm SURE it was a CRAZY week.
+stress:round1	I HATE the new layout, it looks AWFUL.
+stress:round1	The bus was BACK, but the NEXT one was EVEN later.
+stress:round1	We have to try AGAIN, and this time it WILL work.
+stress:round1	Why would you EVER do that?
+stress:round1	The BUS left without us, OKAY?
+stress:round1	BREAKING: SENATE PASSES NEW TAX LAW
+stress:round1	FDA APPROVES NEW DRUG FOR RARE DISEASE
+stress:round1	FED HOLDS RATES AS INFLATION COOLS
+stress:round1	STOCKS RALLY AFTER JOBS REPORT BEATS FORECASTS
+stress:round1	NASA DELAYS MOON LAUNCH AGAIN
+stress:round1	HOUSE VOTES TO AVERT SHUTDOWN
+stress:round1	WHO DECLARES END OF HEALTH EMERGENCY
+stress:round1	APPLE UNVEILS NEW IPHONE AT FALL EVENT
+stress:round1	JUDGE BLOCKS TRUMP ORDER ON TARIFFS
+stress:round1	STORM KNOCKS OUT POWER TO 2 MILLION HOMES
+stress:round1	The lake covers 59,000 km² of the basin.
+stress:round1	The farm is 1 km² in size, and the park is 1.5 km² larger.
+stress:round1	She ran 1 km on Monday and 2.5 km on Tuesday.
+stress:round1	The bag weighed 1.0 kg, and the box weighed 0.5 kg.
+stress:round1	The car hit 65 mph before it slowed to 1 mph near the gate.
+stress:round1	It was 1 °C at dawn and 21 °C by noon.
+stress:round1	The roof is 1 m² of glass and 12.5 m² of steel.
+stress:round1	Add 1 tsp of salt and 1.5 tbsp of sugar.
+stress:round1	The cable was 1 ft long, but the next one was 3.5 ft long.
+stress:round1	Pour in ½ cup of milk and 1½ L of water.
+stress:round1	The drive is 1 TB, and the backup holds 2.5 TB.
+stress:round1	The chip runs at 1 GHz idle and 3.2 GHz under load.
+stress:round1	The well is 1 mi away and the river is 0.75 mi past it.
+stress:round1	The plot is 1 ha, and the reserve is 40,000 ha.
+stress:round1	They used 1 kWh in an hour and 0 kWh overnight.
+stress:round1	A 60/40 portfolio is the classic mix.
+stress:round1	The vote split 70/30 in favour of the plan.
+stress:round1	Most experts call it a 50/50 race.
+stress:round1	The deal is an 80/20 split between the two firms.
+stress:round1	Critics rated it 9/10, and his blood pressure was 120/80 mmHg.
+stress:round1	She scored 4/5 on the quiz and 3/4 on the lab.
+stress:round1	Shares of $AAPL rose 2% while $MSFT slipped.
+stress:round1	NASDAQ: TSLA fell after the delivery report.
+stress:round1	NYSE: F and NYSE: GM both gained on the news.
+stress:round1	Traders sold $NVDA and bought $AMD at the open.
+stress:round1	The $SPY fund and the $QQQ fund both closed higher.
+stress:round1	Buy $META, hold $GOOGL, and sell $AMZN, the note said.
+stress:round1	TSX: SHOP rose 5% in Toronto on Friday.
+stress:round1	The fund added AAPL, NVDA and TSLA to its top ten.
+stress:round1	The price of $BTC passed $70,000 while ETH lagged.
+stress:round1	She bought 0.5 BTC and 3 ETH last spring.
+stress:round1	The $ETH and $SOL tokens both fell 4% overnight.
+stress:round1	Bitcoin (BTC) and Ether (ETH) led the crypto rally.
+stress:round1	The USDC and USDT stablecoins held their peg.
+stress:round1	He sold 1 BTC at the top and kept 2.5 ETH.
+stress:round1	Update to iOS 17.2 to fix the bug.
+stress:round1	The script needs Python 3.12 or later.
+stress:round1	The phone ships with Android 14 and Chrome 120.
+stress:round1	Windows 11 23H2 broke the driver on old laptops.
+stress:round1	Node 20.11 and npm 10.2 are the minimum versions.
+stress:round1	macOS 14.3 adds a new widget and fixes Wi-Fi.
+stress:round1	Under § 230, platforms are not liable for user posts.
+stress:round1	Art. 5 of the treaty covers collective defence.
+stress:round1	See 17 U.S.C. § 107 for the fair use rule.
+stress:round1	The court cited §§ 1983 and 1988 in its ruling.
+stress:round1	Section 8 of the act and Art. 21 of the charter both apply.
+stress:round1	The case turned on Rule 12(b)(6) and § 1331.
+stress:round1	The Chiefs beat the Bills 27-24 in overtime.
+stress:round1	Final score: Lakers 112, Celtics 108.
+stress:round1	Arsenal won 2-1 at home and drew 0-0 away.
+stress:round1	The Yankees lost 5-3 after leading 3-1.
+stress:round1	She won the set 6-4 and the match 6-4, 3-6, 7-5.
+stress:round1	The team went 10-2 and finished 8-4 in the league.
+stress:round1	It was 98.6 °F at noon and 72°F by dusk.
+stress:round1	Water boils at 100 °C and freezes at 0 °C.
+stress:round1	The low was -5 °C, and the high was 1 °C.
+stress:round1	The oven was set to 350°F for 45 minutes.
+stress:round1	Temperatures hit 40°C in Madrid on Sunday.
+stress:round1	The forecast calls for 1°F of warming per decade.
+stress:round1	The meeting starts at 3 p.m. ET on Monday.
+stress:round1	The launch is set for 9:30 a.m. PT, or 12:30 p.m. ET.
+stress:round1	The call is at 10 a.m. CST and lasts an hour.
+stress:round1	Markets open at 9:30 a.m. EST and close at 4 p.m. EST.
+stress:round1	The show airs at 8 p.m. ET / 7 p.m. CT.
+stress:round1	The update rolls out at 2 a.m. UTC on Friday.
+stress:round1	The flight lands at 6:45 p.m. GMT in London.
+stress:round1	The webinar begins at noon PT and ends at 1 p.m. PT.

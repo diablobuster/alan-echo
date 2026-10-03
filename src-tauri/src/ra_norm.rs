@@ -233,6 +233,9 @@ mod tests {
         ] {
             assert_eq!(spans(&["see", w, "here"]), vec![span(1, 2, want)], "{w}");
         }
+        // glued math reads like the spaced form (controller ruling: times, not by)
+        assert_eq!(spans(&["3×4"]), vec![span(0, 1, "three times four")]);
+        assert_eq!(spans(&["6÷2"]), vec![span(0, 1, "six divided by two")]);
         assert_eq!(spans(&["-5°C"]), vec![span(0, 1, "minus five degrees Celsius")]);
         assert_eq!(spans(&["under", "§230."]), vec![span(1, 2, "section two hundred thirty.")]);
     }

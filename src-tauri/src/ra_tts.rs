@@ -561,7 +561,7 @@ impl Engine {
     fn synth_inner(l: &mut Loaded, words: &[&str], rate: f32, map_joined: bool) -> Result<ChunkAudio, String> {
         let device = l.device;
         let rate = effective_rate(rate);
-        let empty = || ChunkAudio { pcm: Vec::new(), words: Vec::new(), device, covered: words.len() };
+        let empty = || empty_audio(device, words.len());
         let p = prepare_chunk(&l.g2p, &l.names, words)?;
         let (ids, spans, covered) = build_ids_with(&p.ph, &l.vocab, words.len(), map_joined);
         let covered = cover_spans(covered, &p.inner).min(words.len());
@@ -614,6 +614,13 @@ fn build_g2p() -> (G2P, Arc<Names>) {
     (g2p, names)
 }
 
+/// No audio for a chunk (nothing speakable, e.g. only emoji): every word still gets
+/// one zero-length timing entry, so the highlight passes over it.
+fn empty_audio(device: Device, n_words: usize) -> ChunkAudio {
+    let words = (0..n_words).map(|word| WordTime { word, start: 0, end: 0 }).collect();
+    ChunkAudio { pcm: Vec::new(), words, device, covered: n_words }
+}
+
 /// One chunk through G2P, as the model is fed it.
 struct Prepared {
     /// `g2p_words` output, one entry per word ("" for a word inside a span).
@@ -629,6 +636,9 @@ struct Prepared {
     /// The words inside multi-word spans (`$5 billion` -> the "billion" index). They
     /// have no audio: their span is said on its first word.
     inner: Vec<Range<usize>>,
+    /// Every applied span: (start, end, spoken text).
+    #[cfg_attr(not(test), allow(dead_code))] // read by the glitch hunt
+    spoken: Vec<(usize, usize, String)>,
 }
 
 /// Runs a chunk through the pre-pass, misaki, alignment and the homograph table.
@@ -644,15 +654,18 @@ fn prepare_chunk(g: &G2P, names: &Names, words: &[&str]) -> Result<Prepared, Str
     } else {
         run_g2p(g, &text)?
     };
-    apply_homographs(&mut tokens);
-    let toks: Vec<(&str, Option<&str>, bool)> =
-        tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
-    let tok_text: Vec<&str> = toks.iter().map(|t| t.0).collect();
+    let tok_text: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
     // `plain` keeps the word count and order of `words`, so indices line up
     let owner = ra_timing::align(&plain, &tok_text);
+    // a span or hand-list override already says the word: no homograph swap there
+    let overridden: Vec<bool> =
+        owner.iter().map(|o| o.and_then(|w| fed.words.get(w)).is_some_and(|f| f.contains("](/"))).collect();
+    apply_homographs(&mut tokens, &overridden);
+    let toks: Vec<(&str, Option<&str>, bool)> =
+        tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
     let ph = token_phonemes(&toks, &owner);
     drop(toks);
-    Ok(Prepared { fed: fed.words.into_iter().map(Cow::into_owned).collect(), tokens, owner, ph, inner: fed.inner })
+    Ok(Prepared { fed: fed.words.into_iter().map(Cow::into_owned).collect(), tokens, owner, ph, inner: fed.inner, spoken: fed.spoken })
 }
 
 fn run_g2p(g: &G2P, text: &str) -> Result<Vec<MToken>, String> {
@@ -661,8 +674,12 @@ fn run_g2p(g: &G2P, text: &str) -> Result<Vec<MToken>, String> {
 
 /// Homographs (spec §2): after misaki has tagged the chunk, a table word gets the
 /// reading its tag and one word of context on each side pick (`I have read it`).
-fn apply_homographs(toks: &mut [MToken]) {
+/// Tokens marked in `skip` (their word is an override) keep their phonemes.
+fn apply_homographs(toks: &mut [MToken], skip: &[bool]) {
     for i in 0..toks.len() {
+        if skip.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         let pick = {
             let Some(t) = toks.get(i) else { break };
             // table words are 3-8 ASCII letters: skip everything else without allocating
@@ -727,6 +744,7 @@ fn g2p_words<'a>(g: &G2P, names: &Names, words: &[&'a str]) -> Vec<Cow<'a, str>>
 struct Fed<'a> {
     words: Vec<Cow<'a, str>>,
     inner: Vec<Range<usize>>,
+    spoken: Vec<(usize, usize, String)>,
 }
 
 /// G2P input for a chunk, one entry per word (same count and order):
@@ -759,6 +777,7 @@ fn g2p_chunk<'a>(g: &G2P, names: &Names, words: &[&'a str], depth: u8) -> Fed<'a
     let prepared: Vec<Cow<'a, str>> = words.iter().map(|w| ra_norm::prepare(w)).collect();
     let mut out: Vec<Option<Cow<'a, str>>> = vec![None; words.len()];
     let mut inner = Vec::new();
+    let mut spoken = Vec::new();
     if depth == 0 {
         let refs: Vec<&str> = prepared.iter().map(|c| c.as_ref()).collect();
         let spans = ra_norm::spans(&refs);
@@ -779,6 +798,7 @@ fn g2p_chunk<'a>(g: &G2P, names: &Names, words: &[&'a str], depth: u8) -> Fed<'a
             if sp.end - sp.start > 1 {
                 inner.push(sp.start + 1..sp.end);
             }
+            spoken.push((sp.start, sp.end, sp.spoken.clone()));
         }
     }
     let words = out
@@ -790,7 +810,7 @@ fn g2p_chunk<'a>(g: &G2P, names: &Names, words: &[&'a str], depth: u8) -> Fed<'a
             (None, Cow::Owned(s)) => Cow::Owned(word_path(g, names, &s).into_owned()),
         })
         .collect();
-    Fed { words, inner }
+    Fed { words, inner, spoken }
 }
 
 /// The pre-existing per-word path: hand override, caps rule, page brackets.
@@ -1154,6 +1174,27 @@ mod tests {
         assert_eq!((t[1].start, t[1].end), (t[0].end, t[0].end));
         assert_eq!((t[3].start, t[3].end), (t[2].end, t[2].end));
         assert!(chunk_word_times(&dur, vec![], 100, 1.0, 0).is_empty());
+    }
+
+    #[test]
+    fn homographs_never_replace_override_phonemes() {
+        let (_, mut toks) = test_g2p().g2p("I have read it").unwrap();
+        let before: Vec<Option<String>> = toks.iter().map(|t| t.phonemes.clone()).collect();
+        apply_homographs(&mut toks, &[true, true, true, true]);
+        assert_eq!(toks.iter().map(|t| t.phonemes.clone()).collect::<Vec<_>>(), before, "overridden tokens kept");
+        apply_homographs(&mut toks, &[false, false, false, false]);
+        assert_eq!(toks[2].phonemes.as_deref(), Some("ɹˈɛd"));
+    }
+
+    #[test]
+    fn unspeakable_chunk_still_times_every_word() {
+        let a = empty_audio(Device::Cpu, 3);
+        assert_eq!(a.covered, 3);
+        assert_eq!(a.words.iter().map(|w| (w.word, w.start, w.end)).collect::<Vec<_>>(), vec![(0, 0, 0), (1, 0, 0), (2, 0, 0)]);
+        // reachable: emoji only give no model ids
+        let p = prepare_chunk(test_g2p(), test_names(), &["😀", "🙂"]).expect("g2p");
+        let v: HashMap<char, i64> = [('a', 1), (' ', 16)].into_iter().collect();
+        assert!(build_ids(&p.ph, &v, 2).0.iter().all(|&i| i == 16) || build_ids(&p.ph, &v, 2).0.is_empty());
     }
 
     #[test]

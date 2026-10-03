@@ -8,7 +8,7 @@ so a letter-by-letter reading there is intended. Phoneme checks ignore the lengt
 mark (misaki-rs writes "dˈɑːlɚz" for "dollars")."""
 import csv, json, os, re, sys, unicodedata
 from collections import Counter, defaultdict
-from categorize import category, EXPECTED_SPELLED, WORD_ACRONYMS, ROMAN
+from categorize import category, EXPECTED_SPELLED, WORD_ACRONYMS, ROMAN, UNITS, ABBREV
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STRESS = "ˈˌ"
@@ -27,6 +27,37 @@ def looks_spelled(text, ph):
     st = sum(c in STRESS for c in ph)
     return st >= n
 
+# Plural count nouns: "1500 workers" is a cardinal, so a cardinal reading is right.
+COUNT_NOUNS = set("""acres adults agents airports apps articles banks barrels beds birds boats books
+buildings businesses cars cases cells centers children cities citizens civilians companies copies countries
+customers days deaths delegates devices dogs dollars doctors drivers employees engineers euros events
+families farms feet files firms games guns hectares homes hospitals hours households houses images islands
+items jobs kids kilometers kilometres lines liters litres machines members men meters metres miles minutes
+missiles months nurses officers pages participants patients people persons pieces planes players points
+police pounds prisoners products projects records refugees residents rooms rows samples schools seats
+seconds servers shares ships sites soldiers species staff stations stores students subscribers tanks
+teachers teams tests times tonnes tons towns troops trucks units users vehicles videos villages visitors
+votes voters websites weeks women words workers yards years""".split())
+
+def span_spelled(core, cat, spoken, phs):
+    """Letter-reading glitches on a span's first word, judged on what the span says:
+    the spoken text spells exactly the uppercase single letters it lists ("U S"), so
+    a stress mark per letter there is intended. More stress marks than those letters
+    plus two per other word means some word came out letter by letter."""
+    words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", spoken)
+    letters = [x for x in words if len(x) == 1 and x.isupper()]
+    others = [x for x in words if not (len(x) == 1 and x.isupper())]
+    flags = []
+    plain = core.replace(".", "")
+    if cat == "roman" and len(letters) >= 2 and "".join(letters) == plain:
+        flags.append("ROMAN_SPELLED")
+    if plain.upper() in WORD_ACRONYMS and "".join(letters) == plain.upper():
+        flags.append("WORD_ACRONYM_SPELLED")
+    head = phs.split("|")[0].split("=", 1)[-1] if phs else ""
+    if sum(c in STRESS for c in head) > len(letters) + 2 * len(others) + 1:
+        flags.append("SPELLED")
+    return flags
+
 def main():
     rows = [json.loads(l) for l in open(os.path.join(HERE, "static.jsonl"), encoding="utf-8")]
     out = []
@@ -40,8 +71,11 @@ def main():
         words = r["words"]
         toks = r["toks"]
         n = len(words)
-        total_words += n
-        sent_words[r["id"]] += n
+        # words inside a span are spoken by the span's first word: not counted twice
+        n_spoken = sum(1 for _, f in words if f != "")
+        total_words += n_spoken
+        sent_words[r["id"]] += n_spoken
+        spans = {a: (b, sp) for a, b, sp in r.get("spans", [])}
         # assign tokens to words: owned tokens -> owner; unowned -> leading symbol of next word or trailing of prev
         by_word = defaultdict(list)
         last_owner = -1
@@ -56,10 +90,25 @@ def main():
                 elif last_owner >= 0:
                     by_word[last_owner].append((k, t, ph, fb, False))
         ctx_all = " ".join(w for w, _ in words)
+        # coverage: an inner word of a multi-word span that is a plain word ("billion",
+        # "War", "Louis") must be in the span's spoken text. Inner words the span
+        # rewrites on purpose are not checked: units and abbreviations ("km" ->
+        # kilometers), ordinal suffixes ("4th"), and letters it spells ("PM" -> "P M").
+        for a, (b, sp) in spans.items():
+            said = set(re.findall(r"[a-z]+", sp.lower()))
+            spelled = "".join(x for x in sp.split() if len(x) == 1 and x.isupper()).lower()
+            for j in range(a + 1, min(b, n)):
+                w = words[j][0]
+                c = re.sub(r"^\W+|\W+$", "", w)
+                plain_word = re.fullmatch(r"[A-Za-z][a-z]{2,}", c) and c.lower() not in UNITS and c.lower() not in ABBREV
+                if plain_word and c.lower() not in said and c.lower() not in spelled:
+                    out.append(dict(id=r["id"], src=r["src"], word=w, context=" ".join(x for x, _ in words)[:160], fed="",
+                                    tokens="", phonemes="", flag="SPAN_COVERAGE", category=category(w), detail=sp))
         for i, (w, fed) in enumerate(words):
             if fed == "":
                 continue  # inside a pre-pass span: spoken by the span's first word
-            span_head = "](/" in fed  # a span's first word or a hand-list override
+            # a span's first word says the span's spoken text (`spoken`), not its own letters
+            spoken_txt = spans[i][1] if i in spans else None
             tl = sorted(by_word.get(i, []))
             phs = "|".join(f"{t}={ph}" for _, t, ph, _, _ in tl)
             phs_n = phs.replace("ː", "")
@@ -68,12 +117,16 @@ def main():
             core = re.sub(r"^\W+|\W+$", "", w)
             spoken = [(t, ph) for _, t, ph, _, own in tl if own]
             # (a) letter-by-letter
+            if spoken_txt is not None:
+                flags += span_spelled(core, cat, spoken_txt, phs)
             for _, t, ph, fb, own in tl:
+                if spoken_txt is not None:
+                    break  # checked above against what the span says
                 if own and t.isalpha() and (fb == "spell" or looks_spelled(t, ph)) and len(t) >= 2:
-                    if t.isupper() or span_head:
-                        if ROMAN.match(t) and cat == "roman" and not span_head:
+                    if t.isupper():
+                        if ROMAN.match(t) and cat == "roman":
                             flags.append("ROMAN_SPELLED")
-                        elif t in WORD_ACRONYMS and not span_head:
+                        elif t in WORD_ACRONYMS:
                             flags.append("WORD_ACRONYM_SPELLED")
                         else:
                             flags.append("INFO_INITIALISM_SPELLED")  # usually correct (FBI, EMI): not a glitch
@@ -117,7 +170,7 @@ def main():
             # hundred" are the right year forms; before a count noun ("1500 workers") a
             # cardinal is right.
             nxt = re.sub(r"\W+$", "", words[i + 1][0]) if i + 1 < n and not re.search(r"[,;:.!?]$", w) else ""
-            count_noun = bool(re.fullmatch(r"[a-z]+s", nxt))
+            count_noun = nxt.lower() in COUNT_NOUNS
             for _, t, ph, fb, own in tl:
                 if own and re.fullmatch(r"\d{4}", t) and 1100 <= int(t) <= 2099 and not count_noun and "," not in core \
                         and cat in ("year", "decade", "date", "other", "number"):
@@ -127,13 +180,19 @@ def main():
                     if (("θˈWz" in ph or "θWz" in ph) and not thousand_ok) or ("hˈʌndɹəd" in ph and not hundred_ok):
                         flags.append("YEAR_AS_CARDINAL")
                         break
-            money_sub = any(x in phs_n for x in ("sˈɛnt", "pˈɛns", "pˈɛni"))  # "$7.99": dollars and cents
+            # "$7.99": dollars and cents (only for money)
+            # ("$1.00" -> "one dollar": zero cents are not said)
+            money_sub = cat == "currency" and (any(x in phs_n for x in ("sˈɛnt", "pˈɛns", "pˈɛni"))
+                                               or bool(re.search(r"\d\.00?(?!\d)", w)))
             if re.search(r"\d\.\d", w) and "pˈYnt" not in phs_n and "pYnt" not in phs_n and not money_sub:
                 flags.append("DECIMAL_NO_POINT")
             if re.search(r"\d", w) and re.search(r"[A-Za-z]", w):
-                # a span's first word carries the whole reading the normaliser chose
-                if not span_head and any(own and t.isalpha() and ph.strip() and (looks_spelled(t, ph) or len(t) == 1)
-                                         for _, t, ph, _, own in tl):
+                if spoken_txt is not None:
+                    # letter names the span says, minus the "U S" of "US dollars"
+                    said = re.sub(r"\bU S (dollars?|cents?)\b", "", spoken_txt)
+                    if any(len(x) == 1 and x.isalpha() for x in said.split()):
+                        flags.append("ALNUM_LETTERS")
+                elif any(own and t.isalpha() and ph.strip() and (looks_spelled(t, ph) or len(t) == 1) for _, t, ph, _, own in tl):
                     flags.append("ALNUM_LETTERS")
             # the ordinal suffix said on its own ("twenty one" + "st")
             if re.fullmatch(r"\W*\d+(st|nd|rd|th)\W*", w) and any(

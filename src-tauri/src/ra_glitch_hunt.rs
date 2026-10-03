@@ -65,7 +65,8 @@ fn read_tsv(var: &str) -> Vec<(String, String, String)> {
 /// One JSON line per chunk: the words (source, fed), every misaki token
 /// [text, phonemes as the model gets them (Kokoro spelling, space runs collapsed),
 /// owner word or -1, fallback branch, tag],
-/// and the phoneme string the model is fed. A word inside a span has fed "".
+/// every applied span [start, end, spoken], and the phoneme string the model is
+/// fed. A word inside a span has fed "".
 #[test]
 #[ignore]
 fn glitch_static() {
@@ -110,14 +111,16 @@ fn glitch_static() {
                 })
                 .collect();
             let wj: Vec<String> = ws.iter().zip(&p.fed).map(|(w, f)| format!("[{},{}]", esc(w), esc(f))).collect();
+            let sj: Vec<String> = p.spoken.iter().map(|(a, b, sp)| format!("[{a},{b},{}]", esc(sp))).collect();
             writeln!(
                 out,
-                "{{\"id\":{},\"src\":{},\"chunk\":{},\"words\":[{}],\"toks\":[{}],\"fed\":{}}}",
+                "{{\"id\":{},\"src\":{},\"chunk\":{},\"words\":[{}],\"toks\":[{}],\"spans\":[{}],\"fed\":{}}}",
                 esc(id),
                 esc(src),
                 ci,
                 wj.join(","),
                 tj.join(","),
+                sj.join(","),
                 esc(&fed_join)
             )
             .unwrap();

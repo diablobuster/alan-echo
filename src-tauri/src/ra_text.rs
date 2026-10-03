@@ -126,14 +126,17 @@ fn joins_glued(prev: &str, t: &str) -> bool {
     let (Some(a), Some(b)) = (back.next(), t.chars().next()) else { return false };
     let digit_before = back.next().is_some_and(|c| c.is_ascii_digit());
     if b.is_ascii_digit() {
-        // 3|2, 3.|2, 1,|000, 7:|30, 3/|14, $|3
-        return a.is_ascii_digit() || (matches!(a, '.' | ',' | ':' | '/') && digit_before) || is_prefix_char(a);
+        // 3.|2, 1,|000, 7:|30, 3/|14, $|3, $3|2; never two all-digit tokens (a line end)
+        let digits_only = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+        return (a.is_ascii_digit() && !(digits_only(prev) && digits_only(t)))
+            || (matches!(a, '.' | ',' | ':' | '/') && digit_before)
+            || is_prefix_char(a);
     }
     if !b.is_alphabetic() {
         return false;
     }
     if a.is_ascii_digit() {
-        return NUM_SUFFIX.contains(&t);
+        return NUM_SUFFIX.contains(&t) && suffix_fits(prev, t);
     }
     if a != '.' || !t.chars().all(char::is_alphabetic) {
         return false;
@@ -144,7 +147,22 @@ fn joins_glued(prev: &str, t: &str) -> bool {
     let (rn, tn) = (run.chars().count(), t.chars().count());
     let run_letters = run.chars().all(char::is_alphabetic);
     let caps_led = run.chars().next().is_some_and(char::is_uppercase);
-    run_letters && tn <= 2 && (rn == 1 || (rn == 2 && tn == 1 && caps_led))
+    // "U.S." + "It", "Plan B." + "We": a capitalised word after a sentence end
+    let word_like = tn == 2 && t.chars().next().is_some_and(char::is_uppercase) && t.chars().nth(1).is_some_and(char::is_lowercase);
+    run_letters && tn <= 2 && !word_like && (rn == 1 || (rn == 2 && tn == 1 && caps_led))
+}
+
+/// Suffixes that are also words (`a`, `am`, `s`, `m`, ...) merge only into a known
+/// pattern, so `2019` + `a` at a PDF line end stays two words: a clock time
+/// (`7am`, `7:30pm`), a decade (`1990s`, `90s`), or money (`$5m`).
+fn suffix_fits(prev: &str, t: &str) -> bool {
+    let digits: String = prev.chars().rev().take_while(char::is_ascii_digit).collect();
+    match t {
+        "a" | "p" | "am" | "pm" | "AM" | "PM" => prev.contains(':') || digits.len() <= 2,
+        "s" => (digits.len() == 4 || digits.len() == 2) && digits.starts_with('0') && !prev.contains(['.', ',', '$']),
+        "m" | "M" | "k" | "K" | "b" | "B" | "bn" | "tn" | "T" => prev.starts_with(is_prefix_char) || t.len() > 1 || t.chars().all(char::is_uppercase),
+        _ => true,
+    }
 }
 
 const ABBREV: &[&str] = &[
@@ -363,6 +381,24 @@ mod tests {
     }
 
     #[test]
+    fn number_suffixes_merge_only_in_known_patterns() {
+        let t = |v: &[&str]| texts(&normalize(&raw(v))).into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(t(&["at ", "7:30", "am "]), vec!["at", "7:30am"]);
+        assert_eq!(t(&["at ", "7", "pm "]), vec!["at", "7pm"]);
+        assert_eq!(t(&["the ", "1990", "s "]), vec!["the", "1990s"]);
+        assert_eq!(t(&["the ", "90", "s "]), vec!["the", "90s"]);
+        assert_eq!(t(&["raised ", "$5", "m "]), vec!["raised", "$5m"]);
+        // a PDF line end without a space: not one word
+        assert_eq!(t(&["in ", "2019", "a "]), vec!["in", "2019", "a"]);
+        assert_eq!(t(&["in ", "2019", "am "]), vec!["in", "2019", "am"]);
+        assert_eq!(t(&["in ", "2019", "s "]), vec!["in", "2019", "s"]);
+        assert_eq!(t(&["ran ", "5", "m "]), vec!["ran", "5", "m"]);
+        // two all-digit tokens never fuse
+        assert_eq!(t(&["page ", "3", "2 "]), vec!["page", "3", "2"]);
+        assert_eq!(t(&["about ", "1", ",", "000 "]), vec!["about", "1,000"]);
+    }
+
+    #[test]
     fn spaced_tokens_never_merge() {
         assert_eq!(texts(&normalize(&raw(&["cost ", "$ ", "3 ", "2B ", "in"]))), vec!["cost", "$", "3", "2B", "in"]);
         assert_eq!(texts(&normalize(&raw(&["7 ", ": ", "30"]))), vec!["7:", "30"]);
@@ -377,6 +413,9 @@ mod tests {
         assert_eq!(texts(&normalize(&raw(&["in ", "2019", "the "]))), vec!["in", "2019", "the"]);
         assert_eq!(texts(&normalize(&raw(&["Hello", "world"]))), vec!["Hello", "world"]);
         assert_eq!(texts(&normalize(&raw(&["U.S.", "The "]))), vec!["U.S.", "The"]);
+        // PDF line ends after a sentence-final initialism or one-letter word
+        assert_eq!(texts(&normalize(&raw(&["the ", "U.S.", "It "]))), vec!["the", "U.S.", "It"]);
+        assert_eq!(texts(&normalize(&raw(&["Plan ", "B.", "We "]))), vec!["Plan", "B.", "We"]);
         // a paragraph break between glued tokens always separates them
         assert_eq!(texts(&normalize(&raw(&["5", "\r", "3 "]))), vec!["5", "3"]);
     }

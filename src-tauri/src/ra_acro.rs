@@ -46,6 +46,9 @@ pub const NO_DOM: &str = "Acrobat DOM unavailable";
 const FIRST_BATCH: usize = 60;
 /// Tokens per `more` call (same as the UIA source).
 const MORE_BATCH: usize = 400;
+/// One `more` call returns after about this long (a short batch), so the worker can
+/// draw the highlight between slices: 400 words cost 0.5-1.6 s in Acrobat.
+const MORE_SLICE: Duration = Duration::from_millis(100);
 /// Words walked per read, in total (seek + reads).
 const MAX_WORDS: usize = 20_000;
 /// Time budget for one `pick` / `more` call (the caller waits 5 s).
@@ -375,6 +378,23 @@ impl<N: Node + Clone> Walk<N> {
             }
         }
         out
+    }
+
+    /// `more`'s batch (pure over the node trait): ≤ `MORE_BATCH` tokens, returning once
+    /// `slice_end` passes (after at least one word) so the single worker thread can
+    /// serve the Rects/Hover requests queued meanwhile. A short batch is not the end;
+    /// `Ok(empty)` is (end of document or word cap). `Err` = `hard_end` passed before
+    /// any word.
+    pub(crate) fn more_sliced(&mut self, slice_end: Instant, hard_end: Instant) -> Result<Vec<String>, String> {
+        // the first word may take up to the hard budget (Acrobat stalls now and then)
+        let mut out = self.take(1, hard_end);
+        if !out.is_empty() {
+            out.extend(self.take(MORE_BATCH.saturating_sub(1), slice_end));
+        }
+        if out.is_empty() && !self.ended {
+            return Err("Acrobat read timed out".into());
+        }
+        Ok(out)
     }
 
     pub(crate) fn mark(&self) -> WalkMark<N> {
@@ -727,14 +747,12 @@ impl AcroRead {
         self.w.rollback(m.0);
     }
 
-    /// Next ≤ 400 tokens; source indices continue. `Ok(empty)` = end of the document
-    /// (or the 20 000-word cap); `Err` = the time budget ran out before any word.
+    /// Next ≤ 400 tokens, or what ~100 ms of walking found (`Walk::more_sliced`); source
+    /// indices continue. `Ok(empty)` = end of the document (or the 20 000-word cap);
+    /// a short batch is not the end; `Err` = 3 s passed before any word.
     pub fn more(&mut self) -> Result<Vec<String>, String> {
-        let out = self.w.take(MORE_BATCH, Instant::now() + CALL_BUDGET);
-        if out.is_empty() && !self.w.ended {
-            return Err("Acrobat read timed out".into());
-        }
-        Ok(out)
+        let now = Instant::now();
+        self.w.more_sliced(now + MORE_SLICE, now + CALL_BUDGET)
     }
 
     /// Fresh boxes of the words at source indices `src`. `Some(empty)` = a word is off
@@ -1053,6 +1071,33 @@ mod tests {
         assert_eq!(rd.nodes.len(), 2, "source indices are back where the caller is");
         assert_eq!(rd.take(10, far()), ["c ", "d ", "e"]);
         assert_eq!(rd.nodes.len(), 5);
+    }
+
+    #[test]
+    fn more_is_time_sliced_and_only_empty_is_the_end() {
+        let past = Instant::now();
+        let mut rd = Walk::new(words(tree(), 100), Vec::new());
+        // the slice is already over: one word (progress), then return
+        assert_eq!(rd.more_sliced(past, far()), Ok(vec!["a ".to_string()]));
+        assert!(!rd.ended, "a short batch is not the end");
+        // a slice that is over, rolled back like an undelivered reply
+        let m = rd.mark();
+        assert_eq!(rd.more_sliced(past, far()), Ok(vec!["b ".to_string()]));
+        rd.rollback(m);
+        assert_eq!(rd.nodes.len(), 1);
+        // a long slice: the rest (capped at MORE_BATCH)
+        assert_eq!(rd.more_sliced(far(), far()), Ok(vec!["b ".to_string(), "c ".into(), "d ".into(), "e".into()]));
+        assert_eq!(rd.more_sliced(past, far()), Ok(vec![]), "only empty is the end");
+        assert!(rd.ended);
+        // the hard budget ran out before any word: an error, not the end
+        let mut rd = Walk::new(words(tree(), 100), Vec::new());
+        assert!(rd.more_sliced(past, past).is_err());
+        assert!(!rd.ended);
+        assert_eq!(rd.nodes.len(), 0);
+        // a big page: one slice never returns more than MORE_BATCH
+        let mut rd = Walk::new(words(big_page(MORE_BATCH + 50), MAX_WORDS), Vec::new());
+        assert_eq!(rd.more_sliced(far(), far()).map(|v| v.len()), Ok(MORE_BATCH));
+        assert_eq!(rd.more_sliced(far(), far()).map(|v| v.len()), Ok(50));
     }
 
     #[test]

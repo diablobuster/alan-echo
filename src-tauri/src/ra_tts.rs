@@ -253,7 +253,25 @@ fn load_voice_or_default(dir: &Path, voice: &str) -> Result<Vec<f32>, String> {
     })
 }
 
+/// CPU session knobs (the bench sweeps them; production uses `CpuOpts::default()`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CpuOpts {
+    pub intra: usize,
+    pub spin: bool,
+    pub mem_pattern: bool,
+}
+
+impl Default for CpuOpts {
+    fn default() -> Self {
+        CpuOpts { intra: num_cpus::get_physical().clamp(1, 8), spin: true, mem_pattern: true }
+    }
+}
+
 fn open_session(path: &Path, gpu: bool) -> Result<Session, String> {
+    open_session_with(path, gpu, CpuOpts::default())
+}
+
+fn open_session_with(path: &Path, gpu: bool, o: CpuOpts) -> Result<Session, String> {
     // CPU arena off: the arena keeps its high-water mark until unload. Measured on the
     // CPU path: steady private 705 -> 455 MB; costs ~0.5 s on a 27-word chunk's first run.
     let cpu = ep::CPU::default().with_arena_allocator(false).build();
@@ -265,7 +283,9 @@ fn open_session(path: &Path, gpu: bool) -> Result<Session, String> {
         b.with_parallel_execution(false).map_err(s)?
     } else {
         let b = b.with_execution_providers([cpu]).map_err(s)?;
-        b.with_intra_threads(num_cpus::get_physical().clamp(1, 8)).map_err(s)?
+        let b = b.with_intra_op_spinning(o.spin).map_err(s)?;
+        let b = b.with_memory_pattern(o.mem_pattern).map_err(s)?;
+        b.with_intra_threads(o.intra).map_err(s)?
     };
     b.commit_from_file(path).map_err(|e| e.to_string())
 }
@@ -703,6 +723,10 @@ fn token_phonemes(toks: &[(&str, Option<&str>, bool)], owner: &[Option<usize>]) 
         .filter_map(|(_, ((_, p, ws), o))| Some((o.unwrap_or(NO_WORD), (*p)?.to_string(), *ws)))
         .collect()
 }
+
+#[cfg(test)]
+#[path = "ra_tts_bench.rs"]
+mod bench;
 
 #[cfg(test)]
 mod tests {

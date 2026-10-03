@@ -1328,6 +1328,118 @@ mod live {
         ((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32)
     }
 
+    /// Task 8 bench: hover latency over a dense page (~440 words), the cost of walking
+    /// every on-screen word box, and pick at the bottom of the page. Same launch and
+    /// cleanup rules as `acro_live`. Run in release:
+    /// cargo test --release acro_bench -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore]
+    fn acro_bench() {
+        use crate::ra_perf::{ms, pct, thread_cpu};
+        if running("Acrobat.exe") || running("AcroRd32.exe") {
+            println!("skipped: Acrobat already running");
+            return;
+        }
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let pdf = std::env::temp_dir().join(format!("ra_acro_bench_{}.pdf", std::process::id()));
+        let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("tools").join("read-aloud").join("mkpdf.py");
+        let mut py = Command::new("py");
+        py.arg(&tool).arg(&pdf).arg("--dense");
+        if std::env::var_os("RA_ACRO_UNTAGGED").is_some() {
+            py.arg("--untagged");
+        }
+        let made = py.output().expect("run py mkpdf.py");
+        assert!(made.status.success() && pdf.exists(), "mkpdf failed: {made:?}");
+        let child = Command::new(ACROBAT).arg(&pdf).spawn().expect("launch Acrobat");
+        let mut guard = Launched { child, frame: None, pdf: pdf.clone() };
+        let t0 = Instant::now();
+        let frame = loop {
+            if let Some(f) = acrobat_frames().into_iter().next() {
+                break f;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no Acrobat frame in 40 s");
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        guard.frame = Some(frame);
+        let raise = || unsafe {
+            if IsIconic(frame).as_bool() {
+                let _ = ShowWindow(frame, SW_SHOWNOACTIVATE);
+            }
+            let _ = SetWindowPos(frame, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        };
+        // every on-screen word box, once the document is ready
+        let (pv, boxes) = loop {
+            raise();
+            std::thread::sleep(Duration::from_millis(300));
+            let pv = page_views(frame).into_iter().filter(|(_, vis, r)| *vis && r.w > 0.0 && r.h > 0.0).map(|(h, _, _)| h).next();
+            let found = pv.and_then(|pv| {
+                let mut ws = words(dom_root(pv).ok()?, MAX_WORDS);
+                let v: Vec<Rect> = std::iter::from_fn(|| ws.on_screen_word().map(|(_, r)| r)).collect();
+                (v.len() > 100).then_some((pv, v))
+            });
+            if let Some(x) = found {
+                break x;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no dense page in 40 s");
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        std::thread::sleep(Duration::from_millis(1500)); // past the post-load stalls
+        let mut walk = Vec::new();
+        for _ in 0..3 {
+            let t = Instant::now();
+            let mut ws = words(dom_root(pv).unwrap(), MAX_WORDS);
+            let n = std::iter::from_fn(|| ws.on_screen_word()).count();
+            walk.push(ms(t.elapsed()));
+            assert_eq!(n, boxes.len());
+        }
+        println!("dense page: {} on-screen words; full on-screen walk (attach + every box) {}", boxes.len(), pct(&walk));
+        let centre = |r: &Rect| ((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32);
+        let pts: Vec<(i32, i32)> = boxes.iter().step_by((boxes.len() / 60).max(1)).map(centre).collect();
+        let covered = pts.iter().any(|&(x, y)| root_at(x, y) != Some(frame));
+        if covered {
+            println!("NOTE: part of the page is covered by another window; point-based hover skipped");
+        } else {
+            let mut cache = None;
+            let (mut t_ok, mut none, mut wrong) = (Vec::new(), 0, 0);
+            let c0 = thread_cpu();
+            for _ in 0..2 {
+                for (i, &(x, y)) in pts.iter().enumerate() {
+                    let t = Instant::now();
+                    let h = hover_cached(&mut cache, x, y);
+                    let d = ms(t.elapsed());
+                    match h {
+                        Hover::Rects(v) if v.len() == 1 && hit(&v[0], x as f64, y as f64) => t_ok.push(d),
+                        Hover::NoAnswer => none += 1,
+                        other => {
+                            wrong += 1;
+                            println!("hover {i} at ({x},{y}): {other:?}");
+                        }
+                    }
+                }
+            }
+            println!(
+                "hover over {} points x2: answered {} ({}), no answer (>50 ms) {none}, wrong {wrong}; worker CPU {:.0} ms",
+                pts.len(),
+                t_ok.len(),
+                pct(&t_ok),
+                ms(thread_cpu() - c0)
+            );
+            let (bx, by) = centre(boxes.last().unwrap());
+            let mut picks = Vec::new();
+            for _ in 0..3 {
+                let t = Instant::now();
+                let r = AcroRead::pick(bx, by);
+                picks.push(ms(t.elapsed()));
+                assert!(r.is_ok(), "pick at the last word: {:?}", r.err());
+            }
+            println!("pick at the page's last word: {}", pct(&picks));
+        }
+        drop(guard);
+    }
+
     #[test]
     #[ignore]
     fn acro_live() {

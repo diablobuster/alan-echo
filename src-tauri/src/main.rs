@@ -38,6 +38,8 @@ mod ra_names;
 mod read_aloud;
 #[cfg(target_os = "windows")]
 mod ra_g2pen;
+#[cfg(all(test, target_os = "windows"))]
+mod ra_perf;
 
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;

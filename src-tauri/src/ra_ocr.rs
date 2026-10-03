@@ -1293,4 +1293,192 @@ mod tests {
         }
         let _ = win.join();
     }
+
+    /// Frames painted by the bench window (with a timer, the page moves every frame).
+    static BENCH_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    unsafe extern "system" fn bench_wndproc(
+        h: windows::Win32::Foundation::HWND,
+        msg: u32,
+        wp: windows::Win32::Foundation::WPARAM,
+        lp: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        use std::sync::atomic::Ordering::Relaxed;
+        use windows::core::w;
+        use windows::Win32::Graphics::Gdi::*;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        match msg {
+            WM_TIMER => {
+                BENCH_FRAME.fetch_add(1, Relaxed);
+                let _ = InvalidateRect(h, None, true);
+                windows::Win32::Foundation::LRESULT(0)
+            }
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let dc = BeginPaint(h, &mut ps);
+                let mut rc = windows::Win32::Foundation::RECT::default();
+                let _ = GetClientRect(h, &mut rc);
+                FillRect(dc, &rc, HBRUSH(GetStockObject(WHITE_BRUSH).0));
+                let font = CreateFontW(-28, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, w!("Segoe UI"));
+                let old = SelectObject(dc, font);
+                SetBkMode(dc, TRANSPARENT);
+                let f = BENCH_FRAME.load(Relaxed);
+                for i in 0..20 {
+                    let line = format!("Line {i} frame {f} the quick brown fox jumps over the lazy dog again and again.");
+                    let mut t: Vec<u16> = line.encode_utf16().collect();
+                    // the whole page moves a few px every frame (scrolling / video)
+                    let top = 30 + i * 42 + (f % 4) as i32 * 6;
+                    let mut r = windows::Win32::Foundation::RECT { left: 40, top, right: rc.right, bottom: top + 42 };
+                    DrawTextW(dc, &mut t, &mut r, DT_LEFT | DT_TOP | DT_NOPREFIX | DT_SINGLELINE);
+                }
+                SelectObject(dc, old);
+                let _ = DeleteObject(font);
+                let _ = EndPaint(h, &ps);
+                windows::Win32::Foundation::LRESULT(0)
+            }
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                windows::Win32::Foundation::LRESULT(0)
+            }
+            _ => DefWindowProcW(h, msg, wp, lp),
+        }
+    }
+
+    /// Opens the bench window (1280x900 at the virtual screen's corner, topmost, never
+    /// activated). With `tick_ms` > 0 its text changes every `tick_ms`.
+    fn open_bench_window(tick_ms: u32) -> (isize, std::thread::JoinHandle<()>) {
+        use std::sync::mpsc;
+        use windows::core::w;
+        use windows::Win32::Foundation::HINSTANCE;
+        use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let (vx, vy) = unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)) };
+        let (htx, hrx) = mpsc::channel::<isize>();
+        let win = std::thread::spawn(move || unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let wc = WNDCLASSW { lpfnWndProc: Some(bench_wndproc), lpszClassName: w!("RaOcrBenchWnd"), ..Default::default() };
+            RegisterClassW(&wc);
+            let h = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("RaOcrBenchWnd"),
+                w!("ra_ocr bench"),
+                WS_POPUP | WS_VISIBLE,
+                vx,
+                vy,
+                1280,
+                900,
+                None,
+                None,
+                HINSTANCE::default(),
+                None,
+            )
+            .expect("bench window");
+            if tick_ms > 0 {
+                SetTimer(h, 1, tick_ms, None);
+            }
+            let _ = htx.send(h.0 as isize);
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        });
+        let h = hrx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        (h, win)
+    }
+
+    /// Task 8 bench: OCR pick cost (and its parts: engine creation, screen grab,
+    /// recognition) on a static 1280x900 window, then pick-mode hover over a window
+    /// whose text keeps changing: how many re-OCRs and how much CPU in 6 s of hovering.
+    /// Own window only. Run in release:
+    /// cargo test --release ocr_bench -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore]
+    fn ocr_bench() {
+        use crate::ra_perf::{cores, mem, ms, pct, process_cpu};
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let (h, win) = open_bench_window(0);
+        let reg = clip_to_screen(&client_rect(HWND(h as *mut _)).unwrap()).unwrap();
+        // the centre of the 6th OCR word
+        let probe = OcrRead::build(h).expect("build");
+        let w5 = &probe.words[5].rect;
+        let (x, y) = ((w5.x + w5.w / 2.0) as i32, (w5.y + w5.h / 2.0) as i32);
+        drop(probe);
+        let mut engine_ms = Vec::new();
+        for _ in 0..5 {
+            let t = Instant::now();
+            let e = OcrEngine::TryCreateFromUserProfileLanguages().unwrap();
+            engine_ms.push(ms(t.elapsed()));
+            drop(e);
+        }
+        let engine = OcrEngine::TryCreateFromUserProfileLanguages().unwrap();
+        let (mut grab_ms, mut rec_ms) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let t = Instant::now();
+            let bgra = grab(&reg).unwrap();
+            grab_ms.push(ms(t.elapsed()));
+            let t = Instant::now();
+            let lines = recognize(&engine, &bgra, reg.w, reg.h).unwrap();
+            rec_ms.push(ms(t.elapsed()));
+            assert!(lines.len() >= 15, "{} lines", lines.len());
+        }
+        let mut pick_ms = Vec::new();
+        let m0 = mem();
+        for _ in 0..5 {
+            let t = Instant::now();
+            let r = OcrRead::pick(h, x, y);
+            pick_ms.push(ms(t.elapsed()));
+            assert!(r.is_ok());
+        }
+        let m1 = mem();
+        println!("OCR {}x{}: engine create {}", reg.w, reg.h, pct(&engine_ms));
+        println!("  screen grab {}", pct(&grab_ms));
+        println!("  recognize   {}", pct(&rec_ms));
+        println!("  pick total  {}", pct(&pick_ms));
+        println!("  RAM after picks: private {:.1} -> {:.1} MB, peak ws {:.1} MB", m0.1, m1.1, m1.2);
+        // static window: hover cost when the cache is current
+        let mut cache = None;
+        let _ = hover_cached(&mut cache, h, x, y);
+        let mut warm = Vec::new();
+        for i in 0..200 {
+            let t = Instant::now();
+            let _ = hover_cached(&mut cache, h, x + (i % 10) * 3, y);
+            warm.push(ms(t.elapsed()));
+        }
+        println!("  hover, static window, cached: {}", pct(&warm));
+        close_live(h, win);
+
+        // a window that changes every 100 ms (video, animation): hover every 33 ms
+        let (h, win) = open_bench_window(100);
+        let mut cache: Option<OcrRead> = None;
+        let (t0, c0) = (Instant::now(), process_cpu());
+        let (mut rebuilds, mut last_made, mut boxes, mut calls) = (0, None, 0, Vec::new());
+        while t0.elapsed() < Duration::from_secs(6) {
+            let t = Instant::now();
+            if hover_cached(&mut cache, h, x, y).is_some_and(|v| !v.is_empty()) {
+                boxes += 1;
+            }
+            calls.push(ms(t.elapsed()));
+            let made = cache.as_ref().map(|c| c.made);
+            if made != last_made {
+                rebuilds += 1;
+                last_made = made;
+            }
+            std::thread::sleep(Duration::from_millis(33).saturating_sub(t.elapsed()));
+        }
+        let (wall, cpu) = (ms(t0.elapsed()), ms(process_cpu() - c0));
+        close_live(h, win);
+        println!("  changing window, hover call {}; frames painted {}", pct(&calls), BENCH_FRAME.load(std::sync::atomic::Ordering::Relaxed));
+        println!(
+            "  changing window, 6 s of hover: {rebuilds} OCR builds, {boxes} hovers with a box, CPU {cpu:.0} ms = {:.2} cores ({:.1}% of the machine)",
+            cpu / wall,
+            cpu / wall * 100.0 / cores() as f64
+        );
+    }
 }

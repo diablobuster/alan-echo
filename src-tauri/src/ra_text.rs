@@ -101,6 +101,8 @@ fn ends_clause(w: &str) -> bool {
 }
 
 pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> {
+    // a 0 limit would never advance
+    let (first_max, max) = (first_max.max(1), max.max(1));
     // 1) sentences
     let mut sentences: Vec<Range<usize>> = Vec::new();
     let mut start = 0;
@@ -232,6 +234,12 @@ mod tests {
         let mut w = words("no period here next para");
         w[3].para_break_before = true;
         assert_eq!(chunk(&w, 12, 50), vec![0..3, 3..5]);
+    }
+
+    #[test]
+    fn zero_limits_still_progress() {
+        let c = chunk(&words("a b c"), 0, 0);
+        assert_eq!(c, vec![0..1, 1..2, 2..3]);
     }
 
     #[test]

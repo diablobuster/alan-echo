@@ -27,3 +27,8 @@ tools/read-aloud/glitch-hunt/roundtrip.csv
 tools/read-aloud/glitch-hunt/roundtrip_summary.json
 tools/read-aloud/glitch-hunt/current.json
 tools/read-aloud/glitch-hunt/baseline.json
+
+# Task 6 listening board (WAVs live in %TEMP%\echo-glitch-board) and pause-check output
+tools/read-aloud/glitch_board.html
+tools/read-aloud/board/
+tools/read-aloud/glitch-hunt/pauses.json

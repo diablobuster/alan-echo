@@ -161,12 +161,22 @@ fn glitch_synth() {
         }
         let words = ra_text::normalize(&raw_tokens(text));
         let mut pcm: Vec<f32> = Vec::new();
+        // word timings for the pause check (`pauses.py`): [word, start ms, end ms] in the WAV
+        let mut times: Vec<String> = Vec::new();
         for r in ra_text::chunk(&words, 12, 30) {
             let ws: Vec<&str> = words[r].iter().map(|w| w.text.as_str()).collect();
             let mut a = 0;
             while a < ws.len() {
                 match Engine::synth_inner(&mut l, &ws[a..], 1.0, true) {
                     Ok(c) => {
+                        // WordTime is in samples (rate 1.0): to ms in the WAV
+                        let off = pcm.len() as u64;
+                        let ms = |x: u64| (off + x) * 1000 / ra_timing::SR as u64;
+                        for wt in &c.words {
+                            if let Some(w) = ws.get(a + wt.word) {
+                                times.push(format!("[{},{},{}]", esc(w), ms(wt.start), ms(wt.end)));
+                            }
+                        }
                         pcm.extend_from_slice(&c.pcm);
                         pcm.extend_from_slice(&gap);
                         a += c.covered.max(1);
@@ -179,9 +189,39 @@ fn glitch_synth() {
             }
         }
         write_wav(&pcm, &p);
+        std::fs::write(dir.join(format!("{id}.json")), format!("[{}]", times.join(","))).unwrap();
         if n % 25 == 0 {
             println!("{n}/{} {:?}", rows.len(), t.elapsed());
         }
     }
     println!("synth done: {} in {:?}", rows.len(), t.elapsed());
+}
+
+/// Debug probe: each line of `GH_PROBE` (a file, or the text itself) through the
+/// static pipeline, printing each chunk's spans and each word's fed phonemes.
+///   GH_PROBE="It cost $3.2B." cargo test --release glitch_probe -- --ignored --nocapture
+#[test]
+#[ignore]
+fn glitch_probe() {
+    let arg = std::env::var("GH_PROBE").expect("set GH_PROBE");
+    let text = std::fs::read_to_string(&arg).unwrap_or(arg);
+    let names = Arc::new(Names::load(G2pEn::load().map(|g| Box::new(g) as Box<dyn Lts>)));
+    let g = G2P::with_fallback(Language::EnglishUS, Some(Box::new(NameFallback(Arc::clone(&names)))));
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        println!("## {line}");
+        let words = ra_text::normalize(&raw_tokens(line));
+        for r in ra_text::chunk(&words, 12, 30) {
+            let ws: Vec<&str> = words[r].iter().map(|w| w.text.as_str()).collect();
+            match prepare_chunk(&g, &names, &ws) {
+                Ok(p) => {
+                    for (a, b, sp) in &p.spoken {
+                        println!("  span {a}..{b} {:?} -> {sp:?}", &ws[*a..*b]);
+                    }
+                    let fed: Vec<String> = ws.iter().zip(&p.fed).map(|(w, f)| format!("{w}=>{f}")).collect();
+                    println!("  | {}", fed.join(" "));
+                }
+                Err(e) => println!("  err {e}"),
+            }
+        }
+    }
 }

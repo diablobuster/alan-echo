@@ -7,6 +7,8 @@ mod dictation;
 mod license;
 mod packs;
 mod paste;
+#[cfg(target_os = "windows")]
+mod ra_player;
 mod settings;
 mod text_cleanup;
 mod trial;

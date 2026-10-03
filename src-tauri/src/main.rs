@@ -13,6 +13,10 @@ mod ra_player;
 mod ra_hook;
 #[cfg(target_os = "windows")]
 mod ra_uia;
+#[cfg(target_os = "windows")]
+mod ra_ocr;
+#[cfg(target_os = "windows")]
+mod ra_acro;
 mod settings;
 mod text_cleanup;
 mod trial;
@@ -29,7 +33,13 @@ mod ra_wsola;
 #[cfg(target_os = "windows")]
 mod ra_tts;
 #[cfg(target_os = "windows")]
+mod ra_names;
+#[cfg(target_os = "windows")]
 mod read_aloud;
+#[cfg(target_os = "windows")]
+mod ra_g2pen;
+#[cfg(all(test, target_os = "windows"))]
+mod ra_perf;
 
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;
@@ -217,6 +227,13 @@ fn ra_set_speed(state: State<Arc<AppState>>, speed: f32) -> Result<(), String> {
     }
     state.read_aloud.post(read_aloud::Msg::Speed(speed));
     Ok(())
+}
+
+/// The pill's "Go to word": scroll the spoken word into view and turn follow back on.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_go_to_word(state: State<Arc<AppState>>) {
+    state.read_aloud.post(read_aloud::Msg::GoToWord);
 }
 
 #[cfg(target_os = "windows")]
@@ -1532,6 +1549,8 @@ fn main() {
             ra_skip,
             #[cfg(target_os = "windows")]
             ra_set_speed,
+            #[cfg(target_os = "windows")]
+            ra_go_to_word,
             #[cfg(target_os = "windows")]
             ra_stop,
             #[cfg(target_os = "windows")]

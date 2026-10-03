@@ -13,7 +13,7 @@
 //! worker, hook and player all live only for a session.
 
 use crate::{
-    ra_hook::PickHook,
+    ra_hook::{ClickTracker, MouseEv, PickHook, WatchHook},
     ra_player::Player,
     ra_text::{self, Word},
     ra_tts::{self, ChunkAudio, Device, Engine},
@@ -50,6 +50,8 @@ pub enum Ev {
     Hotkey,
     Click,
     ClickRejected,
+    /// A plain click on text in the source window while reading (no pick mode).
+    Jump,
     FirstAudio,
     Esc,
     PlayPause,
@@ -67,8 +69,28 @@ pub enum Act {
     ShowReading,
     ShowPaused,
     Teardown,
+    /// An error: the pill shows it in its "error" state and lingers.
     Toast(&'static str),
+    /// Information, not a failure (e.g. an OCR read reached the end of the screen):
+    /// lingers like a toast, in the pill's neutral "info" style.
+    Notice(&'static str),
     BumpGen,
+}
+
+/// How a lingering pill message looks: the `state` the pill gets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToastKind {
+    Error,
+    Info,
+}
+
+impl ToastKind {
+    pub fn state(self) -> &'static str {
+        match self {
+            ToastKind::Error => "error",
+            ToastKind::Info => "info",
+        }
+    }
 }
 
 pub fn step(p: &Phase, ev: Ev) -> (Phase, Vec<Act>) {
@@ -95,11 +117,93 @@ pub fn step(p: &Phase, ev: Ev) -> (Phase, Vec<Act>) {
             Resume::Reading => (Reading, vec![ExitPick, ShowReading]),
             Resume::Paused => (Paused, vec![ExitPick, ShowPaused]),
         },
+        (Reading | Paused | Warming, Ev::Jump) => (Warming, vec![BumpGen, StartRead, ShowWarming]),
         (Warming, Ev::FirstAudio) => (Reading, vec![ShowReading]),
         (Reading, Ev::PlayPause) => (Paused, vec![ShowPaused]),
         (Paused, Ev::PlayPause) => (Reading, vec![ShowReading]),
         (Reading | Paused | Warming, Ev::End) => (Idle, vec![Teardown]),
         _ => (*p, vec![]),
+    }
+}
+
+// ── Follow mode ──────────────────────────────────────────────────────
+//
+// Follow ON (the default for every read): Echo scrolls the source so the spoken word
+// stays in view. The user scrolling the source by hand turns it OFF (reading goes on,
+// the highlight still shows when the word is visible, Echo never scrolls); the pill's
+// "Go to word" button or any jump turns it back ON.
+//
+// Detection is input-independent (wheel, keyboard, touchpad, scroll bar alike): the
+// page moved under a word that Echo did not scroll to (see `user_scrolled`).
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FollowEv {
+    /// The page moved under the reader's words: see `user_scrolled` / `scroll_plan`.
+    UserScrolled,
+    /// The pill's "Go to word" button.
+    GoToWord,
+    /// A new pick or jump (hotkey + click, or a plain click on text).
+    Jump,
+}
+
+pub fn follow_next(_on: bool, ev: FollowEv) -> bool {
+    match ev {
+        FollowEv::UserScrolled => false,
+        FollowEv::GoToWord | FollowEv::Jump => true,
+    }
+}
+
+/// What to do when the spoken word has no rects (it is off screen).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrollPlan {
+    /// Natural reading flow ran off the screen: scroll it into view.
+    Scroll,
+    /// The user scrolled the page away: follow off, leave the page alone.
+    UserScrolled,
+    /// Leave the page alone.
+    Leave,
+}
+
+/// `changed` = the word just became current (a word is scrolled to once, never
+/// re-tried every tick, which would fight the user). `prev_word_moved` = the previous
+/// word, re-read now, moved or left the screen since the last refresh (`user_scrolled`).
+pub fn scroll_plan(follow: bool, changed: bool, prev_word_moved: bool) -> ScrollPlan {
+    match (follow, changed, prev_word_moved) {
+        (false, ..) | (_, false, _) => ScrollPlan::Leave,
+        (true, true, true) => ScrollPlan::UserScrolled,
+        (true, true, false) => ScrollPlan::Scroll,
+    }
+}
+
+/// Where a word was last seen: its first rect's top-left relative to the source
+/// window (`None` = off screen), and the source window's rect (x, y, w, h).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anchor {
+    pub word: usize,
+    pub pos: Option<(f64, f64)>,
+    pub win: (i32, i32, i32, i32),
+}
+
+/// `word`'s anchor from fresh screen rects and the source window rect (x, y, w, h).
+pub fn anchor_of(word: usize, rects: &[Rect], win: (i32, i32, i32, i32)) -> Anchor {
+    Anchor { word, pos: rects.first().map(|r| (r.x - win.0 as f64, r.y - win.1 as f64)), win }
+}
+
+/// Movement (px) of the same word inside the window that counts as a scroll.
+const SHIFT_PX: f64 = 3.0;
+
+/// The user scrolled the page: the same word moved (>= SHIFT_PX) inside the source
+/// window, or went from on screen to off screen, while the window itself did not move
+/// or resize, and not right after a scroll of Echo's own.
+pub fn user_scrolled(prev: Option<Anchor>, now: Anchor, own_scroll_recent: bool) -> bool {
+    let Some(prev) = prev else { return false };
+    if prev.word != now.word || prev.win != now.win || own_scroll_recent {
+        return false;
+    }
+    match (prev.pos, now.pos) {
+        (Some(a), Some(b)) => (a.0 - b.0).abs() >= SHIFT_PX || (a.1 - b.1).abs() >= SHIFT_PX,
+        (Some(_), None) => true, // scrolled off screen
+        _ => false,
     }
 }
 
@@ -445,6 +549,12 @@ pub enum Msg {
     More(u64, Result<Vec<String>, String>),
     /// Escape could not be registered; `hotkey_ok` = Ctrl+Shift+E can still cancel.
     EscFailed { hotkey_ok: bool },
+    /// From the observe-only watch hook (alive only while a read session is active).
+    Mouse(MouseEv),
+    /// Result of click lookup `id` (run off the controller thread).
+    ClickPicked(u64, Result<Vec<String>, String>),
+    /// The pill's "Go to word" button: scroll the spoken word into view, follow ON.
+    GoToWord,
 }
 
 const HOTKEY: &str = "CmdOrCtrl+Shift+E";
@@ -455,6 +565,10 @@ const HOVER_MIN_MS: u64 = 33;
 /// Word rects are re-read this often even when the word did not change (the page may
 /// have scrolled; rects are never cached).
 const RECTS_REFRESH: Duration = Duration::from_millis(250);
+/// After our own scroll, a word shift within this long is ours, not the user's.
+const OWN_SCROLL_GRACE: Duration = Duration::from_millis(800);
+/// Click-vs-drag slop in logical px (scaled by the monitor's DPI).
+const CLICK_SLOP: f64 = 6.0;
 /// The pill re-sends its state this often while reading (an event emitted before the
 /// pill's page finished loading is lost).
 const STATE_RESEND: Duration = Duration::from_millis(1000);
@@ -467,6 +581,14 @@ const PICK_TIMEOUT: Duration = Duration::from_secs(30);
 const MORE_MAX_FAILS: u32 = 5;
 const HICCUP_MSG: &str = "Voice engine hiccup — using CPU";
 const NOTHING_MSG: &str = "Nothing readable here";
+/// Shown when an OCR read (a scan, an image) ends: it read what was on screen, which is
+/// not necessarily the whole document.
+pub const NOTHING_ON_SCREEN_END: &str = "Read to the end of what's on screen";
+
+/// The notice for the end of a read: only an OCR read says why it stopped. Pure.
+fn end_toast(at_end_of_screen: bool) -> Option<Act> {
+    at_end_of_screen.then_some(Act::Notice(NOTHING_ON_SCREEN_END))
+}
 const MISSING_MSG: &str = "Voice files missing — run tools/read-aloud/prepare_model.py";
 /// Non-DirectML synth failures in a row before the read ends (one bad chunk is skipped).
 const SYNTH_MAX_FAILS: u32 = 3;
@@ -609,7 +731,7 @@ struct Mon {
 
 mod win {
     use super::Mon;
-    use windows::Win32::Foundation::{HWND, POINT};
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         MONITOR_DEFAULTTONULL,
@@ -618,12 +740,22 @@ mod win {
         GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetAncestor, GetCursorPos, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint,
+        GetAncestor, GetCursorPos, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint,
         GA_ROOT,
     };
 
     fn hwnd(h: isize) -> HWND {
         HWND(h as *mut _)
+    }
+
+    /// Keep one of our windows out of screen captures, so OCR never reads our own
+    /// highlight or pill and its staleness fingerprint does not flip as the highlight
+    /// moves. Best effort (errors ignored: older Windows draws it as black instead).
+    pub fn exclude_from_capture(h: isize) {
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
+        if let Err(e) = unsafe { SetWindowDisplayAffinity(hwnd(h), WDA_EXCLUDEFROMCAPTURE) } {
+            log::debug!("read-aloud: SetWindowDisplayAffinity: {e}");
+        }
     }
 
     pub fn per_monitor_dpi() {
@@ -662,6 +794,34 @@ mod win {
 
     pub fn point_on_screen(x: i32, y: i32) -> bool {
         !unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL) }.is_invalid()
+    }
+
+    /// Top-level window under the point (0 = none).
+    pub fn root_at(x: i32, y: i32) -> isize {
+        let w = unsafe { WindowFromPoint(POINT { x, y }) };
+        if w.is_invalid() {
+            return 0;
+        }
+        let root = unsafe { GetAncestor(w, GA_ROOT) };
+        if root.is_invalid() {
+            w.0 as isize
+        } else {
+            root.0 as isize
+        }
+    }
+
+    /// (left, top, width, height) of a window in physical px.
+    pub fn window_rect(h: isize) -> Option<(i32, i32, i32, i32)> {
+        if h == 0 {
+            return None;
+        }
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(hwnd(h), &mut r) }.ok()?;
+        Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+    }
+
+    pub fn double_click_ms() -> u32 {
+        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }
     }
 
     pub fn cursor() -> Option<(i32, i32)> {
@@ -709,6 +869,20 @@ mod win {
 /// Visibility rule for the highlight: `root` = top-level window under the word's centre.
 fn covers_word(src: isize, root: isize, root_is_ours: bool) -> bool {
     root != 0 && (root == src || root_is_ours)
+}
+
+/// A click lookup's result is taken (the worker told to commit, the read restarted)
+/// only when it is the lookup in flight, a read is still under way (not pick mode,
+/// not torn down) and it found speakable words. Anything else is dropped, and since
+/// the worker only commits on our say-so, it stays on the current read.
+fn accept_click(current: bool, in_read: bool, has_words: bool) -> bool {
+    current && in_read && has_words
+}
+
+/// Click-vs-drag slop at (x, y) in physical px.
+fn click_slop(x: i32, y: i32) -> i32 {
+    let scale = win::monitor_of_point(x, y).map_or(1.0, |m| m.scale);
+    (CLICK_SLOP * scale).round() as i32
 }
 
 struct Controller {
@@ -764,6 +938,22 @@ struct Controller {
     source_gone: bool,
     /// Re-read the word rects on the next tick (after a resume).
     rects_due: bool,
+    /// Observe-only mouse hook, alive only while a read session is active.
+    watch: Option<WatchHook>,
+    /// Follow mode: auto-scroll to the spoken word (see `follow_next`).
+    follow: bool,
+    /// Click-vs-drag / double-click classification of the watch hook's events.
+    clicks: ClickTracker,
+    /// A scheduled click-to-jump fires at this time (after the double-click time).
+    click_due: Option<Instant>,
+    /// Id of the last click lookup started; results with another id are stale.
+    click_seq: u64,
+    /// The click lookup running off-thread (at most one).
+    click_inflight: Option<u64>,
+    /// When Echo last scrolled the source.
+    own_scroll_at: Option<Instant>,
+    /// Where the spoken word was last seen (user-scroll detection).
+    anchor: Option<Anchor>,
 }
 
 impl Controller {
@@ -810,6 +1000,14 @@ impl Controller {
             synth_fails: 0,
             source_gone: false,
             rects_due: false,
+            watch: None,
+            follow: true,
+            clicks: ClickTracker::default(),
+            click_due: None,
+            click_seq: 0,
+            click_inflight: None,
+            own_scroll_at: None,
+            anchor: None,
         }
     }
 
@@ -826,7 +1024,7 @@ impl Controller {
             let msg = match backlog.pop_front() {
                 Some(m) => Some(m),
                 None => {
-                    let deadline = [self.ticking().then_some(next_tick), self.linger_until, self.pick_deadline]
+                    let deadline = [self.ticking().then_some(next_tick), self.linger_until, self.pick_deadline, self.click_due]
                         .into_iter()
                         .flatten()
                         .min();
@@ -861,6 +1059,12 @@ impl Controller {
             if self.ticking() && now >= next_tick {
                 self.tick();
                 next_tick = now + TICK;
+            }
+            if self.click_due.is_some_and(|t| now >= t) {
+                self.click_due = None;
+                if let Some((x, y)) = self.clicks.fire() {
+                    self.start_click_lookup(x, y);
+                }
             }
             if self.pick_deadline.is_some_and(|t| now >= t) {
                 self.pick_deadline = None;
@@ -937,6 +1141,9 @@ impl Controller {
                     self.feed(Ev::Stop);
                 }
             }
+            Msg::Mouse(ev) => self.on_mouse(ev),
+            Msg::GoToWord => self.go_to_word(),
+            Msg::ClickPicked(id, r) => self.on_click_picked(id, r),
             Msg::Chunk(g, idx, r) => self.on_chunk(g, idx, r),
             Msg::More(id, r) => self.on_more(id, r),
             Msg::EscFailed { hotkey_ok } => {
@@ -1012,7 +1219,8 @@ impl Controller {
                 self.emit_word(Vec::new()); // no highlight box while paused
             }
             Act::Teardown => self.teardown(),
-            Act::Toast(msg) => self.toast(msg),
+            Act::Toast(msg) => self.toast(msg, ToastKind::Error),
+            Act::Notice(msg) => self.toast(msg, ToastKind::Info),
         }
     }
 
@@ -1155,6 +1363,9 @@ impl Controller {
         self.s.start(words, raw_len, false);
         self.cur_word = None;
         self.last_word = None;
+        self.follow = follow_next(self.follow, FollowEv::Jump);
+        self.anchor = None;
+        self.ensure_watch();
         self.ensure_pill();
         self.pump();
     }
@@ -1308,7 +1519,12 @@ impl Controller {
             self.update_word_rects(changed);
         }
         if self.s.finished(pos) {
-            return self.feed(Ev::End);
+            let at_end = self.uia.as_ref().is_some_and(|u| u.at_end_of_screen());
+            let (p, mut acts) = step(&self.phase, Ev::End);
+            if let Some(a) = end_toast(at_end) {
+                acts.insert(0, a); // the pill lingers with it after Teardown
+            }
+            return self.run_acts(p, acts);
         }
         if self.state_at.elapsed() >= STATE_RESEND {
             self.emit_state();
@@ -1326,7 +1542,8 @@ impl Controller {
         if self.source_gone {
             return;
         }
-        let Some(src) = self.cur_word.and_then(|w| self.s.words.get(w)).map(|w| w.src.clone()) else { return };
+        let Some(wi) = self.cur_word else { return };
+        let Some(src) = self.s.words.get(wi).map(|w| w.src.clone()) else { return };
         let Some(u) = &self.uia else { return };
         let source = u.source_hwnd();
         if self.style == "off" || !win::window_shown(source) {
@@ -1334,15 +1551,47 @@ impl Controller {
         }
         // None = UIA timed out / errored: keep what is drawn, never scroll on it
         let Some(rects) = u.rects(src.clone()) else { return };
+        let win_rect = win::window_rect(source);
+        let own_recent = self.own_scroll_recent();
+        let now = win_rect.map(|w| anchor_of(wi, &rects, w));
+        if let Some(now) = now {
+            if self.follow && user_scrolled(self.anchor, now, own_recent) {
+                log::info!("read-aloud: the page moved under the spoken word; follow off");
+                self.set_follow(follow_next(self.follow, FollowEv::UserScrolled));
+            }
+        }
+        let prev = std::mem::replace(&mut self.anchor, now);
         if rects.is_empty() {
-            if changed {
-                // off screen: scroll it into view, look again next tick
-                if let Some(&first) = src.first() {
-                    u.scroll_to(first);
+            // The new word is off screen. If the previous word also moved since the
+            // last look, the user scrolled (follow off); otherwise reading ran off the
+            // screen and the page follows.
+            let prev_moved = changed
+                && self.follow
+                && !own_recent
+                && prev.filter(|p| p.word != wi && p.pos.is_some()).is_some_and(|p| {
+                    let src = self.s.words.get(p.word).map(|w| w.src.clone()).unwrap_or_default();
+                    match (self.uia.as_ref().and_then(|u| u.rects(src)), win_rect) {
+                        (Some(r), Some(w)) => user_scrolled(Some(p), anchor_of(p.word, &r, w), false),
+                        _ => false,
+                    }
+                });
+            match scroll_plan(self.follow, changed, prev_moved) {
+                ScrollPlan::Scroll => {
+                    if let (Some(&first), Some(u)) = (src.first(), &self.uia) {
+                        u.scroll_to(first);
+                        self.own_scroll_at = Some(Instant::now());
+                    }
+                    self.rects_retry = true;
                 }
-                self.rects_retry = true;
-            } else if retrying {
-                log::debug!("read-aloud: word still has no rects after scrolling");
+                ScrollPlan::UserScrolled => {
+                    log::info!("read-aloud: the page was scrolled away from the reading; follow off");
+                    self.set_follow(follow_next(self.follow, FollowEv::UserScrolled));
+                }
+                ScrollPlan::Leave => {
+                    if retrying {
+                        log::debug!("read-aloud: word still has no rects after scrolling");
+                    }
+                }
             }
             return self.emit_word(Vec::new());
         }
@@ -1358,6 +1607,143 @@ impl Controller {
         }
         let css = self.to_css(&rects);
         self.emit_word(css);
+    }
+
+    // ── follow mode + click-to-jump (watch hook) ──
+
+    /// A read is under way (the watch hook's events count; in pick mode they do not).
+    fn in_read(&self) -> bool {
+        matches!(self.phase, Phase::Reading | Phase::Paused | Phase::Warming)
+    }
+
+    fn source(&self) -> isize {
+        self.uia.as_ref().map_or(self.source_hwnd, |u| u.source_hwnd())
+    }
+
+    fn own_scroll_recent(&self) -> bool {
+        self.own_scroll_at.is_some_and(|t| t.elapsed() < OWN_SCROLL_GRACE)
+    }
+
+    fn set_follow(&mut self, on: bool) {
+        if on == self.follow {
+            return;
+        }
+        self.follow = on;
+        if on {
+            self.anchor = None;
+        }
+        self.emit_state();
+    }
+
+    /// Start the observe-only mouse hook for this read (once per session).
+    fn ensure_watch(&mut self) {
+        if self.watch.is_some() {
+            return;
+        }
+        let tx = self.tx.clone();
+        let hook = WatchHook::install(move |ev| {
+            let _ = tx.send(Msg::Mouse(ev));
+        });
+        if hook.is_active() {
+            self.watch = Some(hook);
+        } else {
+            // reading still works; only click-to-jump and scroll detection are lost
+            log::warn!("read-aloud: watch hook not installed; click-to-jump is off");
+        }
+    }
+
+    fn on_mouse(&mut self, ev: MouseEv) {
+        if !self.in_read() {
+            // pick mode (or idle): the pick hook handles clicks
+            self.clicks.reset();
+            self.click_due = None;
+            return;
+        }
+        match ev {
+            MouseEv::Down { x, y, t, mods } => {
+                let src = self.source();
+                let in_source = src != 0 && win::root_at(x, y) == src;
+                let slop = click_slop(x, y);
+                if self.clicks.down(x, y, t, in_source, mods, win::double_click_ms(), slop) {
+                    self.click_due = None; // a double-click: the first click is not a jump
+                }
+            }
+            MouseEv::Up { x, y, t, mods } => {
+                if self.clicks.up(x, y, t, mods, click_slop(x, y)).is_some() {
+                    // wait out the double-click time before deciding it is a jump
+                    self.click_due = Some(Instant::now() + Duration::from_millis(win::double_click_ms() as u64));
+                }
+            }
+        }
+    }
+
+    /// A plain click in the source while reading: look it up on the UIA worker, off
+    /// this thread (a hung app must not freeze the highlight and audio queue); the
+    /// answer comes back as `Msg::ClickPicked`. One lookup at a time.
+    fn start_click_lookup(&mut self, x: i32, y: i32) {
+        if !self.in_read() || self.click_inflight.is_some() {
+            return;
+        }
+        let Some(fetch) = self.uia.as_ref().map(|u| u.click_fetcher()) else { return };
+        self.click_seq += 1;
+        let (tx, id) = (self.tx.clone(), self.click_seq);
+        let spawned = std::thread::Builder::new().name("ra-click".into()).spawn(move || {
+            let _ = tx.send(Msg::ClickPicked(id, fetch.pick(id, x, y)));
+        });
+        match spawned {
+            Ok(_) => self.click_inflight = Some(id),
+            Err(e) => log::warn!("read-aloud: could not start click lookup: {e}"),
+        }
+    }
+
+    /// A click lookup's answer: jump there if it was on ordinary text (links, buttons,
+    /// fields etc. are left to the app; the click itself was never swallowed).
+    /// Anything else, or a stale answer, is silently ignored (the read goes on).
+    /// The UIA worker only *stages* the clicked text; it switches to it when we send
+    /// `commit_click`, which happens only here, on acceptance. A dropped result
+    /// therefore leaves the worker on the current read (they can never disagree).
+    fn on_click_picked(&mut self, id: u64, r: Result<Vec<String>, String>) {
+        let current = self.click_inflight == Some(id);
+        if current {
+            self.click_inflight = None;
+        }
+        let (words, raw_len) = match &r {
+            Ok(raw) => (ra_text::normalize(raw), raw.len()),
+            Err(e) => {
+                log::debug!("read-aloud: click is not a jump: {e}");
+                (Vec::new(), 0)
+            }
+        };
+        if !accept_click(current, self.in_read(), !words.is_empty()) {
+            return;
+        }
+        let Some(u) = &self.uia else { return };
+        u.commit_click(id); // queued before any request for the new read
+        log::info!("read-aloud: click-to-jump");
+        self.picked = Some((words, raw_len));
+        self.feed(Ev::Jump);
+    }
+
+    /// The pill's "Go to word": follow ON, and scroll the spoken word into view if it
+    /// is off screen.
+    fn go_to_word(&mut self) {
+        if !self.in_read() {
+            return;
+        }
+        self.set_follow(follow_next(self.follow, FollowEv::GoToWord));
+        let wi = self.cur_word.or_else(|| {
+            let c = self.s.current_chunk(None);
+            self.s.chunks.get(c).map(|r| r.start)
+        });
+        let Some(first) = wi.and_then(|w| self.s.words.get(w)).and_then(|w| w.src.first().copied()) else { return };
+        let Some(u) = &self.uia else { return };
+        let on_screen = u.rects(vec![first]).is_some_and(|r| !r.is_empty());
+        if !on_screen {
+            u.scroll_to(first);
+            self.own_scroll_at = Some(Instant::now());
+            self.rects_retry = true;
+        }
+        self.rects_due = true;
     }
 
     /// Word highlight rects, only when they changed.
@@ -1448,6 +1834,13 @@ impl Controller {
 
     fn teardown(&mut self) {
         self.hook = None;
+        self.watch = None;
+        self.follow = true;
+        self.clicks.reset();
+        self.click_due = None;
+        self.click_inflight = None; // a late result is stale (click_seq is not reset)
+        self.own_scroll_at = None;
+        self.anchor = None;
         self.pick_deadline = None;
         self.more_retry_at = None;
         self.hook_to_drop = None;
@@ -1473,13 +1866,13 @@ impl Controller {
         self.engine.touch(); // the 2-minute idle unload counts from here
     }
 
-    fn toast(&mut self, msg: &'static str) {
+    fn toast(&mut self, msg: &'static str, kind: ToastKind) {
         log::info!("read-aloud: {msg}");
         if self.app.get_webview_window("ra-pill").is_some() {
             self.keep_pill = true;
             self.emit_pill(
                 "ra-state",
-                serde_json::json!({ "state": "error", "speed": self.speed, "device": null, "message": msg }),
+                serde_json::json!({ "state": kind.state(), "speed": self.speed, "device": null, "message": msg }),
             );
         } else {
             use tauri_plugin_notification::NotificationExt;
@@ -1556,6 +1949,9 @@ impl Controller {
         };
         // always click-through: the low-level hook captures pick clicks
         let _ = w.set_ignore_cursor_events(true);
+        if let Ok(h) = w.hwnd() {
+            win::exclude_from_capture(h.0 as isize);
+        }
         let _ = w.set_position(tauri::PhysicalPosition::new(mon.x, mon.y));
         let _ = w.set_size(tauri::PhysicalSize::new(mon.w.max(1) as u32, mon.h.max(1) as u32));
         let _ = w.show();
@@ -1599,6 +1995,9 @@ impl Controller {
             .build();
         match built {
             Ok(w) => {
+                if let Ok(h) = w.hwnd() {
+                    win::exclude_from_capture(h.0 as isize);
+                }
                 if let Some((x, y)) = pos {
                     let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
                 }
@@ -1634,7 +2033,13 @@ impl Controller {
         });
         self.emit_pill(
             "ra-state",
-            serde_json::json!({ "state": self.shown, "speed": self.speed, "device": device, "message": self.message }),
+            serde_json::json!({
+                "state": self.shown,
+                "speed": self.speed,
+                "device": device,
+                "message": self.message,
+                "follow": self.follow,
+            }),
         );
     }
 
@@ -1670,6 +2075,16 @@ mod tests {
     const JUMP_R: Phase = Picking { resume: Some(Resume::Reading) };
     const JUMP_P: Phase = Picking { resume: Some(Resume::Paused) };
     const JUMP_W: Phase = Picking { resume: Some(Resume::Warming) };
+
+    #[test]
+    fn the_end_of_an_ocr_screen_is_announced() {
+        // information, not an error: the pill's neutral "info" style, not "error"
+        assert_eq!(end_toast(true), Some(Act::Notice(NOTHING_ON_SCREEN_END)));
+        assert_eq!(ToastKind::Info.state(), "info");
+        assert_eq!(ToastKind::Error.state(), "error");
+        assert_eq!(NOTHING_ON_SCREEN_END, "Read to the end of what's on screen");
+        assert_eq!(end_toast(false), None, "the end of a document is silent");
+    }
 
     #[test]
     fn hotkey_from_idle_enters_pick() {
@@ -1790,6 +2205,94 @@ mod tests {
         assert_eq!(a, vec![Act::ExitPick, Act::ShowReading]);
         let (_, a) = step(&FRESH, Ev::Esc);
         assert_eq!(a, vec![Act::ExitPick, Act::Teardown]);
+    }
+
+    #[test]
+    fn plain_click_jump_restarts_from_any_read_phase() {
+        for from in [Reading, Paused, Warming] {
+            let (p, a) = step(&from, Ev::Jump);
+            assert_eq!(p, Warming, "{from:?}");
+            assert_eq!(a, vec![Act::BumpGen, Act::StartRead, Act::ShowWarming], "no pick mode to exit");
+        }
+        // not a read (idle) or in pick mode (the pick hook owns clicks): ignored
+        for from in [Idle, FRESH, JUMP_R, JUMP_P, JUMP_W] {
+            assert_eq!(step(&from, Ev::Jump), (from, vec![]));
+        }
+    }
+
+    #[test]
+    fn click_result_is_committed_only_when_accepted() {
+        assert!(accept_click(true, true, true));
+        assert!(!accept_click(false, true, true), "stale id (superseded / torn down)");
+        assert!(!accept_click(true, false, true), "pick mode started meanwhile (hotkey)");
+        assert!(!accept_click(true, true, false), "nothing speakable");
+    }
+
+    #[test]
+    fn user_scroll_turns_follow_off_and_go_to_word_or_jump_turn_it_on() {
+        for on in [true, false] {
+            assert!(!follow_next(on, FollowEv::UserScrolled));
+            assert!(follow_next(on, FollowEv::GoToWord));
+            assert!(follow_next(on, FollowEv::Jump));
+        }
+    }
+
+    #[test]
+    fn off_screen_word_is_scrolled_only_when_following() {
+        assert_eq!(scroll_plan(true, true, false), ScrollPlan::Scroll, "natural reading flow");
+        assert_eq!(scroll_plan(false, true, false), ScrollPlan::Leave, "follow off: never scroll");
+        assert_eq!(scroll_plan(false, true, true), ScrollPlan::Leave);
+    }
+
+    #[test]
+    fn word_change_after_a_hand_scroll_is_not_followed() {
+        // the previous word also moved since the last look: the user scrolled away
+        assert_eq!(scroll_plan(true, true, true), ScrollPlan::UserScrolled);
+    }
+
+    #[test]
+    fn same_word_is_never_rescrolled_every_tick() {
+        // the old snap-back: a word that stays off screen is not scrolled again
+        assert_eq!(scroll_plan(true, false, false), ScrollPlan::Leave);
+        assert_eq!(scroll_plan(true, false, true), ScrollPlan::Leave);
+    }
+
+    const WIN: (i32, i32, i32, i32) = (50, 40, 1200, 900);
+
+    fn at(word: usize, pos: Option<(f64, f64)>) -> Anchor {
+        Anchor { word, pos, win: WIN }
+    }
+
+    #[test]
+    fn any_page_movement_under_the_word_is_a_user_scroll() {
+        // keyboard, touchpad, wheel or scroll bar alike: no input needed
+        let prev = Some(at(5, Some((100.0, 400.0))));
+        assert!(user_scrolled(prev, at(5, Some((100.0, 250.0))), false), "scrolled down");
+        assert!(user_scrolled(prev, at(5, Some((100.0, 403.0))), false), "3 px is enough");
+        assert!(user_scrolled(prev, at(5, None), false), "scrolled off screen");
+        assert!(user_scrolled(prev, at(5, Some((40.0, 400.0))), false), "horizontal");
+    }
+
+    #[test]
+    fn word_moves_that_are_not_the_users_scroll() {
+        let prev = Some(at(5, Some((100.0, 400.0))));
+        assert!(!user_scrolled(prev, at(5, Some((100.0, 250.0))), true), "right after our own scroll");
+        assert!(!user_scrolled(prev, at(6, Some((100.0, 250.0))), false), "a different word");
+        assert!(!user_scrolled(prev, at(5, Some((101.0, 401.5))), false), "jitter");
+        let moved = Anchor { win: (80, 40, 1200, 900), ..at(5, Some((100.0, 250.0))) };
+        assert!(!user_scrolled(prev, moved, false), "window moved");
+        let resized = Anchor { win: (50, 40, 1000, 900), ..at(5, Some((100.0, 250.0))) };
+        assert!(!user_scrolled(prev, resized, false), "window resized (reflow)");
+        assert!(!user_scrolled(None, at(5, Some((100.0, 250.0))), false), "nothing seen before");
+        assert!(!user_scrolled(Some(at(5, None)), at(5, Some((1.0, 1.0))), false), "scrolled back into view");
+        assert!(!user_scrolled(Some(at(5, None)), at(5, None), false), "still off screen");
+    }
+
+    #[test]
+    fn anchor_is_window_relative() {
+        let r = [Rect { x: 150.0, y: 440.0, w: 30.0, h: 12.0 }, Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }];
+        assert_eq!(anchor_of(3, &r, WIN), Anchor { word: 3, pos: Some((100.0, 400.0)), win: WIN });
+        assert_eq!(anchor_of(3, &[], WIN).pos, None);
     }
 
     #[test]
@@ -2138,5 +2641,42 @@ mod session_tests {
         assert!(seen.len() * 10 >= n_words * 8, "most words highlighted ({} of {n_words})", seen.len());
         let fa = first_audio.expect("audio").as_secs_f64();
         assert!(total.as_secs_f64() <= fa + audio_secs + 3.0, "playback stalled: total {total:?}");
+    }
+
+    /// Task 8: cost of the per-tick work while reading (no app, no windows of ours):
+    /// the Win32 checks a tick makes and the timeline lookup. The UIA rects request it
+    /// sends on a word change is measured by uia_notepad_bench.
+    /// cargo test --release tick_parts_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn tick_parts_cost() {
+        use crate::ra_perf::{ms, thread_cpu};
+        let fg = crate::paste::foreground_window();
+        let n = 10_000;
+        let us = |f: &mut dyn FnMut()| {
+            let t = Instant::now();
+            for _ in 0..n {
+                f();
+            }
+            ms(t.elapsed()) * 1000.0 / n as f64
+        };
+        let mut s = session(2000, 15);
+        let pos = s.chunk_ends.last().copied().unwrap_or(0) / 2;
+        let (x, y) = win::cursor().unwrap_or((100, 100));
+        println!("window_exists      {:.2} us", us(&mut || { std::hint::black_box(win::window_exists(fg)); }));
+        println!("window_shown       {:.2} us", us(&mut || { std::hint::black_box(win::window_shown(fg)); }));
+        println!("word_visible       {:.2} us", us(&mut || { std::hint::black_box(win::word_visible(fg, x, y)); }));
+        println!("monitor_of_point   {:.2} us", us(&mut || { std::hint::black_box(win::monitor_of_point(x, y)); }));
+        println!("word_at (timeline) {:.2} us", us(&mut || { std::hint::black_box(s.word_at(pos)); }));
+        println!("jobs (queue full)  {:.2} us", us(&mut || { std::hint::black_box(s.jobs(0, 2.2)); }));
+        // a reading second: 30 ticks; the rects/visibility path only on ~7 word changes
+        let c0 = thread_cpu();
+        for i in 0..30 * 60 {
+            std::hint::black_box((win::window_exists(fg), s.word_at(pos + i)));
+            if i % 4 == 0 {
+                std::hint::black_box((win::window_shown(fg), win::word_visible(fg, x, y), win::monitor_of_point(x, y)));
+            }
+        }
+        println!("60 s of ticks (excl. UIA + webview): {:.1} ms CPU", ms(thread_cpu() - c0));
     }
 }

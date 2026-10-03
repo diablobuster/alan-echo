@@ -1,4 +1,5 @@
 //! Read Aloud — turn raw UIA word tokens into speakable words and chunks.
+use std::borrow::Cow;
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,9 +138,109 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
     }
     out
 }
+/// ALL-CAPS words misaki tends to spell letter by letter in an all-caps sentence.
+/// Returns the form to feed G2P. A caps word is lowercased (so it is read as a
+/// word) when misaki knows the lowercase word (`known`), the names dictionary
+/// knows it (`names_knows`, e.g. PELOSI), or it is 5+ letters (the letter-to-sound
+/// model says it). It stays caps (spelled) when it is a common acronym
+/// (`KEEP_CAPS`), the lexicon has the caps spelling itself (`known(upper)`, e.g.
+/// NATO), or it is a short unknown (GDP, NFLX). Leading/trailing punctuation,
+/// possessive 'S and hyphen-joined parts are handled. Never panics.
+pub fn speakable_caps<'a>(word: &'a str, known: &dyn Fn(&str) -> bool, names_knows: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
+    if !word.contains('-') {
+        return caps_part(word, known, names_knows);
+    }
+    let parts: Vec<Cow<str>> = word.split('-').map(|p| caps_part(p, known, names_knows)).collect();
+    if parts.iter().all(|p| matches!(p, Cow::Borrowed(_))) {
+        Cow::Borrowed(word)
+    } else {
+        Cow::Owned(parts.join("-"))
+    }
+}
+
+/// Common acronyms whose lowercase form is also an English word.
+const KEEP_CAPS: &[&str] = &["US", "IT", "WHO", "AM", "PM", "OK", "AI", "ID", "TV", "UK", "EU", "UN", "IQ", "PC"];
+
+/// Unknown caps words this long are more likely words or names than acronyms.
+const SAY_CAPS_LEN: usize = 5;
+
+fn caps_part<'a>(w: &'a str, known: &dyn Fn(&str) -> bool, names_knows: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
+    let Some(start) = w.find(char::is_alphanumeric) else { return Cow::Borrowed(w) };
+    let Some((last, ch)) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric()) else { return Cow::Borrowed(w) };
+    let end = last + ch.len_utf8();
+    let core = &w[start..end];
+    let base = core.strip_suffix("'S").or_else(|| core.strip_suffix("\u{2019}S")).unwrap_or(core);
+    if base.chars().count() < 2 || !base.chars().all(|c| c.is_alphabetic() && c.is_uppercase()) {
+        return Cow::Borrowed(w);
+    }
+    if KEEP_CAPS.contains(&base) || known(base) {
+        return Cow::Borrowed(w);
+    }
+    let lower = base.to_lowercase();
+    if !(known(&lower) || names_knows(&lower) || base.chars().count() >= SAY_CAPS_LEN) {
+        return Cow::Borrowed(w);
+    }
+    Cow::Owned(format!("{}{}{}", &w[..start], core.to_lowercase(), &w[end..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn known(w: &str) -> bool {
+        ["the", "and", "on", "for", "talks", "president", "us", "it", "who", "am", "pm", "ok", "id", "mid", "year", "NATO"]
+            .contains(&w)
+    }
+
+    fn caps(w: &str) -> String {
+        speakable_caps(w, &known, &|_| false).into_owned()
+    }
+
+    fn cmu(w: &str) -> bool {
+        ["pelosi", "schumer"].contains(&w)
+    }
+
+    #[test]
+    fn caps_names_known_to_cmu_are_lowercased() {
+        assert_eq!(speakable_caps("PELOSI", &known, &cmu), "pelosi");
+        assert_eq!(speakable_caps("SCHUMER's", &known, &cmu), "SCHUMER's"); // mixed-case suffix: untouched
+        assert_eq!(speakable_caps("PELOSI'S", &known, &cmu), "pelosi's");
+    }
+
+    #[test]
+    fn short_unknown_caps_stay_spelled_long_ones_are_pronounced() {
+        assert_eq!(speakable_caps("GDP", &known, &cmu), "GDP");
+        assert_eq!(speakable_caps("NFLX", &known, &cmu), "NFLX");
+        assert_eq!(speakable_caps("ZELENSKY", &known, &cmu), "zelensky");
+        assert_eq!(speakable_caps("US", &known, &cmu), "US");
+    }
+
+    #[test]
+    fn caps_dictionary_words_are_lowercased() {
+        assert_eq!(caps("THE"), "the");
+        assert_eq!(caps("TALKS"), "talks");
+        assert_eq!(caps("AND"), "and");
+        assert_eq!(caps("THE,"), "the,");
+        assert_eq!(caps("\u{201C}FOR"), "\u{201C}for");
+        assert_eq!(caps("PRESIDENT'S"), "president's");
+        assert_eq!(caps("PRESIDENT\u{2019}S."), "president\u{2019}s.");
+        assert_eq!(caps("MID-YEAR"), "mid-year");
+        assert_eq!(caps("THE\u{1F600}"), "the\u{1F600}");
+    }
+
+    #[test]
+    fn caps_acronyms_and_unknowns_stay() {
+        for w in ["FBI", "GDP", "CEO", "US", "IT", "WHO", "AM", "PM", "OK", "ID", "US.", "NATO", "NASA", "A", "I"] {
+            assert_eq!(caps(w), w, "{w}");
+        }
+    }
+
+    #[test]
+    fn caps_leaves_mixed_and_odd_input_alone() {
+        for w in ["iPhone", "McDonald", "The", "the", "COVID19", "3PM", "123", "", "-", "\u{1F600}", "\u{6771}\u{4EAC}", "'S", "--", "\u{00C9}T\u{00C9}"] {
+            assert_eq!(caps(w), w, "{w:?}");
+        }
+    }
     fn raw(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
     fn texts(w: &[Word]) -> Vec<&str> { w.iter().map(|x| x.text.as_str()).collect() }
 

@@ -764,3 +764,143 @@ fn uia_browser_manual() {
     assert!(res.is_err());
     drop(ra);
 }
+
+/// Task 8 bench: worker latency of hover (on words, on blank text area, on Notepad's
+/// own chrome) and of rects, on our own Notepad window. Run in release:
+/// cargo test --release uia_notepad_bench -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn uia_notepad_bench() {
+    use crate::ra_perf::{ms, pct, thread_cpu};
+    unsafe {
+        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    if !notepad_pids().is_empty() {
+        println!("skipped: a Notepad is open (this bench never touches your windows)");
+        return;
+    }
+    let stem = format!("{NP_PREFIX}bench_{}", std::process::id());
+    let file = std::env::temp_dir().join(format!("{stem}.txt"));
+    let lines: String = (0..30)
+        .map(|i| format!("Line{i:02} alpha bravo charlie delta echo foxtrot golf hotel india juliet.\r\n"))
+        .collect();
+    std::fs::write(&file, lines).unwrap();
+    let mut guard = Cleanup { hwnds: vec![], files: vec![file.clone()] };
+    let hwnd = open_in_notepad(&file, &stem);
+    guard.hwnds.push(hwnd);
+    unsafe {
+        let _ = MoveWindow(hwnd, 80, 60, 1100, 800, true);
+    }
+    raise(hwnd);
+    std::thread::sleep(Duration::from_millis(1000));
+    let uia = new_uia();
+    let (doc_el, tp) = main_text(&uia, hwnd);
+    let el = to_rect(unsafe { doc_el.CurrentBoundingRectangle() }.unwrap());
+    // word centres spread over the visible lines (every 7th word)
+    let pts: Vec<(i32, i32)> = (0..40)
+        .filter_map(|k| nth_word(&tp, k * 7).1.first().map(center))
+        .filter(|&(x, y)| contains(std::slice::from_ref(&el), x as f64, y as f64))
+        .collect();
+    assert!(pts.len() >= 20, "visible words: {}", pts.len());
+    let ra = Uia::start(hwnd.0 as isize);
+    let wait = Duration::from_secs(2);
+    let _ = ra.pick(pts[0].0, pts[0].1).expect("pick");
+    let time = |f: &mut dyn FnMut() -> bool| {
+        let t = Instant::now();
+        let ok = f();
+        (ms(t.elapsed()), ok)
+    };
+    let c0 = thread_cpu();
+    let mut word = Vec::new();
+    let mut hits = 0;
+    for _ in 0..3 {
+        for &(x, y) in &pts {
+            let (d, ok) = time(&mut || ra.hover_wait(x, y, wait).is_some_and(|v| contains(&v, x as f64, y as f64)));
+            word.push(d);
+            hits += usize::from(ok);
+        }
+    }
+    let blank_pts: Vec<(i32, i32)> = (0..20).map(|k| (el.x as i32 + 40 + k * 30, (el.y + el.h) as i32 - 25)).collect();
+    let mut blank = Vec::new();
+    for &(x, y) in blank_pts.iter().cycle().take(60) {
+        blank.push(time(&mut || ra.hover_wait(x, y, wait).is_some()).0);
+    }
+    // Notepad's own chrome (menu / tab strip) above the text element
+    let chrome_pts: Vec<(i32, i32)> = (0..20).map(|k| (el.x as i32 + 40 + k * 30, el.y as i32 - 40)).collect();
+    let mut chrome = Vec::new();
+    for &(x, y) in chrome_pts.iter().cycle().take(60) {
+        chrome.push(time(&mut || ra.hover_wait(x, y, wait).is_some()).0);
+    }
+    let mut rects = Vec::new();
+    for i in 0..120usize {
+        rects.push(time(&mut || ra.rects_wait(vec![i % 60], wait).is_some()).0);
+    }
+    let caller_cpu = ms(thread_cpu() - c0);
+    println!("hover on words:   {} ({hits}/{} hit the word)", pct(&word), word.len());
+    println!("hover on blank:   {}", pct(&blank));
+    println!("hover on chrome:  {}", pct(&chrome));
+    println!("rects (1 word):   {}", pct(&rects));
+    println!("caller thread CPU {caller_cpu:.1} ms");
+    drop(ra);
+}
+
+/// Where hover time goes on Notepad's own chrome (menu / tab strip): breakdown of the
+/// steps `hover` runs for a point with no text. Same rules as `uia_notepad_bench`.
+/// cargo test --release uia_chrome_breakdown -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn uia_chrome_breakdown() {
+    use crate::ra_perf::{ms, pct};
+    unsafe {
+        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    if !notepad_pids().is_empty() {
+        println!("skipped: a Notepad is open (this bench never touches your windows)");
+        return;
+    }
+    let stem = format!("{NP_PREFIX}chrome_{}", std::process::id());
+    let file = std::env::temp_dir().join(format!("{stem}.txt"));
+    std::fs::write(&file, "Alpha bravo charlie delta echo.\r\n").unwrap();
+    let mut guard = Cleanup { hwnds: vec![], files: vec![file.clone()] };
+    let hwnd = open_in_notepad(&file, &stem);
+    guard.hwnds.push(hwnd);
+    unsafe {
+        let _ = MoveWindow(hwnd, 80, 60, 1100, 800, true);
+    }
+    raise(hwnd);
+    std::thread::sleep(Duration::from_millis(1000));
+    let uia = new_uia();
+    let (doc_el, _) = main_text(&uia, hwnd);
+    let el = to_rect(unsafe { doc_el.CurrentBoundingRectangle() }.unwrap());
+    let mut st = State {
+        uia: uia.clone(),
+        own_pid: unsafe { GetCurrentProcessId() },
+        target: make_target(&uia, hwnd.0 as isize),
+        read: Read::default(),
+        staged: None,
+        source: Arc::new(AtomicIsize::new(hwnd.0 as isize)),
+        ocr_hover: None,
+        acro_hover: None,
+    };
+    let pts: Vec<(i32, i32)> = (0..20).map(|k| (el.x as i32 + 40 + k * 30, el.y as i32 - 40)).collect();
+    let (mut tp, mut fb, mut ok, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for &(x, y) in pts.iter().cycle().take(100) {
+        let t = Instant::now();
+        let r = text_pattern_at(&mut st, x, y).map(|_| ());
+        tp.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let _ = fallback_at(&mut st, x, y);
+        fb.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let _ = ocr_ok_at(&st, x, y);
+        ok.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let _ = hover(&mut st, x, y);
+        all.push(ms(t.elapsed()));
+        assert!(r.is_err(), "chrome point has no text pattern");
+    }
+    println!("text_pattern_at (incl. fallback): {}", pct(&tp));
+    println!("fallback_at alone:                {}", pct(&fb));
+    println!("ocr_ok_at:                        {}", pct(&ok));
+    println!("hover total:                      {}", pct(&all));
+}

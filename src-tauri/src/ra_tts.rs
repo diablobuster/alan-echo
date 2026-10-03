@@ -7,13 +7,17 @@
 //! DirectML (q8) is used only for `pref == "gpu"`; if it fails to open or to run,
 //! the engine falls back to CPU by itself.
 use crate::{
+    ra_g2pen::G2pEn,
     ra_model,
+    ra_names::{Lts, NameFallback, Names},
+    ra_text,
     ra_timing::{self, WordTime},
     ra_wsola,
 };
-use misaki_rs::{Language, G2P};
+use misaki_rs::{Language, Lexicon, G2P};
 use ort::{ep, session::Session, value::Tensor};
 use parking_lot::{Condvar, Mutex, MutexGuard};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -85,6 +89,8 @@ struct Loaded {
     vocab: HashMap<char, i64>,
     voice: Vec<f32>, // rows of 256
     g2p: G2P,
+    /// CMUdict + g2p_en, built with the engine and freed with it on idle unload.
+    names: Arc<Names>,
 }
 
 enum Slot {
@@ -247,7 +253,49 @@ fn load_voice_or_default(dir: &Path, voice: &str) -> Result<Vec<f32>, String> {
     })
 }
 
+/// CPU session knobs (the bench sweeps them; production uses `CpuOpts::default()`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CpuOpts {
+    pub intra: usize,
+    pub spin: bool,
+    pub mem_pattern: bool,
+    /// Graph optimisation: 0 = ONNX Runtime's default (all), 1 basic, 2 extended,
+    /// 3 layout, 4 all, 9 none. Bench only: production always uses the default.
+    #[cfg(test)]
+    pub opt: u8,
+}
+
+/// Measured (Task 8, ra_tts::bench::tts_shapes, interleaved on a shared machine; every
+/// reading chunk is a new input length): spinning off + memory pattern off vs ORT's
+/// defaults: CPU per second of speech 5.4 -> 2.8 s, RTF at 2.2x 0.75 -> 0.58, first
+/// chunk no slower (1154 -> 1118 ms). Spinning idle threads burn cores between ops;
+/// the memory pattern only pays off when an input length repeats, which reading never does.
+///
+/// Memory pattern trade-off (controller ruling, Task 8 review): with the pattern ON, a
+/// chunk whose input length was seen before runs ~300 ms faster (an exact replay of the
+/// same 12-word chunk: ~700 vs ~1045 ms), but every NEW length pays extra to plan and
+/// record its pattern, which nearly doubled CPU per second of speech. A read never
+/// repeats a chunk, and a jump re-chunks from the clicked word, so a jump back almost
+/// always gives new lengths too (measured: no slower with it OFF, see `tts_jump_back`).
+/// Only re-reading from the exact same start word replays the same shapes, so the
+/// pattern stays OFF.
+impl Default for CpuOpts {
+    fn default() -> Self {
+        CpuOpts {
+            intra: num_cpus::get_physical().clamp(1, 8),
+            spin: false,
+            mem_pattern: false,
+            #[cfg(test)]
+            opt: 0,
+        }
+    }
+}
+
 fn open_session(path: &Path, gpu: bool) -> Result<Session, String> {
+    open_session_with(path, gpu, CpuOpts::default())
+}
+
+fn open_session_with(path: &Path, gpu: bool, o: CpuOpts) -> Result<Session, String> {
     // CPU arena off: the arena keeps its high-water mark until unload. Measured on the
     // CPU path: steady private 705 -> 455 MB; costs ~0.5 s on a 27-word chunk's first run.
     let cpu = ep::CPU::default().with_arena_allocator(false).build();
@@ -259,7 +307,21 @@ fn open_session(path: &Path, gpu: bool) -> Result<Session, String> {
         b.with_parallel_execution(false).map_err(s)?
     } else {
         let b = b.with_execution_providers([cpu]).map_err(s)?;
-        b.with_intra_threads(num_cpus::get_physical().clamp(1, 8)).map_err(s)?
+        let b = b.with_intra_op_spinning(o.spin).map_err(s)?;
+        let b = b.with_memory_pattern(o.mem_pattern).map_err(s)?;
+        #[cfg(test)]
+        let b = {
+            use ort::session::builder::GraphOptimizationLevel as G;
+            match o.opt {
+                1 => b.with_optimization_level(G::Level1).map_err(s)?,
+                2 => b.with_optimization_level(G::Level2).map_err(s)?,
+                3 => b.with_optimization_level(G::Level3).map_err(s)?,
+                4 => b.with_optimization_level(G::All).map_err(s)?,
+                9 => b.with_optimization_level(G::Disable).map_err(s)?,
+                _ => b,
+            }
+        };
+        b.with_intra_threads(o.intra).map_err(s)?
     };
     b.commit_from_file(path).map_err(|e| e.to_string())
 }
@@ -389,8 +451,8 @@ impl Engine {
         let vocab = load_vocab(&f.tokenizer)?;
         let voice = load_voice_or_default(&f.voices_dir, voice)?;
         let t = Instant::now();
-        // G2P init (lexicon + tagger parse) overlaps the session open
-        let g2p_job = std::thread::Builder::new().name("ra-tts-g2p".into()).spawn(|| G2P::new(Language::EnglishUS)).ok();
+        // G2P + names init (lexicon, tagger, CMUdict, g2p_en weights) overlaps the session open
+        let g2p_job = std::thread::Builder::new().name("ra-tts-g2p".into()).spawn(build_g2p).ok();
         let (session, device) = if wants_gpu(pref) && f.q8_dml.is_file() {
             match open_session(&f.q8_dml, true) {
                 Ok(s) => (s, Device::Gpu),
@@ -402,12 +464,12 @@ impl Engine {
         } else {
             (open_session(&f.fp32, false)?, Device::Cpu)
         };
-        let g2p = match g2p_job.map(|h| h.join()) {
-            Some(Ok(g)) => g,
-            _ => G2P::new(Language::EnglishUS), // spawn failed (or, debug only, init panicked)
+        let (g2p, names) = match g2p_job.map(|h| h.join()) {
+            Some(Ok(parts)) => parts,
+            _ => build_g2p(), // spawn failed (or, debug only, init panicked)
         };
         log::info!("read-aloud: engine loaded on {:?} in {:?}", device, t.elapsed());
-        Ok(Loaded { session, device, vocab, voice, g2p })
+        Ok(Loaded { session, device, vocab, voice, g2p, names })
     }
 
     fn spawn_voice_swap(&self, eng: Arc<Mutex<Loaded>>, voice: String) {
@@ -499,20 +561,22 @@ impl Engine {
         let device = l.device;
         let rate = effective_rate(rate);
         let empty = || ChunkAudio { pcm: Vec::new(), words: Vec::new(), device, covered: words.len() };
-        let text = words.join(" ");
+        let fed = g2p_words(&l.g2p, &l.names, words);
+        // align against the words as misaki tokenizes them (hand-list overrides stripped)
+        let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+        let plain: Vec<&str> = plain.iter().map(|w| w.as_ref()).collect();
+        let fed: Vec<&str> = fed.iter().map(|w| w.as_ref()).collect();
+        let text = fed.join(" ");
         if text.trim().is_empty() {
             return Ok(empty());
         }
         let (_, tokens) = l.g2p.g2p(&text).map_err(|e| format!("g2p: {e:?}"))?;
-        let tok_text: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
-        let owner = ra_timing::align(words, &tok_text);
-        // every token with phonemes feeds the model (punctuation shapes prosody);
-        // only word-owned ones get spans
-        let ph: Vec<(usize, String, bool)> = tokens
-            .iter()
-            .zip(owner.iter())
-            .filter_map(|(t, o)| Some((o.unwrap_or(NO_WORD), t.phonemes.clone()?, !t.whitespace.is_empty())))
-            .collect();
+        let toks: Vec<(&str, Option<&str>, bool)> =
+            tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
+        let tok_text: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        // `plain` keeps the word count and order of `words`, so indices line up
+        let owner = ra_timing::align(&plain, &tok_text);
+        let ph = token_phonemes(&toks, &owner);
         let (ids, spans, covered) = build_ids_with(&ph, &l.vocab, words.len(), map_joined);
         let covered = covered.min(words.len());
         if ids.is_empty() {
@@ -561,10 +625,389 @@ impl Engine {
     }
 }
 
+/// misaki G2P whose unknown words go to the names fallback (hand list -> CMUdict
+/// -> g2p_en -> spelled letters), plus the names table the caps rule consults.
+fn build_g2p() -> (G2P, Arc<Names>) {
+    let t = Instant::now();
+    let names = Arc::new(Names::load(G2pEn::load().map(|g| Box::new(g) as Box<dyn Lts>)));
+    let names_took = t.elapsed();
+    let g2p = G2P::with_fallback(Language::EnglishUS, Some(Box::new(NameFallback(Arc::clone(&names)))));
+    log::info!("read-aloud: names loaded in {:?}, names + g2p in {:?}", names_took, t.elapsed());
+    (g2p, names)
+}
+
+/// G2P input for a chunk, one entry per word (same count and order):
+/// - a hand-list word (Xi, Nguyen) becomes misaki's `[word](/phonemes/)` override,
+///   so the hand list wins even where misaki has its own reading;
+/// - ALL-CAPS words are lowercased when misaki or the names dictionary knows them,
+///   or they are long enough to be a word (`ra_text::speakable_caps`);
+/// - page `[` `]` become `(` `)`, so page text is never read as override syntax
+///   (Kokoro has no bracket symbols; parens give the same pause).
+/// Hyphen-joined parts are handled one by one. Use `plain_word` for alignment.
+fn g2p_words<'a>(g: &G2P, names: &Names, words: &[&'a str]) -> Vec<Cow<'a, str>> {
+    let known = |w: &str| lexicon_knows(&g.lexicon, w);
+    let names_knows = |w: &str| names.knows(w);
+    let part = |p: &'a str| -> Cow<'a, str> {
+        match hand_override(p, names) {
+            Some(o) => Cow::Owned(o),
+            None => unbracket(ra_text::speakable_caps(p, &known, &names_knows)),
+        }
+    };
+    words
+        .iter()
+        .map(|w| {
+            if !w.contains('-') {
+                return part(w);
+            }
+            let parts: Vec<Cow<str>> = w.split('-').map(part).collect();
+            if parts.iter().all(|p| matches!(p, Cow::Borrowed(_))) {
+                Cow::Borrowed(*w)
+            } else {
+                Cow::Owned(parts.join("-"))
+            }
+        })
+        .collect()
+}
+
+/// `[` / `]` -> `(` / `)`.
+fn unbracket(s: Cow<'_, str>) -> Cow<'_, str> {
+    if s.contains(['[', ']']) {
+        Cow::Owned(s.replace('[', "(").replace(']', ")"))
+    } else {
+        s
+    }
+}
+
+/// A word (no hyphen) whose letters are a hand-list entry, as misaki's phoneme
+/// override with its surrounding punctuation kept (`"Xi's,"` -> `[Xi's](/ʃˈiz/),`).
+/// Hand-list phonemes never contain `[ ] ( ) /` (checked at load).
+fn hand_override(w: &str, names: &Names) -> Option<String> {
+    let start = w.find(char::is_alphanumeric)?;
+    let (last, ch) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric())?;
+    let end = last + ch.len_utf8();
+    let core = &w[start..end];
+    if !core.chars().all(|c| c.is_alphabetic() || c == '\'' || c == '\u{2019}') {
+        return None;
+    }
+    let ph = names.hand(core)?;
+    let lead = unbracket(Cow::Borrowed(&w[..start]));
+    let trail = unbracket(Cow::Borrowed(&w[end..]));
+    Some(format!("{lead}[{core}](/{ph}/){trail}"))
+}
+
+/// A `g2p_words` entry as misaki tokenizes it: every `[text](/ph/)` override
+/// replaced by `text`. Page brackets were already turned into parens, so any `[`
+/// here is ours. Malformed input is returned as is; never panics.
+fn plain_word(w: &str) -> Cow<'_, str> {
+    if !w.contains('[') {
+        return Cow::Borrowed(w);
+    }
+    let mut out = String::with_capacity(w.len());
+    let mut rest = w;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(mid) = after.find("](/") else { break };
+        let Some(close) = after[mid + 3..].find("/)") else { break };
+        out.push_str(&rest[..open]);
+        out.push_str(&after[..mid]);
+        rest = &after[mid + 3 + close + 2..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// Uppercase: the lexicon has that exact spelling (NATO, US). Lowercase: a gold
+/// word, a gold stem (+s/es/ies/ed/ing), or a silver word of 4+ letters (short
+/// silver entries are mostly acronyms like fbi, cia).
+fn lexicon_knows(lx: &Lexicon, w: &str) -> bool {
+    if w.chars().any(char::is_uppercase) {
+        return lx.golds.contains_key(w) || lx.silvers.contains_key(w);
+    }
+    if lx.in_gold(w) || (w.chars().count() >= 4 && lx.silvers.contains_key(w)) {
+        return true;
+    }
+    let gold = |s: &str| s.chars().count() >= 2 && lx.in_gold(s);
+    let strip = |suf: &str| w.strip_suffix(suf);
+    strip("ies").is_some_and(|s| gold(&format!("{s}y")))
+        || strip("es").is_some_and(gold)
+        || strip("s").is_some_and(gold)
+        || strip("ed").is_some_and(|s| gold(s) || gold(&format!("{s}e")))
+        || strip("ing").is_some_and(|s| gold(s) || gold(&format!("{s}e")))
+}
+
+fn is_hyphen(s: &str) -> bool {
+    matches!(s, "-" | "\u{2010}" | "\u{2011}")
+}
+
+/// (word or NO_WORD, phonemes, followed-by-whitespace) per G2P token. Every token
+/// with phonemes feeds the model (punctuation shapes prosody), except a hyphen
+/// inside one word ("mid-year"): misaki gives it a space phoneme, which would
+/// add a long pause between the halves.
+fn token_phonemes(toks: &[(&str, Option<&str>, bool)], owner: &[Option<usize>]) -> Vec<(usize, String, bool)> {
+    let own = |i: Option<usize>| i.and_then(|i| owner.get(i).copied().flatten());
+    toks.iter()
+        .zip(owner.iter())
+        .enumerate()
+        .filter(|&(i, ((text, p, _), o))| {
+            let inner = o.is_none()
+                && is_hyphen(text)
+                && p.map_or(true, |p| p.trim().is_empty())
+                && own(i.checked_sub(1)).is_some()
+                && own(i.checked_sub(1)) == own(Some(i + 1));
+            !inner
+        })
+        .filter_map(|(_, ((_, p, ws), o))| Some((o.unwrap_or(NO_WORD), (*p)?.to_string(), *ws)))
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "ra_tts_bench.rs"]
+mod bench;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn joined(ph: &[(usize, String, bool)]) -> String {
+        ph.iter().map(|(_, p, ws)| format!("{p}{}", if *ws { " " } else { "" })).collect()
+    }
+
+    #[test]
+    fn hyphenated_word_has_no_dash_pause() {
+        let words = ["a", "mid-year", "plan"];
+        let toks = [("a", Some("ɐ"), true), ("mid", Some("mˈɪd"), true), ("-", Some(" "), true), ("year", Some("jˈɪɹ"), true), ("plan", Some("plˈæn"), false)];
+        let tt: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        let owner = ra_timing::align(&words, &tt);
+        assert_eq!(owner, vec![Some(0), Some(1), None, Some(1), Some(2)]);
+        let ph = token_phonemes(&toks, &owner);
+        let s = joined(&ph);
+        assert_eq!(s, "ɐ mˈɪd jˈɪɹ plˈæn");
+        assert!(!s.contains("  "), "{s:?}");
+        // the word span covers both halves
+        let v: HashMap<char, i64> = s.chars().filter(|c| *c != ' ').map(|c| (c, 1)).chain([(' ', 16)]).collect();
+        let (_, spans, _) = build_ids(&ph, &v, 3);
+        let w1: Vec<_> = spans.iter().filter(|sp| sp.0 == 1).collect();
+        assert_eq!(w1.first().map(|sp| sp.1), Some(2));
+        assert_eq!(w1.last().map(|sp| sp.2), Some(2 + "mˈɪd jˈɪɹ".chars().count()));
+    }
+
+    #[test]
+    fn spaced_dash_keeps_its_pause() {
+        let words = ["yes", "-", "no"];
+        let toks = [("yes", Some("jˈɛs"), true), ("-", Some(" "), true), ("no", Some("nˈO"), false)];
+        let tt: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        let owner = ra_timing::align(&words, &tt);
+        assert_eq!(joined(&token_phonemes(&toks, &owner)), "jˈɛs   nˈO");
+        // a dash glued to a different-word neighbour (bad align) also keeps it
+        let owner2 = [Some(0), None, Some(2)];
+        assert_eq!(joined(&token_phonemes(&toks, &owner2)), "jˈɛs   nˈO");
+    }
+
+    #[test]
+    fn hyphen_drop_needs_whitespace_only_phonemes() {
+        let toks = [("mid", Some("mˈɪd"), false), ("-", Some("x"), false), ("year", Some("jˈɪɹ"), false)];
+        let owner = [Some(0), None, Some(0)];
+        assert_eq!(joined(&token_phonemes(&toks, &owner)), "mˈɪdxjˈɪɹ");
+        // edge positions never panic
+        assert_eq!(token_phonemes(&[("-", Some(" "), true)], &[None]).len(), 1);
+        assert!(token_phonemes(&[], &[]).is_empty());
+    }
+
+    /// The engine's real G2P + names (CMUdict + g2p_en fallback), built once per test run.
+    fn test_parts() -> &'static (G2P, Arc<Names>) {
+        static G: std::sync::OnceLock<(G2P, Arc<Names>)> = std::sync::OnceLock::new();
+        G.get_or_init(build_g2p)
+    }
+
+    fn test_g2p() -> &'static G2P {
+        &test_parts().0
+    }
+
+    fn test_names() -> &'static Names {
+        &test_parts().1
+    }
+
+    #[test]
+    fn names_are_pronounced_not_spelled() {
+        let g = test_g2p();
+        for (text, word) in [
+            ("Pelosi spoke", "Pelosi"),
+            ("PELOSI SPOKE", "PELOSI"),
+            ("Pelosi's bill", "Pelosi's"),
+            ("a Zelensky-led talk", "Zelensky-led"),
+            ("Buttigieg won", "Buttigieg"),
+        ] {
+            let words: Vec<&str> = text.split(' ').collect();
+            let fed = g2p_words(g, test_names(), &words);
+            let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+            let (_, toks) = g.g2p(&fed.join(" ")).unwrap();
+            let ph: String = toks.iter().filter_map(|t| t.phonemes.clone()).collect();
+            // spelled names have a stress mark per letter; a word has at most ~4
+            let marks = ph.matches(['ˈ', 'ˌ']).count();
+            assert!(marks <= words.len() + 4, "{text}: {ph}");
+            assert!(!ph.contains("  "), "{word}: no multi-space gap: {ph}");
+        }
+    }
+
+    #[test]
+    fn fallback_word_keeps_one_timing_span_per_word() {
+        let g = test_g2p();
+        let words = ["Senator", "Pelosi", "said", "no"];
+        let (_, toks) = g.g2p(&words.join(" ")).unwrap();
+        let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        let owner = ra_timing::align(&words, &tt);
+        for w in 0..words.len() {
+            assert!(owner.contains(&Some(w)), "word {w} has no token");
+        }
+    }
+
+    /// Phonemes per word through the real path: g2p_words -> misaki -> align on plain words.
+    fn spoken(words: &[&str]) -> Vec<String> {
+        phonemes_per_word(test_g2p(), test_names(), words)
+    }
+
+    #[test]
+    fn hand_list_overrides_misaki() {
+        // misaki reads XI as the Roman numeral "eleven"/"Roman" and has its own Nguyen
+        assert_eq!(spoken(&["Today,", "Xi", "spoke."])[1], "ʃˈi");
+        assert_eq!(spoken(&["Today,", "XI", "spoke."])[1], "ʃˈi");
+        assert_eq!(spoken(&["Today,", "Nguyen", "spoke."])[1], "wˈɪn");
+        assert_eq!(spoken(&["Today,", "Xi's", "plan."])[1], "ʃˈiz");
+        assert_eq!(spoken(&["Today,", "XI'S", "plan."])[1], "ʃˈiz");
+        assert_eq!(spoken(&["(Xi),", "spoke."])[0].replace(['(', ')', ','], ""), "ʃˈi");
+        assert!(spoken(&["a", "Xi-led", "talk"])[1].starts_with("ʃˈi"), "{:?}", spoken(&["a", "Xi-led", "talk"]));
+    }
+
+    #[test]
+    fn override_word_keeps_one_span_per_word() {
+        let g = test_g2p();
+        for words in [
+            vec!["Senator", "Xi", "said", "no"],
+            vec!["Xi's", "talks", "with", "Nguyen,", "XI", "said."],
+            vec!["\u{201C}XI'S", "Xi-led", "plan\u{201D}"],
+        ] {
+            let fed = g2p_words(g, test_names(), &words);
+            let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+            let plain: Vec<&str> = plain.iter().map(|c| c.as_ref()).collect();
+            let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+            let (_, toks) = g.g2p(&fed.join(" ")).unwrap();
+            let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+            let owner = ra_timing::align(&plain, &tt);
+            for w in 0..words.len() {
+                assert!(owner.contains(&Some(w)), "{words:?}: word {w} has no token ({tt:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn words_misaki_gets_right_are_untouched() {
+        let words = ["Washington", "Pelosi", "the", "NATO", "FBI", "mid-year", "iPhone", "McDonald's", "said."];
+        let fed = g2p_words(test_g2p(), test_names(), &words);
+        for (w, f) in words.iter().zip(&fed) {
+            assert!(!f.contains('['), "{w} -> {f}");
+            assert!(matches!(f, Cow::Borrowed(_)), "{w} -> {f}");
+        }
+    }
+
+    #[test]
+    fn page_brackets_are_never_override_syntax() {
+        let g = test_g2p();
+        let words = ["[1](2)", "[Xi", "x](/ʒʒʒ/)", "](", "[", "]", "🙂", "東京", "a[b](/zz/)c", "Xi](/x/)", "[[Xi]]", "word"];
+        let fed = g2p_words(g, test_names(), &words);
+        for (w, f) in words.iter().zip(&fed) {
+            if !w.contains("Xi") {
+                assert!(!f.contains(['[', ']']), "{w:?} -> {f:?}");
+            }
+        }
+        let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+        let (_, toks) = g.g2p(&fed.join(" ")).expect("never errors");
+        let ph: String = toks.iter().filter_map(|t| t.phonemes.clone()).collect();
+        assert!(!ph.contains("ʒʒ") && !ph.contains("zz"), "page text applied an override: {ph}");
+        // every override that does happen is a whole word we produced
+        let one = g2p_words(g, test_names(), &["[[Xi]]"]);
+        assert_eq!(one[0], "(([Xi](/ʃˈi/)))");
+        assert_eq!(plain_word(&one[0]), "((Xi))");
+        for w in ["", "[", "](", "[a](/", "[a](/b", "x[Xi](/ʃˈi/", "🙂[", "東京](/"] {
+            let _ = plain_word(w);
+        }
+    }
+
+    #[test]
+    fn lexicon_words_never_reach_the_name_fallback() {
+        // a lexicon word keeps misaki's own reading: same phonemes with and without the fallback
+        let plain = G2P::new(Language::EnglishUS);
+        let text = "The president said the report was late";
+        let a: Vec<Option<String>> = test_g2p().g2p(text).unwrap().1.into_iter().map(|t| t.phonemes).collect();
+        let b: Vec<Option<String>> = plain.g2p(text).unwrap().1.into_iter().map(|t| t.phonemes).collect();
+        assert_eq!(a, b);
+    }
+
+    fn word_phonemes(text_words: &[&str]) -> Vec<(String, String)> {
+        let g = test_g2p();
+        let fed = g2p_words(g, test_names(), text_words);
+        let fed_refs: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+        let (_, toks) = g.g2p(&fed_refs.join(" ")).expect("g2p");
+        let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        let owner = ra_timing::align(&fed_refs, &tt);
+        let mut out: Vec<(String, String)> = text_words.iter().map(|w| (w.to_string(), String::new())).collect();
+        for (t, o) in toks.iter().zip(owner) {
+            if let (Some(o), Some(p)) = (o, &t.phonemes) {
+                out[o].1.push_str(p);
+            }
+        }
+        out
+    }
+
+    /// Real misaki: "mid-year" comes back split around a hyphen token, and our assembly
+    /// (what the model is fed) has no multi-space gap between the halves.
+    #[test]
+    fn real_g2p_hyphenated_word_has_no_gap() {
+        let g = test_g2p();
+        let words = ["a", "mid-year", "plan"];
+        let fed = g2p_words(g, test_names(), &words);
+        let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+        let (_, tokens) = g.g2p(&fed.join(" ")).expect("g2p");
+        let toks: Vec<(&str, Option<&str>, bool)> =
+            tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
+        let tt: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        let owner = ra_timing::align(&fed, &tt);
+        let owned_by_mid = owner.iter().filter(|o| **o == Some(1)).count();
+        assert!(owned_by_mid >= 2 && tt.iter().any(|t| is_hyphen(t)), "misaki splits mid-year: {toks:?}");
+        let s = joined(&token_phonemes(&toks, &owner));
+        assert!(!s.contains("  "), "multi-space gap in {s:?} (tokens {toks:?})");
+    }
+
+    #[test]
+    fn all_caps_sentence_reads_words_not_letters() {
+        let s = ["THE", "PRESIDENT", "AND", "THE", "SENATE", "MET", "ON", "TUESDAY", "FOR", "NEW", "TALKS"];
+        let lower: Vec<String> = s.iter().map(|w| w.to_lowercase()).collect();
+        let lower_refs: Vec<&str> = lower.iter().map(|w| w.as_str()).collect();
+        let got = word_phonemes(&s);
+        let want = word_phonemes(&lower_refs);
+        for ((w, p), (_, q)) in got.iter().zip(want.iter()) {
+            assert_eq!(p, q, "{w} spelled differently from its lowercase reading");
+        }
+    }
+
+    #[test]
+    fn all_caps_acronyms_still_spelled() {
+        let g = test_g2p();
+        let words = ["FBI", "GDP", "CEO", "NATO", "NASA", "US", "IT", "WHO", "THE,", "TALKS."];
+        let fed: Vec<String> = g2p_words(g, test_names(), &words).into_iter().map(|c| c.into_owned()).collect();
+        assert_eq!(fed, vec!["FBI", "GDP", "CEO", "NATO", "NASA", "US", "IT", "WHO", "the,", "talks."]);
+    }
+
+    #[test]
+    fn caps_rewrite_is_cheap() {
+        let g = test_g2p();
+        let words: Vec<&str> = ["THE", "PRESIDENT", "SAID", "FBI", "TALKS", "GDP", "MID-YEAR", "iPhone", "42"].iter().cycle().take(30).copied().collect();
+        let t = Instant::now();
+        for _ in 0..100 {
+            let _ = g2p_words(g, test_names(), &words);
+        }
+        assert!(t.elapsed() < Duration::from_millis(500), "{:?} for 100 chunks", t.elapsed());
+    }
 
     fn vocab() -> HashMap<char, i64> {
         [('h', 1), ('ə', 2), ('l', 3), ('o', 4), (' ', 16)].into_iter().collect()
@@ -891,5 +1334,173 @@ mod tests {
         assert_eq!(e.device(), Some(Device::Cpu), "auto resolves to CPU");
         assert_eq!(e.loads.load(Ordering::SeqCst), 1);
         assert!(matches!(&*e.slot.lock(), Slot::Ready { voice, .. } if voice == "am_michael"));
+    }
+
+    /// Phonemes each word of `words` gets (after the caps rule), as fed to the model.
+    fn phonemes_per_word(g: &G2P, names: &Names, words: &[&str]) -> Vec<String> {
+        let fed = g2p_words(g, names, words);
+        let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+        let plain: Vec<&str> = plain.iter().map(|c| c.as_ref()).collect();
+        let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+        let mut out = vec![String::new(); words.len()];
+        let Ok((_, toks)) = g.g2p(&fed.join(" ")) else { return out };
+        let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        let owner = ra_timing::align(&plain, &tt);
+        for (t, o) in toks.iter().zip(owner) {
+            if let (Some(o), Some(p)) = (o, &t.phonemes) {
+                out[o].push_str(&kokoro_phonemes(p));
+            }
+        }
+        out
+    }
+
+    fn write_wav_at(pcm: &[f32], p: &Path) {
+        let spec = hound::WavSpec { channels: 1, sample_rate: ra_timing::SR, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::create(p, spec).unwrap();
+        for s in pcm {
+            w.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn html_escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    fn file_url(p: &Path) -> String {
+        format!("file:///{}", p.display().to_string().replace('\\', "/").replace(' ', "%20").replace('\'', "%27"))
+    }
+
+    /// Names A/B listening board (spec 2.5): every word of tools/read-aloud/names.txt in
+    /// "Today, WORD spoke." at 2.2x on the real CPU model, before (plain misaki, empty
+    /// names table: the old caps rule) and after (full pipeline). WAVs go to
+    /// %TEMP%\echo-names-ab\{before,after}; writes tools/read-aloud/names_ab.html.
+    /// cargo test --release names_ab_board -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn names_ab_board() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("tools").join("read-aloud");
+        let list = std::fs::read_to_string(root.join("names.txt")).unwrap();
+        let entries: Vec<&str> = list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+        assert_eq!(entries.len(), 74, "59 names + 15 controls");
+        let out = std::env::temp_dir().join("echo-names-ab");
+        for side in ["before", "after"] {
+            std::fs::create_dir_all(out.join(side)).unwrap();
+        }
+        let e = Engine::new(dirs::data_dir().unwrap().join("ALAN Echo"));
+        e.preload("af_heart", "cpu");
+        let eng = e.acquire().expect("engine (real CPU model in %APPDATA%\\ALAN Echo\\models\\kokoro)");
+        let mut l = eng.lock();
+        assert_eq!(l.device, Device::Cpu);
+        let mut plain_g2p = G2P::new(Language::EnglishUS);
+        let mut no_names = Arc::new(Names::empty());
+        let mut rows = String::new();
+        let mut changed = 0;
+        let t = Instant::now();
+        for (i, word) in entries.iter().enumerate() {
+            let words = ["Today,", *word, "spoke."];
+            let safe: String = word.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+            let file = format!("{:02}_{safe}.wav", i + 1);
+            let mut cells = Vec::new();
+            for side in ["before", "after"] {
+                let before = side == "before";
+                if before {
+                    std::mem::swap(&mut l.g2p, &mut plain_g2p);
+                    std::mem::swap(&mut l.names, &mut no_names);
+                }
+                let ph = phonemes_per_word(&l.g2p, &l.names, &words)[1].clone();
+                let a = Engine::synth_inner(&mut l, &words, 2.2, true);
+                if before {
+                    std::mem::swap(&mut l.g2p, &mut plain_g2p);
+                    std::mem::swap(&mut l.names, &mut no_names);
+                }
+                let a = a.unwrap_or_else(|err| panic!("{side} {word}: {err}"));
+                assert_eq!(a.words.len(), 3, "{side} {word}: one timing span per word");
+                let p = out.join(side).join(&file);
+                write_wav_at(&a.pcm, &p);
+                cells.push((p, ph));
+            }
+            let diff = cells[0].1 != cells[1].1;
+            changed += usize::from(diff);
+            println!("{:>2} {:<12} {:<28} -> {}", i + 1, word, cells[0].1, cells[1].1);
+            rows.push_str(&format!(
+                "<tr{}><td>{}</td><td class=w>{}</td><td><audio controls preload=none src=\"{}\"></audio></td><td><audio controls preload=none src=\"{}\"></audio></td><td class=ph>{}<br><b>{}</b></td></tr>\n",
+                if diff { " class=chg" } else { "" },
+                i + 1,
+                html_escape(word),
+                file_url(&cells[0].0),
+                file_url(&cells[1].0),
+                html_escape(&cells[0].1),
+                html_escape(&cells[1].1),
+            ));
+        }
+        drop(l);
+        let html = format!(
+            r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Names A/B Board</title>
+<style>
+:root {{ --bg:#fafaf8; --fg:#1b1b1b; --muted:#666; --line:#ddd; --chg:#fff6d6; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#16171a; --fg:#e8e8e8; --muted:#9a9a9a; --line:#333; --chg:#3a3320; }} }}
+body {{ background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,sans-serif; margin:0; padding:16px; }}
+h1 {{ font-size:20px; margin:0 0 4px; }} p {{ color:var(--muted); margin:0 0 12px; }}
+table {{ border-collapse:collapse; width:100%; }} td,th {{ border-bottom:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:middle; }}
+tr.chg {{ background:var(--chg); }} .w {{ font-weight:600; white-space:nowrap; }} .ph {{ font-family:Consolas,monospace; font-size:13px; }}
+audio {{ height:32px; max-width:220px; }}
+</style></head><body>
+<h1>Read Aloud names: before vs after</h1>
+<p>"Today, WORD spoke." at 2.2x, CPU model, voice af_heart. Before = plain misaki (letters spelled). After = hand list + CMUdict + g2p_en. Highlighted rows changed ({changed} of {n}). Phonemes: before, then <b>after</b>.</p>
+<table><thead><tr><th>#</th><th>Word</th><th>Before</th><th>After</th><th>Phonemes</th></tr></thead><tbody>
+{rows}</tbody></table></body></html>
+"#,
+            n = entries.len(),
+        );
+        let page = root.join("names_ab.html");
+        std::fs::write(&page, html).unwrap();
+        println!("{changed} of {} words changed; rendered in {:?}", entries.len(), t.elapsed());
+        println!("A/B board: {}", page.canonicalize().unwrap_or(page.clone()).display());
+    }
+
+    fn private_mb() -> f64 {
+        let o = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("(Get-Process -Id {}).PrivateMemorySize64", std::process::id())])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().unwrap() / 1_048_576.0
+    }
+
+    /// Cost of the names pipeline: load time (vs the plain G2P it used to build, and the
+    /// ONNX session open it overlaps) and private-RAM delta while loaded.
+    /// cargo test --release names_load_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn names_load_cost() {
+        let t = Instant::now();
+        let plain = G2P::new(Language::EnglishUS);
+        let plain_ms = t.elapsed();
+        drop(plain);
+        let m0 = private_mb();
+        let t = Instant::now();
+        let names = Names::load(G2pEn::load().map(|g| Box::new(g) as Box<dyn Lts>));
+        let names_ms = t.elapsed();
+        let m1 = private_mb();
+        assert!(names.knows("pelosi"));
+        drop(names);
+        let m2 = private_mb();
+        let t = Instant::now();
+        let parts = build_g2p();
+        let full_ms = t.elapsed();
+        drop(parts);
+        let f = ra_model::files(&dirs::data_dir().unwrap().join("ALAN Echo"));
+        let t = Instant::now();
+        let session = open_session(&f.fp32, false);
+        let session_ms = t.elapsed();
+        drop(session);
+        println!("plain G2P::new        {plain_ms:?}");
+        println!("Names::load(G2pEn)    {names_ms:?}");
+        println!("build_g2p (both)      {full_ms:?}");
+        println!("CPU session open      {session_ms:?} (runs in parallel with build_g2p)");
+        println!("added to first chunk  {:?}", full_ms.max(session_ms).saturating_sub(plain_ms.max(session_ms)));
+        println!("private RAM: before {m0:.1} MB, loaded {m1:.1} MB (+{:.1}), after drop {m2:.1} MB", m1 - m0);
     }
 }

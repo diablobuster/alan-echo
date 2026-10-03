@@ -1,4 +1,7 @@
-//! Read Aloud — low-level mouse hook, alive only during pick mode.
+//! Read Aloud — low-level mouse hooks.
+//!
+//! `PickHook` lives only during pick mode; `WatchHook` (observe-only) lives only while a
+//! read session is active (see the bottom of this file).
 //!
 //! Moves pass through to the target app; the left click (down + its up) is
 //! swallowed so the app never sees it — except over our own windows (the Now Reading
@@ -17,8 +20,8 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetMessageW, GetWindowThreadProcessId, PeekMessageW,
     PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK,
-    MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_QUIT, WM_USER,
+    HOOKPROC, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_QUIT, WM_USER,
 };
 
 type Cb = Box<dyn Fn(i32, i32) + Send>;
@@ -108,34 +111,7 @@ impl PickHook {
         *slot(&MOVE).lock() = Some(Box::new(on_move));
         *slot(&CLICK).lock() = Some(Box::new(on_click));
         SWALLOW_UP.store(false, Ordering::Release);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let thread = std::thread::Builder::new()
-            .name("ra-hook".into())
-            .spawn(move || unsafe {
-                let mut msg = MSG::default();
-                // Make sure this thread has a message queue before anyone posts WM_QUIT.
-                let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
-                let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), HINSTANCE::default(), 0);
-                let ok = hook.is_ok();
-                if let Err(e) = &hook {
-                    log::warn!("read-aloud: mouse hook install failed: {e}");
-                }
-                let _ = tx.send((GetCurrentThreadId(), ok));
-                let Ok(h) = hook else { return };
-                // GetMessageW returns 0 on WM_QUIT and -1 on error; stop on both.
-                while GetMessageW(&mut msg, None, 0, 0).0 > 0 {}
-                let _ = UnhookWindowsHookEx(h);
-            });
-        let (thread_id, active, thread) = match thread {
-            Ok(t) => {
-                let (id, ok) = rx.recv().unwrap_or((0, false));
-                (id, ok, Some(t))
-            }
-            Err(e) => {
-                log::warn!("read-aloud: could not spawn mouse hook thread: {e}");
-                (0, false, None)
-            }
-        };
+        let (thread_id, active, thread) = spawn_hook_thread("ra-hook", Some(hook_proc));
         PickHook {
             owner: true,
             active,
@@ -148,6 +124,57 @@ impl PickHook {
     /// or this was a second `install` while another hook was alive).
     pub fn is_active(&self) -> bool {
         self.active
+    }
+}
+
+/// Run a WH_MOUSE_LL hook with `proc` on its own thread (with a message loop, which LL
+/// hooks need). Returns (thread id, hook installed, thread). The loop ends on WM_QUIT.
+fn spawn_hook_thread(
+    name: &str,
+    proc: HOOKPROC,
+) -> (u32, bool, Option<std::thread::JoinHandle<()>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || unsafe {
+            let mut msg = MSG::default();
+            // Make sure this thread has a message queue before anyone posts WM_QUIT.
+            let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
+            let hook = SetWindowsHookExW(WH_MOUSE_LL, proc, HINSTANCE::default(), 0);
+            let ok = hook.is_ok();
+            if let Err(e) = &hook {
+                log::warn!("read-aloud: mouse hook install failed: {e}");
+            }
+            let _ = tx.send((GetCurrentThreadId(), ok));
+            let Ok(h) = hook else { return };
+            // GetMessageW returns 0 on WM_QUIT and -1 on error; stop on both.
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {}
+            let _ = UnhookWindowsHookEx(h);
+        });
+    match thread {
+        Ok(t) => {
+            let (id, ok) = rx.recv().unwrap_or((0, false));
+            (id, ok, Some(t))
+        }
+        Err(e) => {
+            log::warn!("read-aloud: could not spawn mouse hook thread: {e}");
+            (0, false, None)
+        }
+    }
+}
+
+/// End a hook thread started by `spawn_hook_thread` (never joins from the hook thread itself).
+fn stop_hook_thread(thread_id: u32, thread: Option<std::thread::JoinHandle<()>>) {
+    let on_hook_thread = thread_id != 0 && unsafe { GetCurrentThreadId() } == thread_id;
+    if thread_id != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+    if let Some(t) = thread {
+        if !on_hook_thread {
+            let _ = t.join();
+        }
     }
 }
 
@@ -167,20 +194,262 @@ impl Drop for PickHook {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        if self.thread_id != 0 {
-            unsafe {
-                let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-        }
-        if let Some(t) = self.thread.take() {
-            if !on_hook_thread {
-                let _ = t.join();
-            }
-        }
+        stop_hook_thread(self.thread_id, self.thread.take());
         *slot(&MOVE).lock() = None;
         *slot(&CLICK).lock() = None;
         SWALLOW_UP.store(false, Ordering::Release);
         INSTALLED.store(false, Ordering::Release);
+    }
+}
+
+// ── Watch hook (observe-only, alive only while a read session is active) ──────────
+
+/// A left-button event seen by the watch hook. `t` = the event's time stamp in ms
+/// (`MSLLHOOKSTRUCT::time`, wraps); coordinates are physical screen pixels; `mods` =
+/// Shift, Ctrl or Alt was held (selection / app shortcuts: never a jump).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MouseEv {
+    Down { x: i32, y: i32, t: u32, mods: bool },
+    Up { x: i32, y: i32, t: u32, mods: bool },
+}
+
+/// Shift, Ctrl or Alt is down right now (async state: the hook thread has no input
+/// queue of its own, so GetKeyState would not see it).
+fn modifiers_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+    [VK_SHIFT, VK_CONTROL, VK_MENU]
+        .iter()
+        .any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } as u16 & 0x8000 != 0)
+}
+
+type WatchCb = Box<dyn Fn(MouseEv) + Send>;
+
+static WATCH: OnceLock<Mutex<Option<WatchCb>>> = OnceLock::new();
+static WATCH_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+fn watch_slot() -> &'static Mutex<Option<WatchCb>> {
+    WATCH.get_or_init(|| Mutex::new(None))
+}
+
+unsafe extern "system" fn watch_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if code >= 0 && l.0 != 0 {
+        let info = &*(l.0 as *const MSLLHOOKSTRUCT);
+        let (x, y, t) = (info.pt.x, info.pt.y, info.time);
+        let ev = match w.0 as u32 {
+            WM_LBUTTONDOWN => Some(MouseEv::Down { x, y, t, mods: modifiers_held() }),
+            WM_LBUTTONUP => Some(MouseEv::Up { x, y, t, mods: modifiers_held() }),
+            _ => None, // moves are not reported (no traffic while the mouse just moves)
+        };
+        if let Some(ev) = ev {
+            if let Some(cb) = watch_slot().lock().as_ref() {
+                cb(ev);
+            }
+        }
+    }
+    // never swallow: every event reaches the app as usual
+    CallNextHookEx(HHOOK::default(), code, w, l)
+}
+
+/// Observe-only WH_MOUSE_LL hook: reports left down/up events, swallows
+/// nothing. The callback runs inside the hook proc, so it must only send to a channel.
+/// Only one may be alive at a time (a second `install` returns an inactive no-op).
+/// Drop to uninstall it.
+pub struct WatchHook {
+    owner: bool,
+    active: bool,
+    thread_id: u32,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WatchHook {
+    pub fn install(on_event: impl Fn(MouseEv) + Send + 'static) -> WatchHook {
+        if WATCH_INSTALLED.swap(true, Ordering::AcqRel) {
+            log::warn!("read-aloud: watch hook already installed; ignoring second install");
+            return WatchHook { owner: false, active: false, thread_id: 0, thread: None };
+        }
+        *watch_slot().lock() = Some(Box::new(on_event));
+        let (thread_id, active, thread) = spawn_hook_thread("ra-watch", Some(watch_proc));
+        WatchHook { owner: true, active, thread_id, thread }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+impl Drop for WatchHook {
+    fn drop(&mut self) {
+        if !self.owner {
+            return;
+        }
+        stop_hook_thread(self.thread_id, self.thread.take());
+        *watch_slot().lock() = None;
+        WATCH_INSTALLED.store(false, Ordering::Release);
+    }
+}
+
+/// A press longer than this is not a click (a long press / selection hold).
+pub const CLICK_MAX_MS: u32 = 500;
+
+/// Down → up is a click, not a drag: it moved at most `slop` px on each axis and took
+/// at most `CLICK_MAX_MS`. Times are hook time stamps (ms, wrapping).
+pub fn is_click(down: (i32, i32, u32), up: (i32, i32, u32), slop: i32) -> bool {
+    let (dx, dy) = ((up.0 - down.0).abs(), (up.1 - down.1).abs());
+    dx <= slop && dy <= slop && up.2.wrapping_sub(down.2) <= CLICK_MAX_MS
+}
+
+/// The second click of a double-click: it went down within `dbl_ms` of the previous
+/// click's up and within `slop` px of it (that word is already being jumped to).
+pub fn is_double_click(prev_up: Option<(i32, i32, u32)>, down: (i32, i32, u32), dbl_ms: u32, slop: i32) -> bool {
+    prev_up.is_some_and(|p| {
+        (down.0 - p.0).abs() <= slop && (down.1 - p.1).abs() <= slop && down.2.wrapping_sub(p.2) <= dbl_ms
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Press {
+    x: i32,
+    y: i32,
+    t: u32,
+    /// In the source window, no modifier, not part of a double/triple click.
+    ok: bool,
+}
+
+/// Turns the watch hook's left down/up events into click-to-jump decisions. Pure (no
+/// clock: hook time stamps only), so it is unit-tested. A click is only *scheduled* on
+/// its up; the controller fires it once the double-click time has passed with no
+/// second press (`down` returning true cancels it).
+#[derive(Debug, Default)]
+pub struct ClickTracker {
+    press: Option<Press>,
+    last_up: Option<(i32, i32, u32)>,
+    pending: Option<(i32, i32)>,
+}
+
+impl ClickTracker {
+    /// A left down. Returns true when it cancelled a pending click (a double-click).
+    pub fn down(&mut self, x: i32, y: i32, t: u32, in_source: bool, mods: bool, dbl_ms: u32, slop: i32) -> bool {
+        let multi = is_double_click(self.last_up, (x, y, t), dbl_ms, slop);
+        let cancelled = multi && self.pending.take().is_some();
+        // a new down replaces any press whose up was lost
+        self.press = Some(Press { x, y, t, ok: in_source && !mods && !multi });
+        cancelled
+    }
+
+    /// A left up. Returns the point to jump to once the double-click time has passed.
+    pub fn up(&mut self, x: i32, y: i32, t: u32, mods: bool, slop: i32) -> Option<(i32, i32)> {
+        let p = self.press.take()?;
+        self.last_up = Some((x, y, t));
+        let jump = p.ok && !mods && is_click((p.x, p.y, p.t), (x, y, t), slop);
+        self.pending = jump.then_some((p.x, p.y));
+        self.pending
+    }
+
+    /// The double-click time passed: the pending click (if still wanted) is a jump.
+    pub fn fire(&mut self) -> Option<(i32, i32)> {
+        self.pending.take()
+    }
+
+    pub fn reset(&mut self) {
+        *self = ClickTracker::default();
+    }
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_still_press_is_a_click() {
+        assert!(is_click((100, 100, 1000), (100, 100, 1080), 6));
+        assert!(is_click((100, 100, 1000), (106, 94, 1080), 6), "small jitter is fine");
+    }
+
+    #[test]
+    fn a_drag_is_not_a_click() {
+        assert!(!is_click((100, 100, 1000), (107, 100, 1080), 6), "moved sideways");
+        assert!(!is_click((100, 100, 1000), (100, 140, 1080), 6), "dragged down (selection / scrollbar)");
+    }
+
+    #[test]
+    fn a_long_press_is_not_a_click() {
+        assert!(is_click((5, 5, 0), (5, 5, CLICK_MAX_MS), 6));
+        assert!(!is_click((5, 5, 0), (5, 5, CLICK_MAX_MS + 1), 6));
+    }
+
+    #[test]
+    fn click_timing_survives_the_tick_count_wrapping() {
+        assert!(is_click((5, 5, u32::MAX - 20), (5, 5, 40), 6));
+        assert!(!is_click((5, 5, u32::MAX - 20), (5, 5, 1000), 6));
+    }
+
+    #[test]
+    fn second_click_of_a_double_click_is_recognised() {
+        let up = Some((200, 50, 5000));
+        assert!(is_double_click(up, (201, 51, 5200), 500, 6));
+        assert!(!is_double_click(up, (201, 51, 5600), 500, 6), "too late: a new click");
+        assert!(!is_double_click(up, (260, 51, 5200), 500, 6), "elsewhere: a new click");
+        assert!(!is_double_click(None, (201, 51, 5200), 500, 6));
+    }
+
+    const DBL: u32 = 500;
+
+    fn click(c: &mut ClickTracker, x: i32, y: i32, t: u32) -> Option<(i32, i32)> {
+        c.down(x, y, t, true, false, DBL, 6);
+        c.up(x, y, t + 80, false, 6)
+    }
+
+    #[test]
+    fn single_click_is_scheduled_then_fires() {
+        let mut c = ClickTracker::default();
+        assert_eq!(click(&mut c, 100, 100, 1000), Some((100, 100)));
+        assert_eq!(c.fire(), Some((100, 100)));
+        assert_eq!(c.fire(), None, "fires once");
+    }
+
+    #[test]
+    fn double_click_cancels_the_first_click_and_never_jumps() {
+        let mut c = ClickTracker::default();
+        assert_eq!(click(&mut c, 100, 100, 1000), Some((100, 100)));
+        assert!(c.down(101, 100, 1250, true, false, DBL, 6), "second down cancels");
+        assert_eq!(c.up(101, 100, 1320, false, 6), None, "the second click is not a jump");
+        assert_eq!(c.fire(), None);
+        // a triple click: the third press is part of it too
+        assert!(!c.down(101, 100, 1500, true, false, DBL, 6));
+        assert_eq!(c.up(101, 100, 1560, false, 6), None);
+    }
+
+    #[test]
+    fn a_later_click_is_a_new_jump() {
+        let mut c = ClickTracker::default();
+        click(&mut c, 100, 100, 1000);
+        c.fire();
+        assert_eq!(click(&mut c, 100, 100, 3000), Some((100, 100)));
+    }
+
+    #[test]
+    fn modifier_or_other_window_or_drag_never_jumps() {
+        let mut c = ClickTracker::default();
+        c.down(10, 10, 0, true, true, DBL, 6);
+        assert_eq!(c.up(10, 10, 50, true, 6), None, "shift/ctrl/alt + click (select / shortcut)");
+        c.down(10, 10, 5000, true, false, DBL, 6);
+        assert_eq!(c.up(10, 10, 5050, true, 6), None, "modifier pressed before the up");
+        c.down(10, 10, 9000, false, false, DBL, 6);
+        assert_eq!(c.up(10, 10, 9050, false, 6), None, "not the source window");
+        c.down(10, 10, 13000, true, false, DBL, 6);
+        assert_eq!(c.up(60, 10, 13050, false, 6), None, "a drag");
+        assert_eq!(c.fire(), None);
+    }
+
+    #[test]
+    fn lost_up_or_stray_up_cannot_stick() {
+        let mut c = ClickTracker::default();
+        assert_eq!(c.up(10, 10, 50, false, 6), None, "an up with no down");
+        c.down(10, 10, 100, true, false, DBL, 6); // its up is lost
+        assert_eq!(c.up(10, 10, 100 + CLICK_MAX_MS + 1000, false, 6), None, "a stale press is not a click");
+        c.down(10, 10, 9000, true, false, DBL, 6); // replaced by a new press
+        c.reset();
+        assert_eq!(c.up(10, 10, 9050, false, 6), None, "reset forgets the press");
     }
 }
 
@@ -448,5 +717,156 @@ mod tests {
             (base.0 + 1, base.1 + 1),
             "after drop, clicks reach the app again"
         );
+    }
+
+    /// Manual: cargo test ra_hook::tests::watch_hook_manual -- --ignored --nocapture
+    /// The watch hook reports a click on our own test window and does NOT swallow it.
+    #[test]
+    #[ignore]
+    fn watch_hook_manual() {
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        let (x, y, wd, ht) = (260, 260, 200, 100);
+        let (htx, hrx) = mpsc::channel::<isize>();
+        let win = std::thread::spawn(move || unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                lpszClassName: w!("RaWatchTestWnd"),
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+            let h = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("RaWatchTestWnd"),
+                w!("ra_hook watch test"),
+                WS_POPUP | WS_VISIBLE,
+                x,
+                y,
+                wd,
+                ht,
+                HWND::default(),
+                HMENU::default(),
+                HINSTANCE::default(),
+                None,
+            )
+            .expect("test window");
+            let _ = htx.send(h.0 as isize);
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, HWND::default(), 0, 0).0 > 0 {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        });
+        let h = hrx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let mut saved = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut saved);
+        }
+        let (cx, cy) = (x + wd / 2, y + ht / 2);
+        let before = counts();
+        let (tx, rx) = mpsc::channel();
+        let hook = WatchHook::install(move |ev| {
+            let _ = tx.send(ev);
+        });
+        let active = hook.is_active();
+        let second = WatchHook::install(|_| {});
+        let second_active = second.is_active();
+        drop(second);
+        click_at(cx, cy);
+        let evs: Vec<MouseEv> = rx.try_iter().collect();
+        let during = counts();
+        drop(hook);
+        let again = WatchHook::install(|_| {});
+        let again_active = again.is_active();
+        drop(again);
+        unsafe {
+            let _ = SetCursorPos(saved.x, saved.y);
+            let _ = PostMessageW(HWND(h as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+        let _ = win.join();
+        println!("watch: events {evs:?}, downs/ups {before:?} -> {during:?}");
+        assert!(active, "watch hook installed");
+        assert!(!second_active, "second install is a no-op");
+        assert!(again_active, "can install again after drop");
+        assert_eq!(during, (before.0 + 1, before.1 + 1), "the click reaches the window (not swallowed)");
+        let down = evs.iter().any(|e| matches!(e, MouseEv::Down { x, y, .. } if (x - cx).abs() <= 1 && (y - cy).abs() <= 1));
+        let up = evs.iter().any(|e| matches!(e, MouseEv::Up { .. }));
+        assert!(down && up, "down and up reported");
+    }
+}
+
+/// Task 8: cost of one hook callback (the hook procs called directly with a synthetic
+/// event; no hook is installed and no input is sent). Must be microseconds.
+/// cargo test --release ra_hook::bench -- --ignored --nocapture --test-threads=1
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    fn call(p: unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT, msg: u32, x: i32, y: i32) -> f64 {
+        let info = MSLLHOOKSTRUCT { pt: POINT { x, y }, ..Default::default() };
+        let t = Instant::now();
+        unsafe { p(0, WPARAM(msg as usize), LPARAM(&info as *const MSLLHOOKSTRUCT as isize)) };
+        t.elapsed().as_secs_f64() * 1e6
+    }
+
+    fn report(label: &str, mut us: Vec<f64>) {
+        us.sort_by(|a, b| a.total_cmp(b));
+        let at = |p: f64| us[((us.len() - 1) as f64 * p).round() as usize];
+        println!("{label}: p50 {:.2} us, p95 {:.2} us, p99 {:.2} us, max {:.1} us (n={})", at(0.5), at(0.95), at(0.99), at(1.0), us.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn hook_callback_cost() {
+        assert!(!INSTALLED.swap(true, Ordering::AcqRel), "a pick hook is alive");
+        assert!(!WATCH_INSTALLED.swap(true, Ordering::AcqRel), "a watch hook is alive");
+        let (tx, rx) = mpsc::channel::<(i32, i32)>();
+        // the same move callback as read_aloud::enter_pick (33 ms throttle, then a send)
+        let (t0, last) = (Instant::now(), Arc::new(AtomicU64::new(0)));
+        let tm = tx.clone();
+        *slot(&MOVE).lock() = Some(Box::new(move |x, y| {
+            let now = t0.elapsed().as_millis() as u64 + 33;
+            if now.saturating_sub(last.load(Ordering::Relaxed)) >= 33 {
+                last.store(now, Ordering::Relaxed);
+                let _ = tm.send((x, y));
+            }
+        }));
+        let tc = tx.clone();
+        *slot(&CLICK).lock() = Some(Box::new(move |x, y| {
+            let _ = tc.send((x, y));
+        }));
+        let tw = tx.clone();
+        *watch_slot().lock() = Some(Box::new(move |ev| {
+            let (MouseEv::Down { x, y, .. } | MouseEv::Up { x, y, .. }) = ev;
+            let _ = tw.send((x, y));
+        }));
+        let n = 20_000;
+        let moves: Vec<f64> = (0..n).map(|i| call(hook_proc, WM_MOUSEMOVE, i % 1000, 300)).collect();
+        // a click far off any window of ours; the up that follows is swallowed
+        let downs: Vec<f64> = (0..2000).map(|i| {
+            let d = call(hook_proc, WM_LBUTTONDOWN, 5 + i % 50, 5);
+            call(hook_proc, WM_LBUTTONUP, 5 + i % 50, 5);
+            d
+        }).collect();
+        let watch_moves: Vec<f64> = (0..n).map(|i| call(watch_proc, WM_MOUSEMOVE, i % 1000, 300)).collect();
+        let watch_downs: Vec<f64> = (0..n).map(|i| call(watch_proc, WM_LBUTTONDOWN, i % 1000, 300)).collect();
+        *slot(&MOVE).lock() = None;
+        *slot(&CLICK).lock() = None;
+        *watch_slot().lock() = None;
+        SWALLOW_UP.store(false, Ordering::Release);
+        INSTALLED.store(false, Ordering::Release);
+        WATCH_INSTALLED.store(false, Ordering::Release);
+        drop(tx);
+        println!("sent {} messages", rx.try_iter().count());
+        report("pick hook, move (throttled send)", moves);
+        report("pick hook, left down (own-window check + send)", downs);
+        report("watch hook, move (ignored)", watch_moves);
+        report("watch hook, left down (modifier check + send)", watch_downs);
     }
 }

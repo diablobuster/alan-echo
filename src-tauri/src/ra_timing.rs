@@ -24,6 +24,7 @@ pub fn word_times(durations: &[f32], spans: &[(usize, usize, usize)], n_samples:
     let mut starts: Vec<(usize, u64)> = Vec::new();
     let mut floor = 0u64;
     for &(w, s, e) in spans {
+        debug_assert!(e + 2 <= durations.len(), "span end {e} beyond durations ({})", durations.len());
         if e <= s || s + 1 >= cum.len() {
             continue;
         }
@@ -76,7 +77,9 @@ pub fn align(words: &[&str], tokens: &[&str]) -> Vec<Option<usize>> {
             continue;
         }
         // look ahead up to 3 words for a fresh match
-        if let Some(j) = (wi + 1..(wi + 4).min(wn.len())).find(|&j| wn[j].starts_with(&tn)) {
+        if let Some(j) = (wi + 1..(wi + 4).min(wn.len()))
+            .find(|&j| wn[j] == tn || (tn.chars().count() >= 3 && wn[j].starts_with(&tn)))
+        {
             out.push(Some(j));
             wi = j;
             off = tn.len();
@@ -86,10 +89,9 @@ pub fn align(words: &[&str], tokens: &[&str]) -> Vec<Option<usize>> {
             }
             continue;
         }
-        // unmatched (e.g. "$5" -> "five dollars"): credit the current word, move on
+        // unmatched (e.g. "$5" -> "five","dollars"): credit the current word but do
+        // not advance; the next matching token resyncs the cursor
         out.push(Some(wi));
-        wi += 1;
-        off = 0;
     }
     out
 }
@@ -154,6 +156,37 @@ mod tests {
     fn align_skips_punctuation_only_tokens() {
         let a = align(&["—", "next"], &["—", "next"]);
         assert_eq!(a, vec![None, Some(1)]);
+    }
+
+    #[test]
+    fn align_split_rewrites_resync() {
+        let a = align(&["costs", "$5", "today"], &["costs", "five", "dollars", "today"]);
+        assert_eq!(a, vec![Some(0), Some(1), Some(1), Some(2)]);
+        let b = align(
+            &["about", "1,000", "people", "came"],
+            &["about", "one", "thousand", "people", "came"],
+        );
+        assert_eq!(b, vec![Some(0), Some(1), Some(1), Some(2), Some(3)]);
+    }
+
+    #[test]
+    fn align_short_token_does_not_skip() {
+        let a = align(&["a", "big", "apple"], &["a", "big", "apple"]);
+        assert_eq!(a, vec![Some(0), Some(1), Some(2)]);
+        let b = align(&["two", "apples"], &["2", "apples"]);
+        assert_eq!(b, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn align_non_ascii() {
+        let a = align(&["École", "straße"], &["École", "straße"]);
+        assert_eq!(a, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn word_times_span_beyond_durations_asserts() {
+        word_times(&[1.0, 1.0, 1.0], &[(0, 0, 2)], 1800, 0.0, 1.0);
     }
 
     #[test]

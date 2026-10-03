@@ -29,6 +29,8 @@ mod ra_wsola;
 #[cfg(target_os = "windows")]
 mod ra_tts;
 #[cfg(target_os = "windows")]
+mod ra_names;
+#[cfg(target_os = "windows")]
 mod read_aloud;
 
 use audio::{DeviceInfo, RecorderHandle};

@@ -843,3 +843,64 @@ fn uia_notepad_bench() {
     println!("caller thread CPU {caller_cpu:.1} ms");
     drop(ra);
 }
+
+/// Where hover time goes on Notepad's own chrome (menu / tab strip): breakdown of the
+/// steps `hover` runs for a point with no text. Same rules as `uia_notepad_bench`.
+/// cargo test --release uia_chrome_breakdown -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn uia_chrome_breakdown() {
+    use crate::ra_perf::{ms, pct};
+    unsafe {
+        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    if !notepad_pids().is_empty() {
+        println!("skipped: a Notepad is open (this bench never touches your windows)");
+        return;
+    }
+    let stem = format!("{NP_PREFIX}chrome_{}", std::process::id());
+    let file = std::env::temp_dir().join(format!("{stem}.txt"));
+    std::fs::write(&file, "Alpha bravo charlie delta echo.\r\n").unwrap();
+    let mut guard = Cleanup { hwnds: vec![], files: vec![file.clone()] };
+    let hwnd = open_in_notepad(&file, &stem);
+    guard.hwnds.push(hwnd);
+    unsafe {
+        let _ = MoveWindow(hwnd, 80, 60, 1100, 800, true);
+    }
+    raise(hwnd);
+    std::thread::sleep(Duration::from_millis(1000));
+    let uia = new_uia();
+    let (doc_el, _) = main_text(&uia, hwnd);
+    let el = to_rect(unsafe { doc_el.CurrentBoundingRectangle() }.unwrap());
+    let mut st = State {
+        uia: uia.clone(),
+        own_pid: unsafe { GetCurrentProcessId() },
+        target: make_target(&uia, hwnd.0 as isize),
+        read: Read::default(),
+        staged: None,
+        source: Arc::new(AtomicIsize::new(hwnd.0 as isize)),
+        ocr_hover: None,
+        acro_hover: None,
+    };
+    let pts: Vec<(i32, i32)> = (0..20).map(|k| (el.x as i32 + 40 + k * 30, el.y as i32 - 40)).collect();
+    let (mut tp, mut fb, mut ok, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for &(x, y) in pts.iter().cycle().take(100) {
+        let t = Instant::now();
+        let r = text_pattern_at(&mut st, x, y).map(|_| ());
+        tp.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let _ = fallback_at(&mut st, x, y);
+        fb.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let _ = ocr_ok_at(&st, x, y);
+        ok.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let _ = hover(&mut st, x, y);
+        all.push(ms(t.elapsed()));
+        assert!(r.is_err(), "chrome point has no text pattern");
+    }
+    println!("text_pattern_at (incl. fallback): {}", pct(&tp));
+    println!("fallback_at alone:                {}", pct(&fb));
+    println!("ocr_ok_at:                        {}", pct(&ok));
+    println!("hover total:                      {}", pct(&all));
+}

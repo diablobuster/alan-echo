@@ -30,6 +30,8 @@ mod ra_wsola;
 mod ra_tts;
 #[cfg(target_os = "windows")]
 mod read_aloud;
+#[cfg(target_os = "windows")]
+mod ra_g2pen;
 
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;

@@ -2,8 +2,6 @@
 //! Order: hand list (names_fix.tsv) -> CMUdict (BSD-2) -> optional letter-to-sound
 //! model -> spelled letters. Never panics; the misaki fallback is always Ok.
 
-// Not wired into ra_tts yet (Task 3 removes this allow).
-#![allow(dead_code)]
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
@@ -117,7 +115,7 @@ impl Names {
                     }
                 }
             }
-            Err(e) => eprintln!("[ra_names] CMUdict decompress failed: {e}"),
+            Err(e) => log::warn!("ra_names: CMUdict decompress failed: {e}"),
         }
         for line in FIX_TSV.lines() {
             if line.starts_with('#') {
@@ -133,17 +131,46 @@ impl Names {
         Names { map, lts }
     }
 
+    /// Knows nothing (the "before" side of the names A/B board).
+    #[cfg(test)]
+    pub fn empty() -> Names {
+        Names { map: HashMap::new(), lts: None }
+    }
+
     pub fn lookup(&self, word: &str) -> Option<String> {
         let lower = word.to_lowercase();
         if let Some(v) = self.map.get(&lower) {
             return Some(v.clone());
         }
         let stem = lower.strip_suffix("'s").or_else(|| lower.strip_suffix("\u{2019}s"))?;
-        self.map.get(stem).map(|v| format!("{v}z"))
+        self.map.get(stem).map(|v| format!("{v}{}", possessive(v)))
     }
 
+    /// True when the dictionary says `word_lower` as a word. CMUdict also lists
+    /// acronyms as their spelled letters (fbi, gdp, ceo); those don't count, so an
+    /// ALL-CAPS acronym stays spelled. (Compared without stress or spaces, and with
+    /// ɡ read as ʤ: CMUdict has some hard-G letter spellings, e.g. gdp.)
     pub fn knows(&self, word_lower: &str) -> bool {
-        self.map.contains_key(word_lower)
+        let bare = |p: &str| {
+            p.chars().filter(|c| !matches!(c, 'ˈ' | 'ˌ' | ' ')).map(|c| if c == 'ɡ' { 'ʤ' } else { c }).collect::<String>()
+        };
+        self.map.get(word_lower).is_some_and(|p| bare(p) != bare(&spell(word_lower)))
+    }
+}
+
+/// English possessive ending after a pronunciation: ɪz after a sibilant, s after
+/// a voiceless consonant, z otherwise (vowels and voiced consonants).
+fn possessive(ph: &str) -> &'static str {
+    match ph.chars().rev().find(|c| !matches!(c, 'ˈ' | 'ˌ')) {
+        Some('s' | 'z' | 'ʃ' | 'ʒ' | 'ʧ' | 'ʤ') => "ɪz",
+        Some('p' | 't' | 'k' | 'f' | 'θ') => "s",
+        _ => "z",
+    }
+}
+
+impl Lts for crate::ra_g2pen::G2pEn {
+    fn arpabet(&self, w: &str) -> Option<String> {
+        self.predict(w)
     }
 }
 
@@ -209,6 +236,38 @@ mod tests {
         assert!(n.lookup("pelosi").is_some());
         assert!(n.knows("putin"));
         assert!(n.lookup("qzxv").is_none());
+    }
+
+    #[test]
+    fn knows_skips_cmu_entries_that_just_spell_the_letters() {
+        let n = Names::load(None);
+        for w in ["fbi", "gdp", "ceo", "nfl", "cia"] {
+            assert!(!n.knows(w), "{w} is an acronym in CMUdict, not a word");
+        }
+        for w in ["pelosi", "putin", "musk", "gaza", "buttigieg"] {
+            assert!(n.knows(w), "{w}");
+        }
+        assert!(!n.knows("qzxv"));
+    }
+
+    #[test]
+    fn possessive_suffix_follows_the_last_sound() {
+        let n = Names::load(None);
+        let base = |w: &str| n.lookup(w).unwrap_or_default();
+        // hand-list words (CMUdict has no "'s" entry for them, so the suffix rule runs):
+        // vowel / voiced -> z, voiceless -> s, sibilant -> ɪz
+        for w in ["milei's", "ozempic's", "mayorkas's", "sheinbaum\u{2019}s"] {
+            assert!(!n.map.contains_key(w), "{w} must not be a dictionary entry");
+        }
+        assert_eq!(n.lookup("Milei's"), Some(format!("{}z", base("milei"))));
+        assert_eq!(n.lookup("Ozempic's"), Some(format!("{}s", base("ozempic"))));
+        assert_eq!(n.lookup("Mayorkas's"), Some(format!("{}ɪz", base("mayorkas"))));
+        assert_eq!(n.lookup("Sheinbaum\u{2019}s"), Some(format!("{}z", base("sheinbaum"))));
+        assert_eq!(possessive("bˈʊʃ"), "ɪz");
+        assert_eq!(possessive("ʧˈɜɹʧ"), "ɪz");
+        assert_eq!(possessive("pˈæθ"), "s");
+        assert_eq!(possessive("ˈ"), "z");
+        assert!(n.lookup("qzxv's").is_none());
     }
 
     struct FakeLts;

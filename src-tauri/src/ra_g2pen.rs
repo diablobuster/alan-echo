@@ -10,9 +10,6 @@
 //!
 //! Never panics on malformed data or input: failures return `None`.
 
-// Task 3 wires this into ra_names; until then only tests call it.
-#![allow(dead_code)]
-
 use std::io::Read;
 
 static BLOB_GZ: &[u8] = include_bytes!("../data/g2pen.bin.gz");

@@ -629,7 +629,23 @@ fn prev_is_number(w: &[&str], i: usize) -> bool {
     if !p.trail.is_empty() {
         return false;
     }
-    p.core.chars().last().is_some_and(|c| c.is_ascii_digit()) || has(NUMBER_WORDS, p.core)
+    ends_in_number(p.core) || has(NUMBER_WORDS, &p.core.to_lowercase())
+}
+
+/// A vulgar fraction character (`½`, `¾`).
+fn is_fraction_char(c: char) -> bool {
+    matches!(c, '½' | '¼' | '¾' | '⅓' | '⅔' | '⅕' | '⅖' | '⅗' | '⅘' | '⅙' | '⅚' | '⅛' | '⅜' | '⅝' | '⅞')
+}
+
+/// The word ends in a digit or a fraction (`59,000`, `1.5`, `1/2`, `1½`, `½`).
+fn ends_in_number(core: &str) -> bool {
+    core.chars().last().is_some_and(|c| c.is_ascii_digit() || is_fraction_char(c))
+}
+
+/// The word before `i` is exactly one ("1", "one"): its unit is singular. Every
+/// other number (0, 1.5, "1.0", 1/2, 59,000) takes the plural.
+fn prev_is_one(w: &[&str], i: usize) -> bool {
+    i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| p.core == "1" || p.core.eq_ignore_ascii_case("one"))
 }
 
 /// The word before `i` looks like a street name (`Main`, `5th`), no pause after it.
@@ -1120,8 +1136,7 @@ fn glued_symbols(w: &[&str], i: usize, body: &str) -> Option<String> {
         let l = std::mem::take(letters);
         let said = match unit(&l) {
             Some((one_u, many, _)) if out.is_empty() && prev_is_number(w, i) => {
-                let singular = i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| p.core == "1");
-                (if singular { one_u } else { many }).to_string()
+                (if prev_is_one(w, i) { one_u } else { many }).to_string()
             }
             _ if l.chars().count() == 1 => l.to_uppercase(),
             _ => l,
@@ -1195,6 +1210,9 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
 
     // A symbol on its own.
     if let Some(said) = find(SYMBOLS, core) {
+        if core == "°" && prev_is_number(w, i) && prev_is_one(w, i) {
+            return one("degree".into(), false);
+        }
         return one((*said).to_string(), false);
     }
     // `3 x 4`
@@ -1331,8 +1349,7 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         }
         let prev = tok(w, i - 1);
         let prev_money = prev.is_some_and(|p| p.core.contains(['$', '€', '£', '¥', '₹']));
-        let prev_digits =
-            prev.is_some_and(|p| p.core.chars().last().is_some_and(|c| c.is_ascii_digit()));
+        let prev_digits = prev.is_some_and(|p| ends_in_number(p.core));
         let single = body.chars().count() == 1;
         let ambiguous = single || has(UNITS_DIGITS_ONLY, body);
         // `take Route 66 W`: a single letter after a number that follows a name is
@@ -1349,8 +1366,7 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             && !has(ROMAN_NEVER, body)
             && !(body == "m" && prev_money);
         if let Some((one_u, many, _)) = unit(body).filter(|_| ok) {
-            let singular = prev.is_some_and(|p| p.core == "1" || p.core == "one");
-            return one((if singular { one_u } else { many }).to_string(), period);
+            return one((if prev_is_one(w, i) { one_u } else { many }).to_string(), period);
         }
     }
     // A symbol or unit glued to a number (`±2`, `§230`, `5km`, `3×4`) is a number
@@ -1891,6 +1907,52 @@ mod tests {
         assert_eq!(render("is 5.9 Gbit/s now"), "is 5.9 gigabits per second now");
         assert_eq!(render("at 100 Mbit/s and"), "at 100 megabits per second and");
         assert_eq!(render("a 10 Gbit link"), "a 10 gigabits link");
+    }
+
+    /// Round 1 (Alex): every unit is plural after any number but exactly 1 (decimals,
+    /// "1.0", fractions, zero), singular after exactly 1, spaced and glued alike.
+    #[test]
+    fn units_are_plural_after_any_number_but_one() {
+        let last = |ws: &[&str]| crate::ra_norm::spans(ws).last().map(|s| s.spoken.clone()).unwrap_or_default();
+        let mut bad = Vec::new();
+        for (u, one_u, many, glue) in UNITS {
+            let single_letter = u.chars().count() == 1;
+            // a lone letter or a word-like unit (`mi`, `min`) needs digits before it
+            let digits_only = single_letter || has(UNITS_DIGITS_ONLY, u);
+            for n in ["59,000", "2", "0", "1.5", "1.0", "0.5", "1/2", "½", "1½", "two", "1,001"] {
+                if digits_only && n == "two" {
+                    continue; // a lone letter after a number word is not a unit ("two V")
+                }
+                let got = last(&[n, u]);
+                if got != *many {
+                    bad.push(format!("{n} {u}: {got:?} (want {many:?})"));
+                }
+            }
+            for n in ["1", "one", "One"] {
+                if digits_only && n != "1" {
+                    continue;
+                }
+                let got = last(&[n, u]);
+                if got != *one_u {
+                    bad.push(format!("{n} {u}: {got:?} (want {one_u:?})"));
+                }
+            }
+            if *glue {
+                for n in ["59,000", "2", "1.5", "1.0", "0.5"] {
+                    let w = format!("{n}{u}");
+                    let got = last(&[&w]);
+                    if !got.ends_with(&format!(" {many}")) {
+                        bad.push(format!("{w}: {got:?} (want .. {many:?})"));
+                    }
+                }
+                let w = format!("1{u}");
+                let got = last(&[&w]);
+                if got != format!("one {one_u}") {
+                    bad.push(format!("{w}: {got:?} (want one {one_u:?})"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
     }
 
     #[test]

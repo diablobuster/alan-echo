@@ -225,6 +225,8 @@ struct Ctx {
     near_date: bool,
     /// Blood pressure (`120/80 mmHg`, "blood pressure was 90/60"): `a/b` reads "a over b".
     pressure: bool,
+    /// The word before is exactly one ("1", "one"): a unit here is singular (`1 km2`).
+    after_one: bool,
 }
 
 fn plain() -> Ctx {
@@ -319,7 +321,8 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
     let pressure = next == "mmhg"
         || (next == "blood" && next2 == "pressure")
         || (i.saturating_sub(3)..i).any(|k| matches!(lc_core(words[k]).as_str(), "pressure" | "bp"));
-    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure }
+    let after_one = i >= 1 && matches!(prev.as_str(), "1" | "one") && split_punct(words[i - 1]).2.is_empty();
+    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure, after_one }
 }
 
 // ---- currency ----
@@ -622,7 +625,9 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         if pressure_shape && parts[0].len() == 3 {
             return Some(over());
         }
-        if a == b || (a == 24 && b == 7) {
+        // 50/50, 24/7, and a two-digit split with no other reading (60/40, 70/30)
+        let split = parts[0].len() == 2 && parts[1].len() == 2;
+        if a == b || (a == 24 && b == 7) || split {
             return Some(format!("{} {}", integer(parts[0]), integer(parts[1])));
         }
     }
@@ -775,25 +780,26 @@ fn power(core: &str) -> Option<String> {
     Some(format!("{} to the {}{eq}", decimal(ip, fp), ordinal(n)))
 }
 
-/// `km2`, `m3` (a lost superscript after a length unit) -> "square kilometers".
-fn square_unit(core: &str) -> Option<String> {
+/// `km2`, `m3` (a lost superscript after a length unit) -> "square kilometers"
+/// ("square kilometer" after exactly one, `one`).
+fn square_unit(core: &str, one: bool) -> Option<String> {
     let (unit, pow) = (core.get(..core.len().checked_sub(1)?)?, core.get(core.len() - 1..)?);
     let kind = match pow {
         "2" => "square",
         "3" => "cubic",
         _ => return None,
     };
-    let many = match unit {
-        "km" => "kilometers",
-        "m" => "meters",
-        "cm" => "centimeters",
-        "mm" => "millimeters",
-        "mi" => "miles",
-        "ft" => "feet",
-        "yd" => "yards",
+    let (single, many) = match unit {
+        "km" => ("kilometer", "kilometers"),
+        "m" => ("meter", "meters"),
+        "cm" => ("centimeter", "centimeters"),
+        "mm" => ("millimeter", "millimeters"),
+        "mi" => ("mile", "miles"),
+        "ft" => ("foot", "feet"),
+        "yd" => ("yard", "yards"),
         _ => return None,
     };
-    Some(format!("{kind} {many}"))
+    Some(format!("{kind} {}", if one { single } else { many }))
 }
 
 /// `405B` before "parameters": the K/M/B/T suffix is a scale word. `70B-parameter`
@@ -1076,7 +1082,7 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
     if let Some(s) = power(core) {
         return s;
     }
-    if let Some(s) = square_unit(core) {
+    if let Some(s) = square_unit(core, ctx.after_one) {
         return s;
     }
     if let Some(s) = model_size(core, ctx) {
@@ -1463,6 +1469,27 @@ mod tests {
         assert!(!at("Maybe 60/40.", 1).1.contains("over"));
     }
 
+    /// Round 1: a split with no cue (60/40, 70/30) is two plain numbers, not "slash".
+    #[test]
+    fn split_pairs_read_as_two_numbers() {
+        assert_eq!(one("60/40"), "sixty forty");
+        assert_eq!(one("70/30"), "seventy thirty");
+        assert_eq!(one("80/20"), "eighty twenty");
+        assert_eq!(one("55/45"), "fifty five forty five");
+        assert_eq!(at("Maybe 60/40.", 1).1, "sixty forty.");
+        // the other readings are unchanged
+        assert_eq!(one("50/50"), "fifty fifty");
+        assert_eq!(one("9/10"), "nine out of ten");
+        assert_eq!(one("4/5"), "four out of five");
+        assert_eq!(one("120/80"), "one hundred twenty over eighty");
+        assert_eq!(at("BP was 120/80 mmHg today", 2).1, "one hundred twenty over eighty");
+        assert_eq!(one("3/14"), "March fourteenth");
+        assert_eq!(one("12/25"), "December twenty fifth");
+        assert_eq!(one("1/2"), "one half");
+        assert_eq!(one("24/7"), "twenty four seven");
+        assert_eq!(one("80/120"), "eighty slash one hundred twenty");
+    }
+
     #[test]
     fn version() {
         assert_eq!(one("v2.1"), "version two point one");
@@ -1751,6 +1778,50 @@ mod tests {
         // a plain product stays a product
         assert_eq!(one("3×4"), "three times four");
         assert!(!one("2.5x100").contains("to the"), "{}", one("2.5x100"));
+    }
+
+    /// Round 1 (Alex): number-pass units are plural after any number but exactly 1.
+    #[test]
+    fn number_pass_units_are_plural_after_any_number_but_one() {
+        let last = |s: &str| spans(s).last().map(|x| x.2.clone()).unwrap_or_default();
+        let mut bad = Vec::new();
+        for (u, one_u, many) in [
+            ("km2", "square kilometer", "square kilometers"),
+            ("m2", "square meter", "square meters"),
+            ("cm2", "square centimeter", "square centimeters"),
+            ("mm2", "square millimeter", "square millimeters"),
+            ("mi2", "square mile", "square miles"),
+            ("ft2", "square foot", "square feet"),
+            ("yd2", "square yard", "square yards"),
+            ("m3", "cubic meter", "cubic meters"),
+            ("km3", "cubic kilometer", "cubic kilometers"),
+        ] {
+            for n in ["59,000", "2", "1.5", "1.0", "0.5", "1/2"] {
+                let got = last(&format!("{n} {u}"));
+                if got != many {
+                    bad.push(format!("{n} {u}: {got:?} (want {many:?})"));
+                }
+            }
+            for n in ["1", "one"] {
+                let got = last(&format!("{n} {u}"));
+                if got != one_u {
+                    bad.push(format!("{n} {u}: {got:?} (want {one_u:?})"));
+                }
+            }
+        }
+        for (u, one_u, many) in UNITS {
+            for n in ["59,000", "2", "1.5", "1.0", "0.5"] {
+                let got = one(&format!("{n}{u}"));
+                if !got.ends_with(&format!(" {many}")) {
+                    bad.push(format!("{n}{u}: {got:?} (want .. {many:?})"));
+                }
+            }
+            let got = one(&format!("1{u}"));
+            if got != format!("one {one_u}") {
+                bad.push(format!("1{u}: {got:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
     }
 
     #[test]

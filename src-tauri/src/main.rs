@@ -20,6 +20,8 @@ mod ra_text;
 mod ra_model;
 #[cfg(target_os = "windows")]
 mod ra_timing;
+#[cfg(target_os = "windows")]
+mod ra_wsola;
 
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;

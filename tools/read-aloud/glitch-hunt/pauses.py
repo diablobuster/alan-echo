@@ -1,27 +1,30 @@
 """Awkward-pause check for the round trip: long silences mid-phrase.
 
 `glitch_synth` writes `wav/<id>.json` next to each WAV: one [word, start ms, end ms]
-per source word (a word's span runs to the next word's start, so it holds the pause
-after it). For each word this measures silent runs in the audio (10 ms frames whose
-RMS is under 3% of the sentence's loud level):
-  - INSIDE: a silence of >= 200 ms that ends before the word's span ends (a gap
-    inside a word or a multi-word span: "four hundred | five");
-  - AFTER: a trailing silence of >= 350 ms after a word with no punctuation
-    (a pause mid-phrase), not at a chunk end.
+per source word. A word's span runs to the next word's start, so it holds the
+pause after the word (and, because timings are spread over the tokens, sometimes
+part of it lands mid-span). For each word this finds the longest silence in its
+span (10 ms frames whose RMS is under 3% of the sentence's loud level) and flags
+it when it is >= 350 ms and nothing explains it:
+  - not the last word of a chunk (chunks are joined with a gap);
+  - not a multi-word span whose last (zero-length) word ends in punctuation;
+  - the word does not end in punctuation, and the next word does not open with a
+    bracket, quote or dash (those pauses are natural).
 Writes pauses.json and prints the rate per 1,000 words. Dev-only, stdlib only.
 """
 import json, math, os, struct, sys, wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FRAME_MS = 10
-INSIDE_MS = 200
-AFTER_MS = 350
+PAUSE_MS = 350
 PUNCT = tuple(",.;:!?)]\"'”’—–-…")
+OPENERS = tuple("([{\"'“‘—–-")
 
 
 def frames_rms(path):
     with wave.open(path, "rb") as w:
-        sr, n = w.getframerate(), w.getnframes()
+        n = w.getnframes()
+        sr = w.getframerate()
         raw = w.readframes(n)
     s = struct.unpack(f"<{len(raw) // 2}h", raw)
     step = sr * FRAME_MS // 1000
@@ -58,26 +61,38 @@ def main(wavdir):
             continue
         times = json.load(open(os.path.join(wavdir, name), encoding="utf-8"))
         rms = frames_rms(wav)
-        loud = sorted(rms)[int(len(rms) * 0.95)] if rms else 0
+        if not rms:
+            continue
+        loud = sorted(rms)[int(len(rms) * 0.95)]
         thr = max(0.003, loud * 0.03)
         words_total += len(times)
         for k, (word, s, e) in enumerate(times):
-            nxt = times[k + 1][1] if k + 1 < len(times) else None
-            chunk_end = nxt is None or nxt > e + 50  # the next chunk starts after a gap
-            a, b = s // FRAME_MS, e // FRAME_MS
-            for rs, re_ in silent_runs(rms, a, b, thr):
-                dur = re_ - rs
-                trailing = re_ >= b * FRAME_MS - FRAME_MS
-                if not trailing and rs > s + 30 and dur >= INSIDE_MS:
-                    flags.append(dict(id=sid, word=word, kind="INSIDE", at_ms=rs, ms=dur))
-                elif trailing and dur >= AFTER_MS and not chunk_end and not word.endswith(PUNCT):
-                    flags.append(dict(id=sid, word=word, kind="AFTER", at_ms=rs, ms=dur))
+            nxt = times[k + 1] if k + 1 < len(times) else None
+            if nxt is None or nxt[1] > e + 50:  # chunk end: the next chunk starts after a gap
+                continue
+            if word.endswith(PUNCT) or nxt[0].startswith(OPENERS):
+                continue
+            # a multi-word span ($16.5 billion,) is said on its first word; the inner
+            # words have zero length, so their punctuation explains the pause
+            j = k + 1
+            while j < len(times) and times[j][1] == times[j][2]:
+                j += 1
+            if j > k + 1 and times[j - 1][0].endswith(PUNCT):
+                continue
+            if j < len(times) and times[j][0].startswith(OPENERS):
+                continue
+            runs = silent_runs(rms, s // FRAME_MS, e // FRAME_MS, thr)
+            if not runs:
+                continue
+            rs, re_ = max(runs, key=lambda r: r[1] - r[0])
+            if re_ - rs >= PAUSE_MS:
+                flags.append(dict(id=sid, word=word, next=nxt[0], at_ms=rs, ms=re_ - rs))
     rate = round(1000 * len(flags) / max(1, words_total), 2)
     out = dict(words=words_total, flags=len(flags), rate_per_1k=rate, items=flags)
     json.dump(out, open(os.path.join(HERE, "pauses.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
     print(f"pauses: {len(flags)} in {words_total} words = {rate}/1k")
-    for f in flags[:40]:
-        print(f"  {f['kind']:6} {f['ms']:4} ms  {f['id']}  {f['word']}")
+    for f in sorted(flags, key=lambda f: -f["ms"])[:30]:
+        print(f"  {f['ms']:4} ms  {f['id']:>5}  {f['word']} | {f['next']}")
 
 
 if __name__ == "__main__":

@@ -139,13 +139,15 @@ def main():
                      f"<td class=bad>{html.escape(r['ref_words'])}<div class=muted>{html.escape(r['ref_norm'])}</div></td>"
                      f"<td>{html.escape(r['heard'])}</td><td class=muted>{html.escape(r['category'])}<br>{html.escape(r['stratum'])}</td></tr>")
         o.append("</table></div>")
-        o.append("<h2 id=pause>Long pauses</h2><p class=lede>Silence of 200 ms or more inside a word, or 350 ms or more after a word "
-                 "with no punctuation (from the synth word timings).</p><div class=scroll><table><tr><th>Audio</th><th>Sentence</th><th>Word</th><th>Pause</th></tr>")
+        o.append("<h2 id=pause>Long pauses</h2><p class=lede>A silence of 350 ms or more after a word with no punctuation, "
+                 "mid-chunk (from the synth word timings). An A/B test showed the same pause when the number is typed out as words, "
+                 "so these come from the voice model's phrasing, not the text rules.</p><div class=scroll><table><tr><th>Audio</th><th>Sentence</th><th>Word</th><th>Pause</th></tr>")
         if not pauses:
             o.append("<tr><td colspan=4 class=good>None found.</td></tr>")
         for p in pauses:
             o.append(f"<tr><td>{audio(link('rt', p['id']))}</td><td>{html.escape(sample.get(p['id'], ''))}</td>"
-                     f"<td>{html.escape(p['word'])}</td><td class=num>{p['ms']} ms {p['kind'].lower()} at {p['at_ms'] / 1000:.1f} s</td></tr>")
+                     f"<td>{html.escape(p['word'])} | {html.escape(p.get('next', ''))}</td>"
+                     f"<td class=num>{p['ms']} ms at {p['at_ms'] / 1000:.1f} s</td></tr>")
         o.append("</table></div>")
         o.append("<h2 id=good>20 random clean sentences</h2><div class=scroll><table><tr><th>Audio</th><th>Sentence</th><th>Heard</th></tr>")
         for i in good:

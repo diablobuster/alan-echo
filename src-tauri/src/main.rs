@@ -13,6 +13,8 @@ mod ra_player;
 mod ra_hook;
 #[cfg(target_os = "windows")]
 mod ra_uia;
+#[cfg(target_os = "windows")]
+mod ra_acro;
 mod settings;
 mod text_cleanup;
 mod trial;

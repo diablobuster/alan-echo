@@ -3,7 +3,6 @@
 //! One worker thread ("ra-uia") owns every COM object; callers talk to it over
 //! channels with short timeouts, so a hung target app can never block the UI.
 //! Behaviour follows Spike A (spec section 5, rules 1-9). Never panics.
-#![allow(dead_code)] // wired up by the Read Aloud controller task
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -48,7 +47,7 @@ pub fn contains(rects: &[Rect], x: f64, y: f64) -> bool {
 enum Req {
     Hover(i32, i32, Sender<Option<Vec<Rect>>>),
     Pick(i32, i32, Sender<Result<Vec<String>, String>>),
-    More(Sender<Vec<String>>),
+    More(Sender<Result<Vec<String>, String>>),
     Rects(Vec<usize>, Sender<Vec<Rect>>),
     Scroll(usize),
 }
@@ -114,14 +113,17 @@ impl Uia {
         }
     }
 
-    /// Next ≤ 400 raw tokens; source indices continue. Only an EMPTY result means the
-    /// end of the document (a short batch does not).
-    pub fn more(&self) -> Vec<String> {
-        let (t, r) = mpsc::channel();
-        if self.tx.send(Req::More(t)).is_err() {
-            return Vec::new();
-        }
-        r.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
+    /// Next ≤ 400 raw tokens; source indices continue. Only `Ok(empty)` means the end
+    /// of the document (a short batch does not); `Err` = timeout / UIA failure, retry later.
+    #[cfg_attr(not(test), allow(dead_code))] // the controller uses more_fetcher()
+    pub fn more(&self) -> Result<Vec<String>, String> {
+        self.more_fetcher().more()
+    }
+
+    /// A Send handle for `more()`, so a caller can fetch from another thread (a hung
+    /// target app then stalls only that thread).
+    pub fn more_fetcher(&self) -> MoreFetcher {
+        MoreFetcher { tx: self.tx.clone() }
     }
 
     /// Fresh screen rects for the given source indices (rule 9: never cached).
@@ -137,6 +139,26 @@ impl Uia {
     /// Scroll the source so token `src_idx` is visible (rule 4). Fire-and-forget.
     pub fn scroll_to(&self, src_idx: usize) {
         let _ = self.tx.send(Req::Scroll(src_idx));
+    }
+}
+
+/// See `Uia::more_fetcher`.
+pub struct MoreFetcher {
+    tx: Sender<Req>,
+}
+
+impl MoreFetcher {
+    /// Same contract as `Uia::more`.
+    pub fn more(&self) -> Result<Vec<String>, String> {
+        let (t, r) = mpsc::channel();
+        self.tx
+            .send(Req::More(t))
+            .map_err(|_| "text reader is not running".to_string())?;
+        match r.recv_timeout(Duration::from_secs(5)) {
+            Ok(res) => res,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err("text read timed out".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("text reader stopped".into()),
+        }
     }
 }
 
@@ -256,7 +278,9 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
             }
             Req::More(t) => {
                 let (len, cur) = (st.read.ranges.len(), st.read.cursor.clone());
-                if t.send(read_forward(&mut st.read, MORE_BATCH)).is_err() {
+                let res = read_forward(&mut st.read, MORE_BATCH);
+                let failed = res.is_err();
+                if t.send(res).is_err() || failed {
                     st.read.ranges.truncate(len);
                     st.read.cursor = cur;
                 }
@@ -480,29 +504,35 @@ fn pick(st: &mut State, x: i32, y: i32) -> Result<Vec<String>, String> {
     };
     let mut out = Vec::with_capacity(FIRST_BATCH);
     out.push(first);
-    out.extend(read_forward(&mut st.read, FIRST_BATCH - 1));
+    // a failed forward read keeps the clicked word; more() continues from the cursor
+    out.extend(read_forward(&mut st.read, FIRST_BATCH - 1).unwrap_or_default());
     Ok(out)
 }
 
 /// Rule 8: walk forward word by word from the cursor; never re-query visible ranges.
-fn read_forward(read: &mut Read, n: usize) -> Vec<String> {
+/// `Ok(empty)` only at the true end of the text. A UIA error before any token is read
+/// is `Err` (retryable); after some tokens it ends the batch early (`Ok(partial)`).
+fn read_forward(read: &mut Read, n: usize) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let Some(cur) = read.cursor.as_ref() else {
-        return out;
+        return Err("no current read".into());
     };
-    let Ok(r) = (unsafe { cur.Clone() }) else {
-        return out;
-    };
+    let r = unsafe { cur.Clone() }.map_err(|e| format!("clone range: {e}"))?;
     for _ in 0..n {
-        let moved = unsafe { r.Move(TextUnit_Word, 1) }.unwrap_or(0);
-        if moved == 0 {
-            break;
-        }
-        if unsafe { r.ExpandToEnclosingUnit(TextUnit_Word) }.is_err() {
-            break;
-        }
-        let Ok(keep) = (unsafe { r.Clone() }) else {
-            break;
+        let step = unsafe { r.Move(TextUnit_Word, 1) }
+            .map_err(|e| format!("move: {e}"))
+            .and_then(|moved| {
+                if moved == 0 {
+                    return Ok(None); // true end of the text
+                }
+                unsafe { r.ExpandToEnclosingUnit(TextUnit_Word) }.map_err(|e| format!("expand: {e}"))?;
+                unsafe { r.Clone() }.map(Some).map_err(|e| format!("clone word: {e}"))
+            });
+        let keep = match step {
+            Ok(Some(k)) => k,
+            Ok(None) => break,
+            Err(e) if out.is_empty() => return Err(e),
+            Err(_) => break,
         };
         let text = unsafe { keep.GetText(-1) }
             .map(|b| b.to_string())
@@ -511,7 +541,7 @@ fn read_forward(read: &mut Read, n: usize) -> Vec<String> {
         read.cursor = Some(keep);
         out.push(text);
     }
-    out
+    Ok(out)
 }
 
 /// Bounding rects of a range (empty when off-screen). Never cached (rule 9).

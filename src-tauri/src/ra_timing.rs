@@ -1,5 +1,4 @@
 //! Read Aloud — Kokoro phoneme durations -> per-word sample times.
-#![allow(dead_code)] // consumed by later Read Aloud tasks
 pub const SR: u32 = 24_000;
 const SAMPLES_PER_FRAME: f64 = 600.0;
 

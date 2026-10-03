@@ -1,5 +1,4 @@
 //! Read Aloud — WSOLA time-stretch (speeds speech up without raising pitch).
-#![allow(dead_code)]
 
 pub fn stretch(input: &[f32], rate: f32, sr: u32) -> Vec<f32> {
     if !(rate > 1.0001) || !rate.is_finite() {

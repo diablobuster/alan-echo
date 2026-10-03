@@ -6,7 +6,6 @@
 //! but "gpu") runs on CPU (fp32): it frees fully on unload and stays < 500 MB.
 //! DirectML (q8) is used only for `pref == "gpu"`; if it fails to open or to run,
 //! the engine falls back to CPU by itself.
-#![allow(dead_code)] // consumed by the Read Aloud controller (later task)
 use crate::{
     ra_model,
     ra_timing::{self, WordTime},
@@ -82,6 +81,7 @@ pub struct Engine {
     loads: AtomicU32,
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // test/diagnostic API
 pub fn should_unload(last_used: Instant, now: Instant, busy: bool) -> bool {
     idle_expired(last_used, now, busy, IDLE)
 }
@@ -228,6 +228,7 @@ impl Engine {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // test/diagnostic API
     pub fn is_loaded(&self) -> bool {
         matches!(*self.slot.lock(), Slot::Ready { .. })
     }

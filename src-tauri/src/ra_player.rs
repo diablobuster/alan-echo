@@ -1,6 +1,5 @@
 //! Read Aloud — streaming playback on the default output device.
 //! cpal::Stream isn't Send, so it lives on its own thread (same pattern as audio.rs).
-#![allow(dead_code)]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -137,12 +136,14 @@ impl Player {
     pub fn set_paused(&self, p: bool) {
         self.src.lock().paused = p;
     }
+    #[allow(dead_code)] // player API, not needed by the controller (it tracks its own phase)
     pub fn is_paused(&self) -> bool {
         self.src.lock().paused
     }
     pub fn position(&self) -> u64 {
         self.src.lock().pos
     }
+    #[cfg_attr(not(test), allow(dead_code))] // test/diagnostic API
     pub fn queued_end(&self) -> u64 {
         self.src.lock().pushed
     }

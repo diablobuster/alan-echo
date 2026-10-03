@@ -1,6 +1,4 @@
 //! Read Aloud — Kokoro model file locations (data dir, not bundled).
-// Consumers (engine, commands) land in later Read Aloud tasks.
-#![allow(dead_code)]
 use std::path::{Path, PathBuf};
 
 pub struct Files {

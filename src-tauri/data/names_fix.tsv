@@ -1,4 +1,5 @@
-# word<TAB>misaki phonemes. Hand fixes for names the CMU/LTS steps get wrong. Lowercase keys.
+# word<TAB>misaki phonemes. Hand fixes for names the CMU/LTS steps get wrong. Lowercase keys;
+# a Capitalised key (Ng) is said only when the word is written in title case.
 buttigieg	bˈudəʤˌɛʤ
 zelensky	zəlˈɛnski
 erdogan	ˈɛɹdəwˌɑn
@@ -86,3 +87,4 @@ xiaomi	ʃˈWmi
 zelenskyy	zəlˈɛnski
 zendesk	zˈɛndˌɛsk
 ieee	ˌI tɹˈɪpəl ˈi
+Ng	ˈɪŋ

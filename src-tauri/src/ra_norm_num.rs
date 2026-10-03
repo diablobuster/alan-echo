@@ -618,7 +618,8 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
                 return Some(d);
             }
         }
-        if pressure_shape {
+        // no cue: only a 3-digit top number (120/80); 60/40 is a split, not a pressure
+        if pressure_shape && parts[0].len() == 3 {
             return Some(over());
         }
         if a == b || (a == 24 && b == 7) {
@@ -1457,6 +1458,9 @@ mod tests {
         assert_eq!(one("11/5"), "November fifth");
         // first number smaller: not a reading
         assert_eq!(one("80/120"), "eighty slash one hundred twenty");
+        // a 60/40 split is not a pressure without a cue
+        assert!(!one("60/40").contains("over"), "{}", one("60/40"));
+        assert!(!at("Maybe 60/40.", 1).1.contains("over"));
     }
 
     #[test]

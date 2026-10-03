@@ -169,6 +169,9 @@ pub struct Names {
     map: HashMap<String, String>,
     /// Keys that came from the hand list (they override misaki too).
     hand: HashSet<String>,
+    /// Hand-list names said only when written in title case (`Ng`, not `NG` / `ng`),
+    /// by lowercase key. Kept out of `map`, so no other path reads them.
+    title: HashMap<String, String>,
     /// CMUdict keys whose entry only spells the letters (fbi, gdp, ceo).
     acronyms: HashSet<String>,
     lts: Option<Box<dyn Lts>>,
@@ -205,6 +208,7 @@ impl Names {
             Err(e) => log::warn!("ra_names: CMUdict decompress failed: {e}"),
         }
         let mut hand = HashSet::new();
+        let mut title = HashMap::new();
         for line in FIX_TSV.lines() {
             if line.starts_with('#') {
                 continue;
@@ -214,6 +218,11 @@ impl Names {
                 // the phonemes go inside misaki's `[word](/ph/)` override: no syntax chars
                 if ph.is_empty() || ph.contains(['[', ']', '(', ')', '/']) {
                     log::warn!("ra_names: bad hand-list entry skipped: {line:?}");
+                    continue;
+                }
+                // a capitalised key (`Ng`) is a name said only in title case
+                if w.trim().starts_with(char::is_uppercase) {
+                    title.insert(w.trim().to_lowercase(), ph.to_string());
                     continue;
                 }
                 let w = w.trim().to_lowercase();
@@ -226,19 +235,30 @@ impl Names {
             .filter(|(w, p)| w.len() <= ACRONYM_MAX && bare(p) == bare(&spell(w)))
             .map(|(w, _)| w.clone())
             .collect();
-        Names { map, hand, acronyms, lts }
+        Names { map, hand, title, acronyms, lts }
     }
 
     /// Knows nothing (the "before" side of the names A/B board).
     #[cfg(test)]
     pub fn empty() -> Names {
-        Names { map: HashMap::new(), hand: HashSet::new(), acronyms: HashSet::new(), lts: None }
+        Names { map: HashMap::new(), hand: HashSet::new(), title: HashMap::new(), acronyms: HashSet::new(), lts: None }
     }
 
     /// Hand-list pronunciation of `word` (any case, optional possessive 's), or None.
-    /// Hand-list words override misaki's own reading (e.g. Xi, Nguyen).
+    /// Hand-list words override misaki's own reading (e.g. Xi, Nguyen). Title-case
+    /// names (`Ng`) match only when written that way.
     pub fn hand(&self, word: &str) -> Option<String> {
         let lower = lower(word);
+        let mut cs = word.chars();
+        if cs.next().is_some_and(char::is_uppercase) && !cs.any(char::is_uppercase) {
+            if let Some(v) = self.title.get(lower.as_ref()) {
+                return Some(v.clone());
+            }
+            let stem = lower.strip_suffix("'s").or_else(|| lower.strip_suffix("\u{2019}s"));
+            if let Some(v) = stem.and_then(|s| self.title.get(s)) {
+                return Some(format!("{v}{}", possessive(v)));
+            }
+        }
         if self.hand.contains(lower.as_ref()) {
             return self.map.get(lower.as_ref()).cloned();
         }
@@ -851,9 +871,13 @@ mod tests {
         assert_eq!(n.hand("Nguyen").as_deref(), Some("wˈɪn"));
         // Task 6: said names, not spelled letters
         assert_eq!(n.hand("IEEE").as_deref(), Some("ˌI tɹˈɪpəl ˈi"));
-        // "ng" / "NG" alone is not "ing" (a gauge, a tag, an abbreviation)
-        assert_eq!(n.hand("Ng"), None);
+        // the name Ng (title case) is "ing"; "ng" / "NG" alone is not
+        assert_eq!(n.hand("Ng").as_deref(), Some("ˈɪŋ"));
+        assert_eq!(n.hand("Ng's").as_deref(), Some("ˈɪŋz"));
         assert_eq!(n.hand("NG"), None);
+        assert_eq!(n.hand("ng"), None);
+        assert_ne!(n.lookup("NG").as_deref(), Some("ˈɪŋ"));
+        assert_ne!(n.lookup("ng").as_deref(), Some("ˈɪŋ"));
         assert_eq!(n.hand("Xi's").as_deref(), Some("ʃˈiz"));
         assert_eq!(n.hand("Ozempic\u{2019}s").as_deref(), Some("Ozˈɛmpɪks"));
         assert_eq!(n.hand("pelosi"), None, "CMUdict word, not a hand entry");
@@ -917,6 +941,7 @@ mod tests {
         NameFallback(Arc::new(Names {
             map: HashMap::new(),
             hand: HashSet::new(),
+            title: HashMap::new(),
             acronyms: HashSet::new(),
             lts: Some(Box::new(NameLts)),
         }))

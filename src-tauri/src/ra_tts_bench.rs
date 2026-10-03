@@ -99,7 +99,9 @@ fn tts_bench() {
         for c in &ch[1..] {
             st.push(run_chunk(&mut l, c));
         }
-        for c in &ch[1..] {
+        // a second pass chunked differently: reading never repeats an input length
+        let w: Vec<&str> = PASSAGE.split_whitespace().collect();
+        for c in w[27..].chunks(29) {
             st.push(run_chunk(&mut l, c));
         }
     }

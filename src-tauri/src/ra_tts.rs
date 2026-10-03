@@ -261,9 +261,14 @@ pub(crate) struct CpuOpts {
     pub mem_pattern: bool,
 }
 
+/// Measured (Task 8, ra_tts::bench::tts_shapes, interleaved on a shared machine; every
+/// reading chunk is a new input length): spinning off + memory pattern off vs ORT's
+/// defaults: CPU per second of speech 5.4 -> 2.8 s, RTF at 2.2x 0.75 -> 0.58, first
+/// chunk no slower (1154 -> 1118 ms). Spinning idle threads burn cores between ops;
+/// the memory pattern only pays off when an input length repeats, which reading never does.
 impl Default for CpuOpts {
     fn default() -> Self {
-        CpuOpts { intra: num_cpus::get_physical().clamp(1, 8), spin: true, mem_pattern: true }
+        CpuOpts { intra: num_cpus::get_physical().clamp(1, 8), spin: false, mem_pattern: false }
     }
 }
 

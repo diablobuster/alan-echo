@@ -42,6 +42,10 @@ mod ra_g2pen;
 mod ra_numwords;
 #[cfg(target_os = "windows")]
 mod ra_norm_num;
+#[cfg(target_os = "windows")]
+mod ra_norm_text;
+#[cfg(target_os = "windows")]
+mod ra_norm;
 
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;

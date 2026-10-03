@@ -1673,28 +1673,44 @@ mod tests {
         assert_eq!(fed, want);
     }
 
+    fn caps_rewrite_words() -> Vec<&'static str> {
+        ["THE", "PRESIDENT", "SAID", "FBI", "TALKS", "GDP", "MID-YEAR", "iPhone", "42"].iter().cycle().take(30).copied().collect()
+    }
+
+    /// Non-timing check of the caps rewrite on the same 30-word chunk the perf test times.
     #[test]
+    fn caps_rewrite_correct() {
+        let g = test_g2p();
+        let words = caps_rewrite_words();
+        let fed: Vec<String> = g2p_words(g, test_names(), &words).into_iter().map(|c| c.into_owned()).collect();
+        assert_eq!(fed.len(), words.len());
+        let sp = |w: &str| format!("[{w}](/{}/)", crate::ra_names::spell_tight(w));
+        for (w, f) in words.iter().zip(&fed) {
+            match *w {
+                "FBI" | "GDP" => assert_eq!(*f, sp(w), "{w} spelled out"),
+                "THE" | "SAID" | "TALKS" | "PRESIDENT" => assert_eq!(*f, w.to_lowercase(), "{w} folded"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Caps-rewrite cost per 30-word chunk (release only; wall-clock is meaningless in a
+    /// loaded debug run). Budget matches the pre-pass: <= 1 ms per chunk.
+    /// cargo test --release caps_rewrite -- --ignored --nocapture
+    #[test]
+    #[ignore]
     fn caps_rewrite_is_cheap() {
         let g = test_g2p();
-        let words: Vec<&str> = ["THE", "PRESIDENT", "SAID", "FBI", "TALKS", "GDP", "MID-YEAR", "iPhone", "42"].iter().cycle().take(30).copied().collect();
-        // best of 10 batches of 10 chunks, x10: the whole suite runs in parallel, and
-        // one wall-clock run of 100 chunks measured the other tests' load (1.2-1.6 s
-        // vs ~0.25 s alone once the pre-pass and Task 3 rules were both in)
-        let best = (0..10)
-            .map(|_| {
-                let t = Instant::now();
-                for _ in 0..10 {
-                    let _ = g2p_words(g, test_names(), &words);
-                }
-                t.elapsed()
-            })
-            .min()
-            .unwrap_or_default();
-        // A debug smoke bound against a blow-up (an O(n²) slip costs 10x+), not the
-        // budget: the release budget is `prepass_cost_per_chunk` (<= 1 ms per chunk).
-        // 500 ms failed at b8d044c too once the machine was busy (536-568 ms), so
-        // the bound has 2x headroom.
-        assert!(best * 10 < Duration::from_millis(1000), "{:?} for 100 chunks", best * 10);
+        let words = caps_rewrite_words();
+        let n = 1000;
+        let _ = g2p_words(g, test_names(), &words); // warm
+        let t = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(g2p_words(g, test_names(), std::hint::black_box(&words)));
+        }
+        let per = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        println!("caps rewrite: {per:.4} ms per 30-word chunk");
+        assert!(per <= 1.0, "{per} ms per chunk");
     }
 
     // ---- phase 3 task 3: acronyms, CamelCase, compounds, fold through the real path ----

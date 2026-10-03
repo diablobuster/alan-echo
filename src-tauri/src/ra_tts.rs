@@ -823,12 +823,24 @@ fn is_caps_word(w: &str) -> bool {
     core.len() >= 2 && core.bytes().all(|b| b.is_ascii_uppercase())
 }
 
-/// Per word: headline mode. A sentence of the chunk is a headline when at least 60%
+/// How capitalised a word's sentence is (see `headline_flags`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CapsMode {
+    /// Normal text: a 2-3 letter caps token is an acronym.
+    Mixed,
+    /// A headline (80%+ caps): dictionary words read as words.
+    Headline,
+    /// Every 2+ letter word is caps ("SHE SAT DOWN"): also the ambiguous acronyms
+    /// (`ra_names::AMBIGUOUS_ACRONYMS`: SAT, ERA, AD) read as words.
+    AllCaps,
+}
+
+/// Per word: headline mode. A sentence of the chunk is a headline when at least 80%
 /// of its alphabetic words (2+ letters) are ALL-CAPS and there are at least 3 of
-/// them ("FED CUTS RATES"). "took the SAT, ACT and AP" (3 of 6) and "DO NOT" (2)
-/// are mixed text.
-fn headline_flags(words: &[Cow<str>]) -> Vec<bool> {
-    let mut out = vec![false; words.len()];
+/// them ("FED CUTS RATES AGAIN"); all of them makes it `AllCaps`. "took the SAT,
+/// ACT and AP" (3 of 6), "the ER, ICU and VA" (3 of 5) and "DO NOT" (2) are mixed.
+fn headline_flags(words: &[Cow<str>]) -> Vec<CapsMode> {
+    let mut out = vec![CapsMode::Mixed; words.len()];
     let mut start = 0;
     let letters = |w: &str| w.chars().filter(|c| c.is_alphabetic()).count();
     for i in 0..words.len() {
@@ -837,9 +849,15 @@ fn headline_flags(words: &[Cow<str>]) -> Vec<bool> {
             let sent = &words[start..=i];
             let alpha = sent.iter().filter(|w| letters(w) >= 2).count();
             let caps = sent.iter().filter(|w| is_caps_word(w)).count();
-            let head = caps >= 3 && caps * 10 >= alpha * 6;
+            let mode = if caps < 3 || caps * 10 < alpha * 8 {
+                CapsMode::Mixed
+            } else if caps >= alpha {
+                CapsMode::AllCaps
+            } else {
+                CapsMode::Headline
+            };
             for o in out.iter_mut().skip(start).take(i + 1 - start) {
-                *o = head;
+                *o = mode;
             }
             start = i + 1;
         }
@@ -860,7 +878,8 @@ fn headline_flags(words: &[Cow<str>]) -> Vec<bool> {
 /// at 4+ letters, a CMUdict word not read letter by letter. Anything else is
 /// spelled, so a 2-5 letter caps token never reaches the GRU. Roman numerals (II,
 /// XIV) and other lengths are left to the other rules. `None`: not decided here.
-fn caps_rule(w: &str, names: &Names, lex: &Lex, known: &dyn Fn(&str) -> bool, headline: bool) -> Option<String> {
+fn caps_rule(w: &str, names: &Names, lex: &Lex, known: &dyn Fn(&str) -> bool, mode: CapsMode) -> Option<String> {
+    let headline = mode != CapsMode::Mixed;
     let start = w.find(char::is_alphanumeric)?;
     let (last, ch) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric())?;
     let end = last + ch.len_utf8();
@@ -889,7 +908,10 @@ fn caps_rule(w: &str, names: &Names, lex: &Lex, known: &dyn Fn(&str) -> bool, he
     // an all-caps plural (IRAS, CEOS) is checked by its stem too
     let bare = stem.strip_suffix('S').filter(|b| b.len() >= 2);
     let on_list = |x: &str| {
-        ra_names::SPELLED.contains(&x) || ra_text::KEEP_CAPS.contains(&x) || ra_names::ACRONYM_WORDS.contains(&x)
+        ra_names::SPELLED.contains(&x)
+            || ra_text::KEEP_CAPS.contains(&x)
+            || ra_names::ACRONYM_WORDS.contains(&x)
+            || (mode != CapsMode::AllCaps && ra_names::AMBIGUOUS_ACRONYMS.contains(&x))
     };
     let listed = on_list(stem) || bare.is_some_and(on_list) || names.letter_spelled(&low);
     let word = if listed {
@@ -916,7 +938,7 @@ fn caps_rule(w: &str, names: &Names, lex: &Lex, known: &dyn Fn(&str) -> bool, he
 /// The per-word path outside spans: hand override, Alex's caps acronym rule
 /// (`caps_rule`, `headline` = the word sits in ALL-CAPS text), acronym/CamelCase
 /// rule (`rule_override`), caps rule, page brackets.
-fn word_path<'b>(g: &G2P, names: &Names, w: &'b str, headline: bool) -> Cow<'b, str> {
+fn word_path<'b>(g: &G2P, names: &Names, w: &'b str, headline: CapsMode) -> Cow<'b, str> {
     let known = |x: &str| lexicon_knows(&g.lexicon, x);
     let names_knows = |x: &str| names.knows(x);
     let lex_knows = |x: &str| lexicon_has(&g.lexicon, x);
@@ -1954,6 +1976,44 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    /// Round 2: headline mode needs 80%+ caps words and 3+ of them; 100% caps is
+    /// its own mode (the ambiguous acronyms SAT / ERA / AD read as words only there).
+    #[test]
+    fn round2_headline_threshold_is_80_percent() {
+        let c = |ws: &[&str]| headline_flags(&ws.iter().map(|w| Cow::Borrowed(*w)).collect::<Vec<_>>());
+        // 3 of 5 (60%) is mixed text now
+        assert!(c(&["THE", "NEW", "LAW", "passed", "today."]).iter().all(|m| *m == CapsMode::Mixed));
+        assert!(c(&["the", "ER,", "ICU", "and", "VA"]).iter().all(|m| *m == CapsMode::Mixed));
+        // 4 of 5 (80%) is a headline, not all caps
+        assert!(c(&["FED", "CUTS", "RATES", "AGAIN", "today."]).iter().all(|m| *m == CapsMode::Headline));
+        // 2 caps words is never a headline
+        assert!(c(&["FED", "CUTS"]).iter().all(|m| *m == CapsMode::Mixed));
+        // every word caps
+        assert!(c(&["SHE", "SAT", "DOWN."]).iter().all(|m| *m == CapsMode::AllCaps));
+        // per sentence
+        let m = c(&["SHE", "SAT", "DOWN.", "Then", "she", "left."]);
+        assert_eq!(m, vec![CapsMode::AllCaps, CapsMode::AllCaps, CapsMode::AllCaps, CapsMode::Mixed, CapsMode::Mixed, CapsMode::Mixed]);
+    }
+
+    #[test]
+    fn round2_ambiguous_acronyms_are_words_only_in_all_caps() {
+        let low = |ws: &[&str]| spoken(&ws.iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        for ws in [&["SHE", "SAT", "DOWN"][..], &["THE", "ERA", "OF", "AI", "ENDS"][..], &["THE", "AD", "WAS", "BANNED"][..]] {
+            let got = spoken(ws);
+            let want = low(ws);
+            let i = ws.iter().position(|w| ["SAT", "ERA", "AD"].contains(w)).unwrap();
+            assert_eq!(got[i], want[i], "{ws:?}");
+        }
+        // mixed text and an 80% headline: spelled
+        assert_eq!(spoken(&["took", "the", "SAT"])[2], spelled_with_suffix("SAT"));
+        assert_eq!(spoken(&["the", "ERA", "rose"])[1], spelled_with_suffix("ERA"));
+        assert_eq!(spoken(&["SHE", "SAT", "THE", "EXAM", "today."])[1], spelled_with_suffix("SAT"));
+        // the always-spelled list stays spelled even in all caps
+        for (ws, i) in [(&["THE", "ER", "IS", "FULL"][..], 1), (&["ETA", "IS", "NOON"][..], 0), (&["AP", "CALLS", "RACE"][..], 0), (&["MY", "IRA", "GREW"][..], 1)] {
+            assert_eq!(spoken(ws)[i], spelled_with_suffix(ws[i]), "{ws:?}");
+        }
     }
 
     #[test]

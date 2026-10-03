@@ -243,8 +243,9 @@ impl Fallback for NameFallback {
 
 /// What the letter-to-sound model is asked for `word`: its lowercase a-z form with a
 /// possessive `'s` / `’s` removed (true when one was), accented letters folded to
-/// ASCII (é -> e, ñ -> n). `None` when any other character is left (digits, an inner
-/// apostrophe, CJK, ß) or the stem is empty or longer than 40 letters.
+/// ASCII (é -> e, ñ -> n) and apostrophes dropped (D'Agostino -> dagostino). `None`
+/// when any other character is left (digits, CJK, ß), no letter is left, or the stem
+/// is longer than 40 letters.
 fn lts_key(word: &str) -> Option<(String, bool)> {
     let low = lower(word);
     let (stem, poss) = match low.strip_suffix("'s").or_else(|| low.strip_suffix("\u{2019}s")) {
@@ -254,7 +255,11 @@ fn lts_key(word: &str) -> Option<(String, bool)> {
     if stem.is_empty() || stem.chars().count() > 40 {
         return None;
     }
-    let key = stem.chars().map(fold).collect::<Option<String>>()?;
+    // an apostrophe is not a sound: the model gets the letters around it
+    let key = stem.chars().filter(|c| !matches!(c, '\'' | '\u{2019}')).map(fold).collect::<Option<String>>()?;
+    if key.is_empty() {
+        return None;
+    }
     Some((key, poss))
 }
 
@@ -370,6 +375,7 @@ mod tests {
                 "mamdani" => Some("M AA0 M D AA1 N IY0".into()),
                 "pena" => Some("P EY1 N Y AH0".into()),
                 "nunez" => Some("N UW1 N EH0 Z".into()),
+                "dagostino" => Some("D AA0 G OW0 S T IY1 N OW0".into()),
                 _ => None,
             }
         }
@@ -397,6 +403,20 @@ mod tests {
         // an unknown stem with 's is still spelled (whole word), never panics
         assert_eq!(f.phonemize("Qzxv's").unwrap(), spell("Qzxv's"));
         for w in ["'s", "\u{2019}s", "'", "s'", "o'neil"] {
+            assert!(f.phonemize(w).is_ok(), "{w}");
+        }
+    }
+
+    #[test]
+    fn inner_apostrophe_names_are_said_not_spelled() {
+        use misaki_rs::fallback::Fallback;
+        let f = lts_only();
+        let base = arpa_to_misaki("D AA0 G OW0 S T IY1 N OW0");
+        assert_eq!(f.phonemize("D'Agostino").unwrap(), base);
+        assert_eq!(f.phonemize("D\u{2019}Agostino").unwrap(), base);
+        assert_eq!(f.phonemize("D'AGOSTINO'S").unwrap(), format!("{base}z"));
+        // apostrophes only: nothing for the model, spelled / Ok, never panics
+        for w in ["''", "'\u{2019}'", "'"] {
             assert!(f.phonemize(w).is_ok(), "{w}");
         }
     }

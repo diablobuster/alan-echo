@@ -475,6 +475,39 @@ static STARTERS: &[&str] = &[
     // END SORTED
 ];
 
+/// US state codes (and DC), read as the name after "City," (`state_after_city`).
+/// Sorted by code.
+static STATES: &[(&str, &str)] = &[
+    ("AK", "Alaska"), ("AL", "Alabama"), ("AR", "Arkansas"), ("AZ", "Arizona"), ("CA", "California"),
+    ("CO", "Colorado"), ("CT", "Connecticut"), ("DC", "D C"), ("DE", "Delaware"), ("FL", "Florida"),
+    ("GA", "Georgia"), ("HI", "Hawaii"), ("IA", "Iowa"), ("ID", "Idaho"), ("IL", "Illinois"),
+    ("IN", "Indiana"), ("KS", "Kansas"), ("KY", "Kentucky"), ("LA", "Louisiana"), ("MA", "Massachusetts"),
+    ("MD", "Maryland"), ("ME", "Maine"), ("MI", "Michigan"), ("MN", "Minnesota"), ("MO", "Missouri"),
+    ("MS", "Mississippi"), ("MT", "Montana"), ("NC", "North Carolina"), ("ND", "North Dakota"),
+    ("NE", "Nebraska"), ("NH", "New Hampshire"), ("NJ", "New Jersey"), ("NM", "New Mexico"),
+    ("NV", "Nevada"), ("NY", "New York"), ("OH", "Ohio"), ("OK", "Oklahoma"), ("OR", "Oregon"),
+    ("PA", "Pennsylvania"), ("RI", "Rhode Island"), ("SC", "South Carolina"), ("SD", "South Dakota"),
+    ("TN", "Tennessee"), ("TX", "Texas"), ("UT", "Utah"), ("VA", "Virginia"), ("VT", "Vermont"),
+    ("WA", "Washington"), ("WI", "Wisconsin"), ("WV", "West Virginia"), ("WY", "Wyoming"),
+];
+
+/// State codes that are also credentials after a name ("Jane Doe, MD", "PA", "MA"):
+/// read as the state only with a place word before the city or a ZIP after it.
+static CREDENTIAL_STATES: &[&str] = &["MA", "MD", "PA"];
+
+/// Capitalised words before a comma that are not a city ("Yes, OK", "Well, OR").
+static NOT_CITIES: &[&str] = &[
+    // BEGIN SORTED
+    "Again", "Alright", "Also", "Anyway", "Besides", "Finally", "Fine", "First", "Hello", "Here",
+    "Hey", "Hi", "Indeed", "Instead", "Last", "Look", "Next", "No", "Now", "Oh", "Ok", "Okay",
+    "Please", "Plus", "Right", "Second", "Sorry", "Still", "Sure", "Thanks", "Third", "Today",
+    "Well", "Yeah", "Yes",
+    // END SORTED
+];
+
+/// Words that put a place after them ("in Baltimore, MD").
+static PLACE_WORDS: &[&str] = &["at", "from", "in", "near", "of", "outside", "to"];
+
 /// Number words that can precede a unit (`five km`).
 static NUMBER_WORDS: &[&str] = &[
     // BEGIN SORTED
@@ -662,6 +695,34 @@ fn prev_is_street_name(w: &[&str], i: usize) -> bool {
     p.trail.is_empty()
         && !has(STARTERS, p.core)
         && (is_proper(p.core) || first_char(p.core).is_some_and(|c| c.is_ascii_digit()))
+}
+
+/// A two-letter state code right after "City," (`Columbus, OH`, `Salt Lake City,
+/// UT`): the state's name. The city is a capitalised word that is not a
+/// sentence starter, an interjection or a state name itself; a credential-like
+/// code (MD, PA, MA) also needs a place word before the city or a ZIP after it.
+fn state_after_city(w: &[&str], i: usize, body: &str) -> Option<&'static str> {
+    let name = *find(STATES, body)?;
+    let p = tok(w, i.checked_sub(1)?)?;
+    if p.trail != "," || !is_proper(p.core) || has(STARTERS, p.core) || has(NOT_CITIES, p.core) {
+        return None;
+    }
+    if body != "DC" && STATES.iter().any(|(_, n)| *n == p.core) {
+        return None; // "In Ohio, IN fact"
+    }
+    if has(CREDENTIAL_STATES, body) {
+        let zip = next_core(w, i).is_some_and(|c| {
+            let c = strip_period(c).0;
+            c.len() == 5 && c.bytes().all(|b| b.is_ascii_digit())
+        });
+        let place = (i.saturating_sub(4)..i - 1).any(|j| {
+            tok(w, j).is_some_and(|t| PLACE_WORDS.contains(&t.core.to_ascii_lowercase().as_str()))
+        });
+        if !zip && !place {
+            return None;
+        }
+    }
+    Some(name)
 }
 
 /// Appends the pause of the source word (`,;:!?`) or, failing that, a period.
@@ -1231,6 +1292,11 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         return one(said, strip_period(core).1 && sentence_end(w, i));
     }
 
+    // A state code after "City," (`Columbus, OH`).
+    if let Some(name) = state_after_city(w, i, strip_period(core).0) {
+        return one(name.to_string(), strip_period(core).1);
+    }
+
     // Abbreviations (the period is part of the abbreviation).
     // `Sec. Blinken` is the Secretary (`Sec. 12` stays a section); `est. 1967` is
     // "established" before a year, "estimated" otherwise.
@@ -1433,6 +1499,9 @@ fn check_tables_sorted() {
     sorted("IMPERATIVES", IMPERATIVES.iter());
     sorted("UNITS_DIGITS_ONLY", UNITS_DIGITS_ONLY.iter());
     sorted("NUMBER_WORDS", NUMBER_WORDS.iter());
+    sorted("STATES", STATES.iter().map(|e| e.0));
+    sorted("NOT_CITIES", NOT_CITIES.iter());
+    sorted("CREDENTIAL_STATES", CREDENTIAL_STATES.iter());
     assert!(ABBREVS.len() >= 80, "{} abbreviations", ABBREVS.len());
     assert!(UNITS.len() >= 60, "{} units", UNITS.len());
 }
@@ -2007,6 +2076,48 @@ mod tests {
         assert_eq!(render("both cited ML data"), "both cited ML data");
         assert_eq!(render("on the Amazon Console and CLI."), "on the Amazon Console and CLI.");
         assert_eq!(render("Jacob II"), "Jacob two");
+    }
+
+    /// Round 2: a state code after "City," reads the state's name.
+    #[test]
+    fn state_codes_after_a_city_and_comma() {
+        for (src, want) in [
+            ("in Columbus, OH today", "in Columbus, Ohio today"),
+            ("Portland, OR 97201", "Portland, Oregon 97201"),
+            ("from Boise, ID.", "from Boise, Idaho."),
+            ("in Augusta, ME, where", "in Augusta, Maine, where"),
+            ("Honolulu, HI", "Honolulu, Hawaii"),
+            ("Austin, TX", "Austin, Texas"),
+            ("Salt Lake City, UT", "Salt Lake City, Utah"),
+            ("Tulsa, OK, said", "Tulsa, Oklahoma, said"),
+            ("Gary, IN residents", "Gary, Indiana residents"),
+            ("Mobile, AL", "Mobile, Alabama"),
+            ("in Baltimore, MD", "in Baltimore, Maryland"),
+            ("from Pittsburgh, PA.", "from Pittsburgh, Pennsylvania."),
+            ("Boston, MA 02108", "Boston, Massachusetts 02108"),
+            ("Cheyenne, WY", "Cheyenne, Wyoming"),
+            ("Washington, DC", "Washington, D C"),
+            ("Bethesda, Md.", "Bethesda, Md."), // dotted forms are left alone
+        ] {
+            assert_eq!(render(src), want, "{src}");
+        }
+        // every state and DC is in the table
+        assert_eq!(STATES.len(), 51);
+        // not after a city: no change
+        for src in [
+            "Yes, OK",
+            "Well, OK then",
+            "Fine, OR not",
+            "the ER, OR the ICU",
+            "Columbus OH",
+            "Jane Doe, MD",
+            "John Smith, PA said",
+            "Ann Lee, MA",
+            "hi, ME",
+            "In Ohio, IN fact",
+        ] {
+            assert_eq!(render(src), src, "{src}");
+        }
     }
 
     #[test]

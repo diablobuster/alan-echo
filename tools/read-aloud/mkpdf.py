@@ -47,8 +47,8 @@ def build(tagged, out, dense=False):
             f"/Resources << /Font << /F1 3 0 R >> >> /Contents {cont_ids[pi]} 0 R{extra} >>")
         s = ""
         for li, ln in enumerate(lines):
-            y = 720 - li*40
-            body = f"BT /F1 16 Tf 72 {y} Td ({esc(ln)}) Tj ET\n"
+            y = top - li*gap
+            body = f"BT /F1 {size} Tf 72 {y} Td ({esc(ln)}) Tj ET\n"
             s += (f"/P << /MCID {li} >> BDC\n{body}EMC\n") if tagged else body
         objs[cont_ids[pi]] = f"<< /Length {len(s.encode('latin-1'))} >>\nstream\n{s}endstream"
     if tagged:

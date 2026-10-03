@@ -1499,7 +1499,7 @@ mod live {
             let mut seen = Vec::new();
             let remembered = run(&mut |x, y| hover_seen(&mut seen, root.clone(), x, y, Instant::now() + HOVER_BUDGET));
             println!("DOM hover over {} words x2, plain walk: {plain}", all.len());
-            println!("DOM hover over {} words x2, hover_seen: {remembered}", all.len());
+            println!("DOM hover over {} words x2, hover_seen: {remembered}; {} boxes remembered at the end", all.len(), seen.len());
         }
         // only points where our Acrobat is really on top (a window of the user's may cover part)
         let pts: Vec<(i32, i32)> = boxes

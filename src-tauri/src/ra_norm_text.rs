@@ -366,12 +366,11 @@ static ROMAN_REGNAL: &[&str] = &[
     // END SORTED
 ];
 
-/// Abbreviations that never come before a name, so a capital after them starts a
-/// new sentence (`Apple Inc. Shares rose`). Sorted.
-static SUFFIX_ABBREVS: &[&str] = &[
+/// Capitalised imperatives that start recipe-style sentences (`Add 5 g salt`):
+/// a single-letter unit after them is still a unit. Sorted.
+static IMPERATIVES: &[&str] = &[
     // BEGIN SORTED
-    "A.M.", "Bros.", "Co.", "Corp.", "Esq.", "Inc.", "Jr.", "Ltd.", "P.M.", "Sr.", "a.m.", "etc.",
-    "p.m.",
+    "Add", "Cut", "Heat", "Mix", "Pour", "Take", "Use",
     // END SORTED
 ];
 
@@ -1281,15 +1280,15 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             }
         };
         if let Some(said) = said {
-            let period = sentence_end(w, i) || (has(SUFFIX_ABBREVS, core) && next_is_cap(w, i));
-            return one(said.to_string(), period);
+            return one(said.to_string(), sentence_end(w, i));
         }
     }
 
     // Dotted initialisms, also glued to a hyphenated word (`U.S.-China`).
     if let Some((said, period)) = initialism(core) {
-        // `the U.S. Trump said` is ambiguous: keep the pause before any capital.
-        return one(said, period && (sentence_end(w, i) || next_is_cap(w, i)));
+        // Period only at a sentence end: `U.S. Senate`, `J.K. Rowling` must not
+        // pause; a missed pause in `the U.S. Trump said` is the accepted cost.
+        return one(said, period && sentence_end(w, i));
     }
     if let Some((left, right)) = core.split_once('-') {
         if let Some((said, _)) = initialism(left) {
@@ -1353,12 +1352,15 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             prev.is_some_and(|p| p.core.chars().last().is_some_and(|c| c.is_ascii_digit()));
         let single = body.chars().count() == 1;
         let ambiguous = single || has(UNITS_DIGITS_ONLY, body);
-        // `Route 66 W`: a single letter after a number that follows a name is a
-        // direction or a label, not a unit.
-        let after_name = i
-            .checked_sub(2)
-            .and_then(|j| tok(w, j))
-            .is_some_and(|p| is_cap(p.core) && p.trail.is_empty());
+        // `take Route 66 W`: a single letter after a number that follows a name is
+        // a direction or a label, not a unit. A capital that is the chunk's first
+        // word or an imperative (`Add 5 g salt`) is not a name.
+        let after_name = i.checked_sub(2).is_some_and(|j| {
+            j > 0
+                && tok(w, j).is_some_and(|p| {
+                    is_cap(p.core) && p.trail.is_empty() && !has(IMPERATIVES, p.core)
+                })
+        });
         let ok = !(ambiguous && !prev_digits)
             && !(single && after_name)
             && !has(ROMAN_NEVER, body)
@@ -1426,6 +1428,8 @@ fn check_tables_sorted() {
     sorted("ROMAN_REGNAL", ROMAN_REGNAL.iter());
     sorted("ROMAN_NEVER", ROMAN_NEVER.iter());
     sorted("STARTERS", STARTERS.iter());
+    sorted("IMPERATIVES", IMPERATIVES.iter());
+    sorted("UNITS_DIGITS_ONLY", UNITS_DIGITS_ONLY.iter());
     sorted("NUMBER_WORDS", NUMBER_WORDS.iter());
     assert!(ABBREVS.len() >= 80, "{} abbreviations", ABBREVS.len());
     assert!(UNITS.len() >= 60, "{} units", UNITS.len());
@@ -1821,7 +1825,11 @@ mod tests {
     #[test]
     fn ambiguous_units_need_digits() {
         assert_eq!(render("one gal told me"), "one gal told me");
-        assert_eq!(render("Route 66 W"), "Route 66 W");
+        assert_eq!(render("take Route 66 W"), "take Route 66 W");
+        assert_eq!(render("then Route 66 W today"), "then Route 66 W today");
+        // Sentence-initial or imperative capitals are not names (fix round 2).
+        assert_eq!(render("Add 5 g salt"), "Add 5 grams salt");
+        assert_eq!(render("then Mix 5 g sugar"), "then Mix 5 grams sugar");
         assert_eq!(render("ten W"), "ten W");
         assert_eq!(render("60 W bulb"), "60 watts bulb");
         assert_eq!(render("5 gal tank"), "5 gallons tank");
@@ -1838,12 +1846,21 @@ mod tests {
     }
 
     #[test]
-    fn initialism_before_a_capital_keeps_the_period() {
-        assert_eq!(render("the U.S. Trump said"), "the U S. Trump said");
+    fn no_false_pause_before_a_capital() {
+        // Ruling (fix round 2): a missed pause ("U.S. Trump said") is acceptable,
+        // a false pause ("U.S. Senate") is not. Period only at a sentence end.
+        assert_eq!(render("the U.S. Trump said"), "the U S Trump said");
+        assert_eq!(render("the U.S. Senate"), "the U S Senate");
+        assert_eq!(render("the U.S. Army"), "the U S Army");
+        assert_eq!(render("by J.K. Rowling"), "by J K Rowling");
+        assert_eq!(render("T.S. Eliot wrote"), "T S Eliot wrote");
+        assert_eq!(render("the D.C. Circuit"), "the D C Circuit");
         assert_eq!(
             render("Apple Inc. Shares rose"),
-            "Apple incorporated. Shares rose"
+            "Apple incorporated Shares rose"
         );
+        assert_eq!(render("at 5 p.m. Eastern"), "at 5 P M Eastern");
+        assert_eq!(render("in the U.S. The rest"), "in the U S. The rest");
         assert_eq!(render("Mr. Smith"), "mister Smith");
         assert_eq!(render("the U.S. economy"), "the U S economy");
     }

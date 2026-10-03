@@ -70,12 +70,13 @@ pub fn step(p: &Phase, ev: Ev) -> (Phase, Vec<Act>) {
         (_, Ev::Error | Ev::Stop) => (Idle, vec![Teardown]),
         (Idle, Ev::Hotkey) => (Picking { reading: false }, vec![EnterPick]),
         (Reading | Paused | Warming, Ev::Hotkey) => (Picking { reading: true }, vec![EnterPick]),
-        (Picking { .. }, Ev::Hotkey) => (*p, vec![]),
         (Picking { .. }, Ev::Click) => (Warming, vec![ExitPick, BumpGen, StartRead, ShowWarming]),
         (Picking { .. }, Ev::ClickRejected) => (*p, vec![]),
-        (Picking { reading: false }, Ev::Esc) => (Idle, vec![ExitPick, Teardown]),
+        // Esc, the hotkey again, or the pick timeout cancel pick mode (the hotkey is the
+        // fallback when Esc could not be reserved).
+        (Picking { reading: false }, Ev::Esc | Ev::Hotkey) => (Idle, vec![ExitPick, Teardown]),
         // reading carries on (playback never stopped during pick); the pill shows it again
-        (Picking { reading: true }, Ev::Esc) => (Reading, vec![ExitPick, ShowReading]),
+        (Picking { reading: true }, Ev::Esc | Ev::Hotkey) => (Reading, vec![ExitPick, ShowReading]),
         (Warming, Ev::FirstAudio) => (Reading, vec![ShowReading]),
         (Reading, Ev::PlayPause) => (Paused, vec![ShowPaused]),
         (Paused, Ev::PlayPause) => (Reading, vec![ShowReading]),
@@ -111,6 +112,8 @@ pub struct Session {
     raw_len: usize,
     /// UIA said there is no more text (an empty `more()`).
     doc_ended: bool,
+    /// Bumped by every `start`: identifies the text a `more()` result belongs to.
+    read_id: u64,
     pub chunks: Vec<Range<usize>>,
     /// Next chunk to submit for synthesis.
     next_chunk: usize,
@@ -133,6 +136,7 @@ impl Session {
             words: Vec::new(),
             raw_len: 0,
             doc_ended: true,
+            read_id: 0,
             chunks: Vec::new(),
             next_chunk: 0,
             next_push: 0,
@@ -155,7 +159,12 @@ impl Session {
         self.words = words;
         self.raw_len = raw_len;
         self.doc_ended = doc_ended;
+        self.read_id += 1;
         self.seek(0);
+    }
+
+    pub fn read_id(&self) -> u64 {
+        self.read_id
     }
 
     pub fn clear(&mut self) {
@@ -344,6 +353,10 @@ pub enum Msg {
     Speed(f32),
     Stop,
     Chunk(u64, usize, Result<ChunkAudio, String>),
+    /// A `more()` result for read `id` (fetched off the controller thread).
+    More(u64, Result<Vec<String>, String>),
+    /// Escape could not be registered; `hotkey_ok` = Ctrl+Shift+E can still cancel.
+    EscFailed { hotkey_ok: bool },
 }
 
 const HOTKEY: &str = "CmdOrCtrl+Shift+E";
@@ -359,6 +372,20 @@ const RECTS_REFRESH: Duration = Duration::from_millis(250);
 const STATE_RESEND: Duration = Duration::from_millis(1000);
 /// How long an error stays on the pill after the session ended.
 const ERROR_LINGER: Duration = Duration::from_secs(4);
+/// Pick mode cancels itself after this long (the mouse hook swallows every left click).
+const PICK_TIMEOUT: Duration = Duration::from_secs(30);
+/// `more()` failures: retry with backoff 0.5 s, 1 s, 2 s, 4 s (capped 8 s); after this
+/// many in a row the text is treated as ended (e.g. the source window closed).
+const MORE_MAX_FAILS: u32 = 5;
+const HICCUP_MSG: &str = "Voice engine hiccup — using CPU";
+
+/// Wait before retrying `more()` after `fails` failures in a row; `None` = give up.
+pub fn more_backoff(fails: u32) -> Option<Duration> {
+    if fails >= MORE_MAX_FAILS {
+        return None;
+    }
+    Some(Duration::from_millis(500u64 << fails.saturating_sub(1).min(4)).min(Duration::from_secs(8)))
+}
 
 pub fn clamp_speed(s: f32) -> f32 {
     if !s.is_finite() {
@@ -457,6 +484,11 @@ fn set_keys(app: &AppHandle, keys: &'static [&'static str], on: bool) {
                 });
                 if let Err(e) = r {
                     log::warn!("read-aloud: could not register {k}: {e}");
+                    if k == "Escape" {
+                        if let Some(st) = h.try_state::<Arc<crate::AppState>>() {
+                            st.read_aloud.post(Msg::EscFailed { hotkey_ok: gs.is_registered(HOTKEY) });
+                        }
+                    }
                 }
             } else {
                 let _ = gs.unregister(k);
@@ -606,6 +638,12 @@ struct Controller {
     keep_pill: bool,
     /// Bumped by every `feed`; an act that fed a nested event stops the outer act list.
     epoch: u64,
+    /// Pick mode ends (as if Esc) at this time.
+    pick_deadline: Option<Instant>,
+    /// A `more()` fetch thread is outstanding (at most one, so batches stay in order).
+    more_inflight: bool,
+    more_fails: u32,
+    more_retry_at: Option<Instant>,
 }
 
 impl Controller {
@@ -645,6 +683,10 @@ impl Controller {
             linger_until: None,
             keep_pill: false,
             epoch: 0,
+            pick_deadline: None,
+            more_inflight: false,
+            more_fails: 0,
+            more_retry_at: None,
         }
     }
 
@@ -661,7 +703,10 @@ impl Controller {
             let msg = match backlog.pop_front() {
                 Some(m) => Some(m),
                 None => {
-                    let deadline = if self.ticking() { Some(next_tick) } else { self.linger_until };
+                    let deadline = [self.ticking().then_some(next_tick), self.linger_until, self.pick_deadline]
+                        .into_iter()
+                        .flatten()
+                        .min();
                     match deadline {
                         None => match rx.recv() {
                             Ok(m) => Some(m),
@@ -693,6 +738,13 @@ impl Controller {
             if self.ticking() && now >= next_tick {
                 self.tick();
                 next_tick = now + TICK;
+            }
+            if self.pick_deadline.is_some_and(|t| now >= t) {
+                self.pick_deadline = None;
+                if matches!(self.phase, Phase::Picking { .. }) {
+                    log::info!("read-aloud: pick mode timed out");
+                    self.feed(Ev::Esc);
+                }
             }
             if self.linger_until.is_some_and(|t| now >= t) {
                 self.linger_until = None;
@@ -738,6 +790,7 @@ impl Controller {
                 }
                 self.feed(Ev::PlayPause);
             }
+            Msg::Skip(0) => {}
             Msg::Skip(dir) => {
                 if matches!(self.phase, Phase::Reading | Phase::Paused | Phase::Warming) {
                     self.skip(dir);
@@ -757,6 +810,19 @@ impl Controller {
                 }
             }
             Msg::Chunk(g, idx, r) => self.on_chunk(g, idx, r),
+            Msg::More(id, r) => self.on_more(id, r),
+            Msg::EscFailed { hotkey_ok } => {
+                if !matches!(self.phase, Phase::Picking { .. }) {
+                    return;
+                }
+                if hotkey_ok {
+                    // still cancellable with the hotkey (and the 30 s timeout): keep picking
+                    self.notify("Couldn't reserve Esc — press Ctrl+Shift+E to cancel");
+                } else {
+                    self.notify("Couldn't reserve Esc — pick mode cancelled");
+                    self.feed(Ev::Esc);
+                }
+            }
         }
     }
 
@@ -794,6 +860,7 @@ impl Controller {
             Act::EnterPick => self.enter_pick(),
             Act::ExitPick => {
                 self.hook_to_drop = self.hook.take();
+                self.pick_deadline = None;
                 self.set_esc(false);
                 self.emit_overlay("ra-overlay-mode", serde_json::json!({ "mode": "read" }));
                 self.emit_hover(Vec::new(), true);
@@ -868,6 +935,7 @@ impl Controller {
             return self.fail("Couldn't capture the mouse for Read Aloud");
         }
         self.hook = Some(hook);
+        self.pick_deadline = Some(Instant::now() + PICK_TIMEOUT);
     }
 
     fn on_hover(&mut self, x: i32, y: i32) {
@@ -930,6 +998,8 @@ impl Controller {
             }
         }
         self.used_cpu_retry = false;
+        self.more_fails = 0;
+        self.more_retry_at = None;
         self.device_lost = false;
         self.message = None;
         self.set_media(true);
@@ -965,11 +1035,54 @@ impl Controller {
         let Some(pos) = self.player.as_ref().map(|p| p.position()) else { return };
         let jobs = self.s.jobs(pos, self.speed);
         self.submit(jobs);
-        if self.s.wants_more() {
-            let more = self.uia.as_ref().map(|u| u.more()).unwrap_or_default();
-            self.s.append_more(&more);
-            let jobs = self.s.jobs(pos, self.speed);
-            self.submit(jobs);
+        let due = self.more_retry_at.map_or(true, |t| Instant::now() >= t);
+        if self.s.wants_more() && !self.more_inflight && due {
+            let Some(fetch) = self.uia.as_ref().map(|u| u.more_fetcher()) else {
+                self.s.append_more(&[]); // no text reader: nothing more to read
+                return;
+            };
+            // off the controller thread: a hung target app must not freeze the highlight
+            let (tx, id) = (self.tx.clone(), self.s.read_id());
+            let spawned = std::thread::Builder::new().name("ra-more".into()).spawn(move || {
+                let _ = tx.send(Msg::More(id, fetch.more()));
+            });
+            match spawned {
+                Ok(_) => self.more_inflight = true,
+                Err(e) => self.more_failed(format!("spawn: {e}")),
+            }
+        }
+    }
+
+    fn on_more(&mut self, id: u64, r: Result<Vec<String>, String>) {
+        self.more_inflight = false;
+        if self.phase == Phase::Idle || id != self.s.read_id() {
+            return; // stale: a new read (or none) since the request
+        }
+        match r {
+            Ok(raw) => {
+                self.more_fails = 0;
+                self.more_retry_at = None;
+                self.s.append_more(&raw);
+            }
+            Err(e) => self.more_failed(e),
+        }
+        self.pump();
+    }
+
+    /// A failed `more()`: retry later with bounded backoff; give up (end of text) after
+    /// MORE_MAX_FAILS in a row so a closed source window still ends the read.
+    fn more_failed(&mut self, e: String) {
+        self.more_fails += 1;
+        match more_backoff(self.more_fails) {
+            Some(wait) => {
+                log::info!("read-aloud: more() failed ({e}); retry in {wait:?}");
+                self.more_retry_at = Some(Instant::now() + wait);
+            }
+            None => {
+                log::warn!("read-aloud: more() failed {} times ({e}); treating the text as ended", self.more_fails);
+                self.more_retry_at = None;
+                self.s.append_more(&[]);
+            }
         }
     }
 
@@ -986,7 +1099,7 @@ impl Controller {
                 if e.starts_with("dml") && !self.used_cpu_retry {
                     self.used_cpu_retry = true;
                     self.engine.reset_to_cpu(&self.voice);
-                    self.message = Some("Voice engine hiccup — using CPU".into());
+                    self.message = Some(HICCUP_MSG.into());
                     self.emit_state();
                     let job = self.s.retry(idx, self.speed);
                     self.submit(job.into_iter().collect());
@@ -1002,6 +1115,10 @@ impl Controller {
                             p.push(piece);
                         }
                     }
+                }
+                if n > 0 && self.message.as_deref() == Some(HICCUP_MSG) {
+                    self.message = None;
+                    self.emit_state();
                 }
                 if n > 0 && self.phase == Phase::Warming {
                     self.feed(Ev::FirstAudio);
@@ -1137,6 +1254,8 @@ impl Controller {
 
     fn teardown(&mut self) {
         self.hook = None;
+        self.pick_deadline = None;
+        self.more_retry_at = None;
         self.hook_to_drop = None;
         self.set_esc(false);
         self.set_media(false);
@@ -1168,6 +1287,18 @@ impl Controller {
                 "ra-state",
                 serde_json::json!({ "state": "error", "speed": self.speed, "device": null, "message": msg }),
             );
+        } else {
+            use tauri_plugin_notification::NotificationExt;
+            let _ = self.app.notification().builder().title("Read Aloud").body(msg).show();
+        }
+    }
+
+    /// Non-fatal notice: the pill's status line if it exists, else a system notification.
+    fn notify(&mut self, msg: &'static str) {
+        log::info!("read-aloud: {msg}");
+        if self.app.get_webview_window("ra-pill").is_some() {
+            self.message = Some(msg.into());
+            self.emit_state();
         } else {
             use tauri_plugin_notification::NotificationExt;
             let _ = self.app.notification().builder().title("Read Aloud").body(msg).show();
@@ -1421,8 +1552,11 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_in_pick_is_ignored() {
-        assert_eq!(step(&Picking { reading: true }, Ev::Hotkey), (Picking { reading: true }, vec![]));
+    fn hotkey_in_pick_cancels_like_esc() {
+        assert_eq!(step(&Picking { reading: false }, Ev::Hotkey), (Idle, vec![Act::ExitPick, Act::Teardown]));
+        assert_eq!(step(&Picking { reading: true }, Ev::Hotkey), (Reading, vec![Act::ExitPick, Act::ShowReading]));
+        // and a second press starts a new pick
+        assert_eq!(step(&Idle, Ev::Hotkey).0, Picking { reading: false });
     }
 }
 
@@ -1573,6 +1707,24 @@ mod session_tests {
         assert_eq!(s.chunk_of(40), None);
         assert_eq!(s.current_chunk(Some(12)), 2);
         assert_eq!(s.current_chunk(None), 0);
+    }
+
+    #[test]
+    fn more_backoff_is_bounded_then_gives_up() {
+        let waits: Vec<_> = (1..MORE_MAX_FAILS).map(|f| more_backoff(f).map(|d| d.as_millis())).collect();
+        assert_eq!(waits, vec![Some(500), Some(1000), Some(2000), Some(4000)]);
+        assert_eq!(more_backoff(MORE_MAX_FAILS), None);
+        assert_eq!(more_backoff(99), None);
+    }
+
+    #[test]
+    fn each_read_has_its_own_id() {
+        let mut s = session(10, 5);
+        let a = s.read_id();
+        s.seek(1);
+        assert_eq!(s.read_id(), a, "a skip keeps the text (and pending more() results)");
+        s.start(words(5, 5), 5, false);
+        assert_ne!(s.read_id(), a, "a new pick makes old more() results stale");
     }
 
     #[test]

@@ -358,7 +358,7 @@ fn uia_notepad_manual() {
     assert!(multi.len() >= 3, "3 words -> >= 3 rects, got {multi:?}");
     assert!(ra.rects(vec![999_999]).is_empty());
 
-    let more = ra.more();
+    let more = ra.more().expect("more()");
     println!("more() -> {} tokens", more.len());
     assert!(more.is_empty(), "short doc: everything came back in pick()");
 
@@ -709,7 +709,7 @@ fn uia_browser_manual() {
     let mut calls = 0;
     loop {
         let t = Instant::now();
-        let more = ra.more();
+        let more = ra.more().expect("more()");
         calls += 1;
         println!(
             "more() #{calls}: {} tokens in {} ms",
@@ -725,7 +725,7 @@ fn uia_browser_manual() {
     }
     println!("total {} tokens; last {:?}", all.len(), all.last());
     assert!(all.len() > 3000, "the whole page was read");
-    assert!(ra.more().is_empty(), "stays empty at the end");
+    assert!(ra.more().expect("more()").is_empty(), "stays empty at the end");
 
     let r0 = ra.rects(vec![0]);
     assert!(

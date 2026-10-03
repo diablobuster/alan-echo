@@ -160,6 +160,9 @@ fn set_setting(app: tauri::AppHandle, state: State<Arc<AppState>>, key: String, 
             }
             if on && !ra_model::is_installed(&state.data_dir) {
                 log::warn!("read-aloud: enabled but voice files are not installed; hotkey not registered");
+                if let Some(o) = state.hotkeys.lock().as_object_mut() {
+                    o.insert("readAloud".into(), serde_json::Value::Null);
+                }
             } else {
                 // (un)register on the main thread, where the shortcut plugin's window lives
                 let h = app.clone();
@@ -197,6 +200,9 @@ fn ra_toggle(state: State<Arc<AppState>>) {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn ra_skip(state: State<Arc<AppState>>, dir: i32) {
+    if dir == 0 {
+        return;
+    }
     state.read_aloud.post(read_aloud::Msg::Skip(dir.signum()));
 }
 

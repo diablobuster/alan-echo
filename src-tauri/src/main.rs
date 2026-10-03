@@ -15,6 +15,9 @@ mod trial;
 mod updater;
 mod whisper;
 
+#[cfg(target_os = "windows")]
+mod ra_model;
+
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;
 use license::LicenseManager;

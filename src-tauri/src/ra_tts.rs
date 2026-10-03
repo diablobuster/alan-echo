@@ -801,21 +801,106 @@ fn g2p_chunk<'a>(g: &G2P, names: &Names, words: &[&'a str], depth: u8) -> Fed<'a
             spoken.push((sp.start, sp.end, sp.spoken.clone()));
         }
     }
+    let head = headline_flags(&prepared);
     let words = out
         .into_iter()
         .zip(prepared)
-        .map(|(o, p)| match (o, p) {
+        .zip(head)
+        .map(|((o, p), h)| match (o, p) {
             (Some(o), _) => o,
-            (None, Cow::Borrowed(b)) => word_path(g, names, b),
-            (None, Cow::Owned(s)) => Cow::Owned(word_path(g, names, &s).into_owned()),
+            (None, Cow::Borrowed(b)) => word_path(g, names, b, h),
+            (None, Cow::Owned(s)) => Cow::Owned(word_path(g, names, &s, h).into_owned()),
         })
         .collect();
     Fed { words, inner, spoken }
 }
 
-/// The per-word path outside spans: hand override, acronym/CamelCase rule
-/// (`rule_override`), caps rule, page brackets.
-fn word_path<'b>(g: &G2P, names: &Names, w: &'b str) -> Cow<'b, str> {
+/// A word whose letters are all capitals (2+ letters, optional `'s` / plural `s`).
+fn is_caps_word(w: &str) -> bool {
+    let core = w.trim_matches(|c: char| !c.is_alphanumeric());
+    let core = core.strip_suffix("'s").or_else(|| core.strip_suffix("\u{2019}s")).unwrap_or(core);
+    let core = core.strip_suffix('s').unwrap_or(core);
+    core.len() >= 2 && core.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+/// Per word: headline mode, i.e. at least two OTHER caps words in the same sentence
+/// of the chunk ("FED CUTS RATES"). One caps neighbour ("DO NOT") is still mixed text.
+fn headline_flags(words: &[Cow<str>]) -> Vec<bool> {
+    let mut out = vec![false; words.len()];
+    let mut start = 0;
+    for i in 0..words.len() {
+        let w = words[i].trim_end_matches(|c: char| matches!(c, '"' | '\'' | ')' | ']' | '\u{201D}' | '\u{2019}'));
+        if i + 1 == words.len() || w.ends_with(['.', '!', '?']) {
+            let caps: Vec<bool> = words[start..=i].iter().map(|w| is_caps_word(w)).collect();
+            let n = caps.iter().filter(|c| **c).count();
+            for (k, c) in caps.iter().enumerate() {
+                if let Some(o) = out.get_mut(start + k) {
+                    *o = n - usize::from(*c) >= 2;
+                }
+            }
+            start = i + 1;
+        }
+    }
+    out
+}
+
+/// Alex's acronym rule for a 2-5 letter ALL-CAPS token (optional `'s` / plural `s`):
+/// - a `ra_names::PRONOUNCED` acronym is a word (NASA, NATO, SPACs): misaki's caps
+///   entry, else the lowercase word;
+/// - in mixed-case text it is spelled (ISS, IRAs, US, WHO), unless it is a common
+///   emphasis word (`ra_names::EMPHASIS`: "do NOT");
+/// - in a headline (`headline`) a common dictionary word is a word (THE NEW LAW,
+///   BUS); KEEP_CAPS / SPELLED words and unknown or short non-words are spelled.
+/// So a 2-4 letter caps token never reaches the GRU. Roman numerals (II, XIV) and
+/// other lengths are left to the other rules. `None`: not decided here.
+fn caps_rule(w: &str, names: &Names, lex: &Lex, known: &dyn Fn(&str) -> bool, headline: bool) -> Option<String> {
+    let start = w.find(char::is_alphanumeric)?;
+    let (last, ch) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric())?;
+    let end = last + ch.len_utf8();
+    let core = &w[start..end];
+    let poss = ["'s", "\u{2019}s", "'S", "\u{2019}S"].iter().find_map(|x| core.strip_suffix(x));
+    let plural = || core.strip_suffix('s').filter(|s| s.len() >= 2 && s.bytes().all(|b| b.is_ascii_uppercase()));
+    let (stem, suf) = match poss.or_else(plural) {
+        Some(s) => (s, true),
+        None => (core, false),
+    };
+    if !(2..=5).contains(&stem.len()) || !stem.bytes().all(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
+    if stem.bytes().all(|b| matches!(b, b'I' | b'V' | b'X')) {
+        return None; // Roman numerals: the text pass and misaki
+    }
+    let lead = unbracket(Cow::Borrowed(&w[..start]));
+    let trail = unbracket(Cow::Borrowed(&w[end..]));
+    if ra_names::PRONOUNCED.contains(&stem) {
+        if !suf && known(stem) {
+            return None; // misaki has the caps word (NASA, NATO)
+        }
+        return Some(format!("{lead}{}{trail}", core.to_lowercase()));
+    }
+    let spell = if headline {
+        let low = stem.to_ascii_lowercase();
+        // a dictionary word, read as a word (not misaki's letter-spelled entries)
+        let as_word = |p: String| p.matches(['ˈ', 'ˌ']).count() < stem.len();
+        // exact gold entry, or an inflected 4+ letter word (HITS); "iss" is not "is" + s
+        let common = ((lex.knows)(&low) || (stem.len() >= 4 && known(&low))) && (lex.phonemes)(&low).map_or(true, as_word);
+        let listed = ra_names::SPELLED.contains(&stem) || ra_text::KEEP_CAPS.contains(&stem);
+        listed || !(common || (stem.len() == 5 && names.knows(&low)))
+    } else {
+        !(ra_names::EMPHASIS.contains(&stem) && !suf)
+    };
+    if !spell {
+        return None;
+    }
+    let p = ra_names::spell_tight(stem);
+    let p = if suf { format!("{p}{}", ra_names::possessive(&p)) } else { p };
+    Some(format!("{lead}[{core}](/{p}/){trail}"))
+}
+
+/// The per-word path outside spans: hand override, Alex's caps acronym rule
+/// (`caps_rule`, `headline` = the word sits in ALL-CAPS text), acronym/CamelCase
+/// rule (`rule_override`), caps rule, page brackets.
+fn word_path<'b>(g: &G2P, names: &Names, w: &'b str, headline: bool) -> Cow<'b, str> {
     let known = |x: &str| lexicon_knows(&g.lexicon, x);
     let names_knows = |x: &str| names.knows(x);
     let lex_knows = |x: &str| lexicon_has(&g.lexicon, x);
@@ -823,7 +908,8 @@ fn word_path<'b>(g: &G2P, names: &Names, w: &'b str) -> Cow<'b, str> {
     let lex = Lex { knows: &lex_knows, phonemes: &lex_phonemes };
     let part = |p: &'b str| -> Cow<'b, str> {
         // hand list, then the acronym / CamelCase / compound rules, then the caps rule
-        if let Some(o) = hand_override(p, names).or_else(|| rule_override(p, names, &lex)) {
+        let caps = || caps_rule(p, names, &lex, &known, headline);
+        if let Some(o) = hand_override(p, names).or_else(caps).or_else(|| rule_override(p, names, &lex)) {
             return Cow::Owned(o);
         }
         unbracket(ra_text::speakable_caps(p, &known, &names_knows))
@@ -1468,12 +1554,15 @@ mod tests {
 
     #[test]
     fn words_misaki_gets_right_are_untouched() {
-        let words = ["Washington", "Pelosi", "the", "NATO", "FBI", "mid-year", "iPhone", "McDonald's", "said."];
+        let words = ["Washington", "Pelosi", "the", "NATO", "mid-year", "iPhone", "McDonald's", "said."];
         let fed = g2p_words(test_g2p(), test_names(), &words);
         for (w, f) in words.iter().zip(&fed) {
             assert!(!f.contains('['), "{w} -> {f}");
             assert!(matches!(f, Cow::Borrowed(_)), "{w} -> {f}");
         }
+        // a caps acronym in mixed text is spelled explicitly (final review, Alex's rule)
+        let fed = g2p_words(test_g2p(), test_names(), &["the", "FBI", "said."]);
+        assert_eq!(fed[1], format!("[FBI](/{}/)", crate::ra_names::spell_tight("FBI")));
     }
 
     #[test]
@@ -1562,7 +1651,10 @@ mod tests {
         let g = test_g2p();
         let words = ["FBI", "GDP", "CEO", "NATO", "NASA", "US", "IT", "WHO", "THE,", "TALKS."];
         let fed: Vec<String> = g2p_words(g, test_names(), &words).into_iter().map(|c| c.into_owned()).collect();
-        assert_eq!(fed, vec!["FBI", "GDP", "CEO", "NATO", "NASA", "US", "IT", "WHO", "the,", "talks."]);
+        // a headline (2+ other caps words): acronyms spelled explicitly, NATO/NASA words
+        let sp = |w: &str| format!("[{w}](/{}/)", crate::ra_names::spell_tight(w));
+        let want = [sp("FBI"), sp("GDP"), sp("CEO"), "NATO".into(), "NASA".into(), sp("US"), sp("IT"), sp("WHO"), "the,".into(), "talks.".into()];
+        assert_eq!(fed, want);
     }
 
     #[test]
@@ -1619,6 +1711,170 @@ mod tests {
         ] {
             assert_eq!(say(w), format!("{}{suf}", tight(stem)), "{w}");
         }
+    }
+
+    // ---- final review: acronym spelling (Alex's board feedback) ----
+
+    /// A caps token in mixed-case text, through the real pipeline.
+    fn in_text(w: &str) -> String {
+        spoken(&["we", "saw", w, "today."])[2].clone()
+    }
+
+    fn spelled_with_suffix(w: &str) -> String {
+        let (stem, suf) = match w.strip_suffix("'s") {
+            Some(s) => (s, true),
+            None => match w.strip_suffix('s') {
+                Some(s) if s.chars().all(|c| c.is_ascii_uppercase()) && s.len() >= 2 => (s, true),
+                _ => (w, false),
+            },
+        };
+        let p = crate::ra_names::spell_tight(stem);
+        let p = if suf { format!("{p}{}", crate::ra_names::possessive(&p)) } else { p };
+        kokoro_phonemes(&p)
+    }
+
+    /// Alex's SPELLED table plus ~150 common acronyms (government, finance, tech,
+    /// medicine, sports, media, schools): letter by letter in mixed-case text.
+    const SPELL_IN_TEXT: &[&str] = &[
+        // Alex's list
+        "ISS", "IRS", "ICU", "IPO", "EPA", "FDA", "FCC", "GOP", "DOJ", "NIH", "NSA", "CIA", "ATM", "SEC", "ETF", "CEO",
+        "CFO", "GDP", "CPI", "NFL", "NBA", "MLB", "UFC", "IBM", "HP", "AMD", "TSMC", "BBC", "CNN", "NPR", "ESPN", "MIT",
+        "UCLA", "NYU", "LLC", "IOU", "ISP", "VPN", "USB", "HDMI",
+        // government
+        "FBI", "FTC", "DOD", "DHS", "DOE", "HHS", "USDA", "CDC", "FAA", "TSA", "ATF", "DEA", "NTSB", "NLRB", "SBA", "SSA",
+        "VA", "GAO", "CBO", "OMB", "USPS", "CBP", "DNC", "RNC", "UAE", "USA", "NGO", "UN", "EU", "UK", "US", "IT", "WHO",
+        "IMF", "WTO", "ECB", "BOJ", "PBOC", "UNSC", "IAEA", "OECD", "MI", "KGB", "SNB",
+        // finance
+        "COO", "CTO", "PPI", "PCE", "FOMC", "ROI", "EPS", "IRA", "IRAs", "LLP", "APR", "APY", "FDIC", "NYSE", "ESG",
+        "EBIT", "YTD", "YOY", "ARR", "MRR", "CAGR", "KPI", "ETFs", "IPOs", "CEOs", "SVB", "FTX", "DJIA", "HSBC", "UBS",
+        "JPM", "CFA", "CPA", "SPX", "QQQ",
+        // tech
+        "CPU", "GPU", "SSD", "HDD", "LCD", "DNS", "URL", "HTML", "CSS", "API", "SDK", "IDE", "AWS", "GCP", "PDF", "SQL",
+        "XML", "NFT", "PC", "TV", "AI", "LLM", "GPT", "IoT", "HTTP", "HTTPS", "SSH", "VR", "AR", "OS", "UI", "UX",
+        "CRM", "ERP", "DVD", "CD", "LTE", "NFC", "RFID", "IP", "TCP", "UDP", "BIOS", "USBs", "GPUs", "IEC",
+        "ISO", "NXP", "HTC", "LG", "BYD", "BMW", "GM", "DHL", "BP",
+        // medicine
+        "ER", "MRI", "CT", "EKG", "ECG", "DNA", "RNA", "HIV", "ADHD", "PTSD", "OCD", "BMI", "CPR", "EMT", "ENT", "MD",
+        "RN", "NHS", "ICUs", "STD", "UTI", "COPD", "ALS",
+        // sports
+        "NHL", "MLS", "NCAA", "WWE", "PGA", "LPGA", "ATP", "WTA", "NBA's", "MVP",
+        // media and schools
+        "PBS", "CBS", "NBC", "ABC", "MSNBC", "HBO", "AP", "NYT", "WSJ", "USC", "LSU", "UCSD", "NYU's",
+        // everyday
+        "FAQ", "DIY", "ETA", "TBD", "RSVP", "OMG", "FYI", "PS", "TBH", "BRB", "DM", "SUV", "RV", "ID",
+    ];
+
+    /// Acronyms said as words (`ra_names::PRONOUNCED`).
+    const WORD_IN_TEXT: &[&str] = &[
+        "NASA", "NATO", "OPEC", "UNESCO", "UNICEF", "FEMA", "AIDS", "COVID", "SCOTUS", "POTUS", "FLOTUS", "NAFTA",
+        "ASEAN", "GIF", "JPEG", "LASER", "RADAR", "SONAR", "SWAT", "ASAP", "NIMBY", "YOLO", "FOMO", "CAPTCHA", "WASP",
+        "SARS", "MERS", "ISIS", "DARPA", "NOAA", "OSHA", "HUD", "GAAP", "ICE", "DOGE", "SPAC", "SPACs", "NASA's",
+        "CERN", "FIFA", "UEFA", "IKEA", "REIT", "JSON", "AWOL", "RAM", "LAN", "SIM", "MRSA", "HIPAA", "ASCII", "GUI",
+        "SCUBA", "TASER", "FICO", "META", "EDGAR", "POSIX", "NAND", "MIPS", "NIST", "CHIP", "PRISM", "ATLAS", "ENSO",
+        "XBOX", "PIN", "ARM", "BERT", "GNOME", "BLOOM", "FRED", "SAKS", "VESA", "SUSE", "LEO", "MIRI", "MEMS", "FOSS", "PEP", "MAC",
+    ];
+
+    #[test]
+    fn acronyms_in_mixed_text_are_spelled_unless_pronounced() {
+        let mut bad = Vec::new();
+        for w in SPELL_IN_TEXT {
+            let got = in_text(w);
+            if got != spelled_with_suffix(w) {
+                bad.push(format!("SPELL {w}: {got} (want {})", spelled_with_suffix(w)));
+            }
+        }
+        for w in WORD_IN_TEXT {
+            let got = in_text(w);
+            if got == spelled_with_suffix(w) || got.trim().is_empty() {
+                bad.push(format!("WORD {w}: {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
+        // hand-list fixes for pronounced acronyms the G2P got wrong
+        assert_eq!(in_text("JSON"), "ʤˈAsən");
+        assert_eq!(in_text("REIT"), "ɹˈit");
+        assert_eq!(in_text("MRSA"), "mˈɜɹsə");
+        // pronounced acronyms never reach the GRU: hand entries
+        assert_eq!(in_text("ENSO"), "ˈɛnsO");
+        assert_eq!(in_text("VESA"), "vˈisə");
+        assert_eq!(in_text("SUSE"), "sˈuzə");
+        // EFTA and PAHO are words, also inside a slash pair
+        assert_eq!(in_text("EFTA"), "ˈɛftə");
+        assert!(!in_text("PAHO").contains('ˌ'), "{}", in_text("PAHO"));
+    }
+
+    /// Every 2-5 letter ALL-CAPS token of the frozen glitch corpus, read in a
+    /// lowercase sentence: spelled, unless it is a pronounced acronym, an emphasis
+    /// word, a Roman numeral or a hand-list name.
+    #[test]
+    fn corpus_caps_tokens_follow_the_rule() {
+        const CORPUS: &str = "US CEO FTX AI NATO OPEC NASA USB EU AWS IPO SEC AMD WHO UK TSMC SVB NYSE LLM API IMF IBM UN \
+            GPU LHC GDP PC GPT ETF QE FDIC HP CPU SSD UTC DNA RNA ENSO CCP BJP IDF FBI TV VR IEEE CERN EVA BBC OS NSA FTC \
+            LLC UPS FOMC ACA COO CFO ARM PCI CDMA NT RF NIST EBS PEP ONNX AD HIV AIDS ASML EMI OEM HTC DVD AMA VPN PBS DJIA \
+            GNU NFL FTT PT SQL SAP DRAM HD APU NXP GB LCD BERT IDE XP GNOME KDE SSP MCS EPS SLA CIA CRI HTML ABC HDMI PS XBOX \
+            ISS COTS BLOOM FCC TNT HLS SLS BMI ER ECJ ECB ISAF MIT ROC SARS PDT CVS AAPL NVDA AMZN META TSLA JPM XOM LLY AVGO \
+            NFLX KO INTC QCOM PLTR CRM ORCL QQQ VOO TLT GLD ETH RAM LED OCD DRM PRISM BFR PVC RIVA GTC CAC RTX LPO BC EEA LP \
+            GP SME EFTA NIS FRED QT CCI ECI SPDR INX SPX CFA CCAF ECDSA TTI BHE BYD CF USPS ASR XML MGM OAIC UFC RT MRC AMC USA \
+            GSCI SAKS CDO PNC HPS GIP CCS MSME RJH GSE DPO EDGAR USD SNB EF DFS RVI SFV DEF VMLY IAL VESA ATIC SIMD SSE FPGA \
+            TDP QTL UMB LTE JASM FFC FFN MEMS METI NAND ABB WCP ATT RIM NLP UNK NSO MDCT LPC AOSP FOSS ADT AOT LTS MIPS CNET \
+            OSR SE CE ELKS LMI DVB POSIX LAN WPA MAC PHY BLE SIG CRC ARQ EDR AVDTP HDP CSA BLER NAS URLLC SK KT LG NR ITU IAM \
+            ISO RJE CVE APN EDF CLI ASD CSI SUSE JDK JIT IEC EPR PD DAC TB UI PDIF CRS IAG NGO LEO MCP ABKCO GGUF MCDR WMAP GTO \
+            ICRP FGS MIRI PCR UNSC UTR ORF MHC SPS GJ MJ GLP ROS AMPK CHIP APOE NMDA QCD ATLAS CMS CP SOI SST EEAS EEC ESCB NCB \
+            NPT ICHR CAA NHS CFP ICC WCK ANERA PRC FC JK OSESP RTS IHR TCM ICT PAHO AMRO FDMD LNG ZWO BMW GM BP BHP DHL LVMH \
+            IKEA MSFT GOOGL UNH MA WMT SPY IWM BTC JD IRS FDA CDC EPA NIH DOJ DHS DOD FAA NLRB CPI PCE ROI PPI SPAC REIT CTO \
+            WTO BOJ PBOC ML SDK JSON CSS HTTP URL HTTPS PDF OLED DAO NFT DEI ESG HR PR FAQ FYI ASAP DIY ETA TBD RSVP AWOL NCAA \
+            NBA MLB MLS NHL FIFA UEFA CNN NPR CBS NBC MSNBC ESPN HBO AARP ACLU NAACP NRA MRI ICU CT ADHD PTSD AOC MB EST PM AM \
+            UA JFK FTSE EV MMLU XL ISBN DOI NY OMG LOL BRB TBH OK";
+        let n = test_names();
+        let roman = |w: &str| w.chars().all(|c| matches!(c, 'I' | 'V' | 'X'));
+        let mut bad = Vec::new();
+        for w in CORPUS.split_whitespace() {
+            let word = crate::ra_names::PRONOUNCED.contains(&w) || crate::ra_names::EMPHASIS.contains(&w);
+            if word || roman(w) || n.hand(w).is_some() {
+                continue;
+            }
+            let got = in_text(w);
+            if got != spelled_with_suffix(w) {
+                bad.push(format!("{w}: {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} not spelled:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn headline_caps_read_words_and_spell_the_rest() {
+        let s = spoken(&["THE", "NEW", "LAW", "HITS", "BUS", "FIRMS"]);
+        let l = spoken(&["the", "new", "law", "hits", "bus", "firms"]);
+        assert_eq!(s, l, "dictionary words in a headline read as words");
+        let s = spoken(&["ISS", "CREW", "RETURNS", "HOME"]);
+        assert_eq!(s[0], spelled_with_suffix("ISS"), "{s:?}");
+        assert_eq!(s[1], spoken(&["the", "crew"])[1]);
+        // never a 2-4 letter caps guess: unknown short caps are spelled in a headline
+        let s = spoken(&["FBI", "AND", "CIA", "PROBE", "XQZT"]);
+        assert_eq!(s[0], spelled_with_suffix("FBI"));
+        assert_eq!(s[2], spelled_with_suffix("CIA"));
+        assert_eq!(s[4], spelled_with_suffix("XQZT"));
+        // KEEP_CAPS words stay spelled in a headline too
+        let s = spoken(&["US", "AND", "UK", "SIGN", "DEAL"]);
+        assert_eq!(s[0], spelled_with_suffix("US"));
+        assert_eq!(s[2], spelled_with_suffix("UK"));
+        // pronounced acronyms stay words
+        let s = spoken(&["NASA", "AND", "NATO", "MEET"]);
+        assert_ne!(s[0], spelled_with_suffix("NASA"));
+        assert_ne!(s[2], spelled_with_suffix("NATO"));
+    }
+
+    #[test]
+    fn emphasis_caps_in_text_are_words() {
+        for w in ["NOT", "NEVER", "ALL", "ONLY", "VERY", "MUST", "FREE", "NO", "YES", "THE"] {
+            let got = spoken(&["you", "do", w, "know"])[2].clone();
+            let low = w.to_lowercase();
+            let want = spoken(&["you", "do", &low, "know"])[2].clone();
+            assert_eq!(got, want, "{w}");
+        }
+        // one other caps word nearby is still mixed text: DO NOT stays words
+        let s = spoken(&["please", "DO", "NOT", "touch"]);
+        assert_eq!(s[1..3], spoken(&["please", "do", "not", "touch"])[1..3]);
     }
 
     #[test]

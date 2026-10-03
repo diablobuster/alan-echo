@@ -306,7 +306,7 @@ fn lower(word: &str) -> Cow<'_, str> {
 
 /// English possessive ending after a pronunciation: ɪz after a sibilant, s after
 /// a voiceless consonant, z otherwise (vowels and voiced consonants).
-fn possessive(ph: &str) -> &'static str {
+pub(crate) fn possessive(ph: &str) -> &'static str {
     match ph.chars().rev().find(|c| !matches!(c, 'ˈ' | 'ˌ')) {
         Some('s' | 'z' | 'ʃ' | 'ʒ' | 'ʧ' | 'ʤ') => "ɪz",
         Some('p' | 't' | 'k' | 'f' | 'θ') => "s",
@@ -402,6 +402,36 @@ impl Lex<'static> {
 /// information") readings. Decisions per word are in the phase 3 task 3 report.
 pub const SPELLED: &[&str] = &[
     "API", "AWS", "COO", "CPU", "DOE", "ESG", "ETF", "FYI", "GPU", "IPO", "ROI", "SAP", "SEC", "UPS",
+];
+
+/// Acronyms said as words, not letters, even as a lone caps token in mixed-case
+/// text (the default there is to spell 2-5 letter caps). Alex's list plus our
+/// judgement; ESPN is NOT here (it is spelled). Decisions: final-fix-report.md.
+pub const PRONOUNCED: &[&str] = &[
+    // Alex's list
+    "AIDS", "ASAP", "ASEAN", "CAPTCHA", "COVID", "DARPA", "DOGE", "FEMA", "FLOTUS", "FOMO", "GAAP", "GIF", "HUD", "ICE",
+    "ISIS", "JPEG", "LASER", "MERS", "NAFTA", "NASA", "NATO", "NIMBY", "NOAA", "OPEC", "OSHA", "POTUS", "RADAR", "SARS",
+    "SCOTUS", "SONAR", "SPAC", "SWAT", "UNESCO", "UNICEF", "WASP", "YOLO",
+    // added: names, products and terms always said as words
+    "ARM", "ATLAS", "AWOL", "EFTA", "PAHO", "BERT", "BLOOM", "CERN", "CHIP", "COTS", "EDGAR", "ENSO", "FICO", "FIFA", "FOSS", "FRED",
+    "GNOME", "GUI", "HIPAA", "IKEA", "JSON", "LAN", "LEO", "MAC", "MEMS", "META", "MIPS", "MIRI", "MRSA", "NAND",
+    "NASDAQ", "NIST", "PEP", "PIN", "POSIX", "PRISM", "RAM", "REIT", "SAKS", "SCUBA", "SIM", "SUSE", "TASER",
+    "UEFA", "VESA", "XBOX", "ASCII",
+];
+
+/// Common words often set in caps for emphasis ("do NOT", "FREE shipping"): read
+/// as words in mixed-case text, never spelled. No acronym-like words (US, IT, WHO,
+/// AM, PM, ER, HR, ID stay spelled).
+pub const EMPHASIS: &[&str] = &[
+    "AFTER", "AGAIN", "ALL", "AND", "ANY", "ARE", "AS", "AT", "BAD", "BE", "BEST", "BIG", "BUT", "BY", "CAN", "DID",
+    "DO", "DOES", "EVER", "EVERY", "FINAL", "FIRST", "FOR", "FREE", "GET", "GO", "GOOD", "GOT", "GREAT", "HAD", "HAS",
+    "HAVE", "HE", "HELP", "HER", "HERE", "HIS", "HOT", "HOW", "HUGE", "IF", "IN", "IS", "JUST", "KNOW", "LAST", "LESS",
+    "LIVE", "LOVE", "MANY", "ME", "MORE", "MOST", "MUCH", "MUST", "MY", "NEED", "NEVER", "NEW", "NO", "NONE", "NOT",
+    "NOTE", "NOW", "OF", "OFF", "ON", "ONE", "ONLY", "OR", "OUR", "OUT", "OVER", "REAL", "RIGHT", "SAID", "SALE", "SHE",
+    "SO", "SOME", "STILL", "STOP", "SUCH", "THAN", "THAT", "THE", "THEIR", "THEM", "THEN", "THERE", "THEY", "THINK",
+    "THIS", "TO", "TOO", "TOTAL", "TRUE", "TWO", "UP", "VERY", "WAIT", "WANT", "WAS", "WE", "WELL", "WERE", "WHAT",
+    "WHEN", "WHERE", "WHICH", "WHY", "WILL", "WIN", "WITH", "WORST", "WOULD", "WOW", "WRONG", "YES", "YET", "YOU",
+    "YOUR",
 ];
 
 /// Two-letter acronyms whose lowercase is a word (ra_text's KEEP_CAPS): spelled when
@@ -593,6 +623,10 @@ impl Names {
             return None;
         }
         let upper = stem.bytes().filter(u8::is_ascii_uppercase).count();
+        // suffixed pronounced acronyms (SPACs, NASA's) are never spelled
+        if PRONOUNCED.contains(&stem) {
+            return None;
+        }
         let spelled = if upper == n {
             SPELLED.contains(&stem)
                 || (suf && LETTER_WORDS.contains(&stem))

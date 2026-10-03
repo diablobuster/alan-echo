@@ -388,6 +388,34 @@ BRAND_T = [
     "Regulators are investigating {b} and {b2} over pricing.",
 ]
 
+# Alex's acronym rule (final review): spelled vs pronounced vs headline vs emphasis.
+ACRO_RULE = [
+    'The ISS crew returned after the IRS and the FDA cleared the paperwork.',
+    "Her IRAs and the ISS's budget were both cited by the CEO and the CFO.",
+    'An IPO at the NYSE and an ETF from the SEC filing drew the ICU staff.',
+    'NASA and NATO met with OPEC while FEMA and OSHA reviewed the SPACs.',
+    'The GOP and the DOJ asked the NIH and the NSA about the CIA report.',
+    'ESPN, CNN, NPR and the BBC covered the NFL, NBA, MLB and UFC games.',
+    'IBM, HP, AMD and TSMC sold USB and HDMI parts through an ISP and a VPN.',
+    'A JPEG, a GIF and some JSON were sent ASAP to the DARPA team.',
+    'MIT, UCLA and NYU signed an IOU with the LLC.',
+    'The ICE agents and the DOGE staff met at HUD about GAAP rules.',
+    'Please do NOT open the box, it is VERY fragile.',
+    'THE NEW LAW HITS BUS FIRMS HARD.',
+    'ISS CREW RETURNS HOME AFTER SIX MONTHS.',
+    'FBI AND CIA PROBE WIDENS.',
+]
+# Final whole-branch review: short-month dates, ratings, blood pressure.
+FINAL_REVIEW = [
+    'On Jan. 5, 2024, it closed.',
+    'On Nov. 6 the board met.',
+    'The deadline is Sept. 30 this year.',
+    'I met Jan. She said hi.',
+    'Critics gave it 10/10 and readers gave it 4/5.',
+    'His blood pressure was 120/80 mmHg at rest.',
+    'A 60/40 portfolio is common.',
+]
+
 def stress():
     rows = []
     for b in BRANDS:
@@ -421,6 +449,8 @@ def stress():
     rows += [("stress:abbrev", s) for s in ABBREV_SENTS]
     rows += [("stress:homograph", s) for s in HOMOGRAPHS]
     rows += [("stress:punct", s) for s in PUNCT]
+    rows += [("stress:acronym_rule", s) for s in ACRO_RULE]
+    rows += [("stress:final_review", s) for s in FINAL_REVIEW]
     return rows
 
 def read_stress():

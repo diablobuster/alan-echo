@@ -775,3 +775,24 @@ stress:punct	BREAKING: FED CUTS RATES BY 50 BASIS POINTS, POWELL SAYS MORE TO CO
 stress:punct	NVIDIA, APPLE AND MICROSOFT LED THE NASDAQ HIGHER ON FRIDAY.
 stress:punct	WARNING: DO NOT OPERATE HEAVY MACHINERY WHILE TAKING THIS MEDICATION.
 stress:punct	The CEO said, in ALL CAPS, that the plan was GREAT and the critics were WRONG.
+stress:acronym_rule	The ISS crew returned after the IRS and the FDA cleared the paperwork.
+stress:acronym_rule	Her IRAs and the ISS's budget were both cited by the CEO and the CFO.
+stress:acronym_rule	An IPO at the NYSE and an ETF from the SEC filing drew the ICU staff.
+stress:acronym_rule	NASA and NATO met with OPEC while FEMA and OSHA reviewed the SPACs.
+stress:acronym_rule	The GOP and the DOJ asked the NIH and the NSA about the CIA report.
+stress:acronym_rule	ESPN, CNN, NPR and the BBC covered the NFL, NBA, MLB and UFC games.
+stress:acronym_rule	IBM, HP, AMD and TSMC sold USB and HDMI parts through an ISP and a VPN.
+stress:acronym_rule	A JPEG, a GIF and some JSON were sent ASAP to the DARPA team.
+stress:acronym_rule	MIT, UCLA and NYU signed an IOU with the LLC.
+stress:acronym_rule	The ICE agents and the DOGE staff met at HUD about GAAP rules.
+stress:acronym_rule	Please do NOT open the box, it is VERY fragile.
+stress:acronym_rule	THE NEW LAW HITS BUS FIRMS HARD.
+stress:acronym_rule	ISS CREW RETURNS HOME AFTER SIX MONTHS.
+stress:acronym_rule	FBI AND CIA PROBE WIDENS.
+stress:final_review	On Jan. 5, 2024, it closed.
+stress:final_review	On Nov. 6 the board met.
+stress:final_review	The deadline is Sept. 30 this year.
+stress:final_review	I met Jan. She said hi.
+stress:final_review	Critics gave it 10/10 and readers gave it 4/5.
+stress:final_review	His blood pressure was 120/80 mmHg at rest.
+stress:final_review	A 60/40 portfolio is common.

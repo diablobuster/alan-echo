@@ -332,7 +332,7 @@ pub fn speakable_caps<'a>(word: &'a str, known: &dyn Fn(&str) -> bool, names_kno
 }
 
 /// Common acronyms whose lowercase form is also an English word.
-const KEEP_CAPS: &[&str] = &["US", "IT", "WHO", "AM", "PM", "OK", "AI", "ID", "TV", "UK", "EU", "UN", "IQ", "PC"];
+pub(crate) const KEEP_CAPS: &[&str] = &["US", "IT", "WHO", "AM", "PM", "OK", "AI", "ID", "TV", "UK", "EU", "UN", "IQ", "PC"];
 
 /// Unknown caps words this long are more likely words or names than acronyms.
 const SAY_CAPS_LEN: usize = 5;

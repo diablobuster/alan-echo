@@ -194,6 +194,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("kHz", "kilohertz", "kilohertz", true),
     ("kW", "kilowatt", "kilowatts", true),
     ("kWh", "kilowatt hour", "kilowatt hours", true),
+    ("kb", "kilobit", "kilobits", true),
     ("kbps", "kilobit per second", "kilobits per second", true),
     ("kg", "kilogram", "kilograms", true),
     ("km", "kilometer", "kilometers", true),
@@ -221,6 +222,8 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("rpm", "R P M", "R P M", true),
     ("sec", "second", "seconds", true),
     ("secs", "seconds", "seconds", true),
+    ("tbsp", "tablespoon", "tablespoons", true),
+    ("tsp", "teaspoon", "teaspoons", true),
     ("yd", "yard", "yards", true),
     ("yds", "yards", "yards", true),
     ("°", "degree", "degrees", true),
@@ -271,6 +274,7 @@ static SYMBOLS: &[(&str, &str)] = &[
     ("€", "euros"),
     ("₹", "rupees"),
     ("→", "to"),
+    ("∆", "delta"),
     ("−", "minus"),
     ("√", "square root of"),
     ("≈", "approximately"),
@@ -322,11 +326,36 @@ static TLDS: &[(&str, &str)] = &[
     // END SORTED
 ];
 
+/// File extensions read after a file name (`Node.js`, `data.json`). Sorted.
+static FILE_EXTS: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("csv", "C S V"),
+    ("db", "D B"),
+    ("dll", "D L L"),
+    ("exe", "E X E"),
+    ("html", "H T M L"),
+    ("jpg", "J P G"),
+    ("js", "J S"),
+    ("json", "jason"),
+    ("md", "M D"),
+    ("pdf", "P D F"),
+    ("png", "P N G"),
+    ("py", "P Y"),
+    ("rs", "R S"),
+    ("sh", "S H"),
+    ("ts", "T S"),
+    ("txt", "T X T"),
+    ("xml", "X M L"),
+    ("yaml", "yammel"),
+    ("zip", "zip"),
+    // END SORTED
+];
+
 /// Roman numerals read as cardinals after these (`World War II`, `Chapter IV`).
 static ROMAN_CARDINAL: &[&str] = &[
     // BEGIN SORTED
-    "Act", "Book", "Chapter", "Class", "Part", "Phase", "Stage", "Title", "Type", "Vol.", "Volume",
-    "War",
+    "Act", "Article", "Book", "Chapter", "Class", "Part", "Phase", "Section", "Stage", "Title", "Type",
+    "Vol.", "Volume", "War",
     // END SORTED
 ];
 
@@ -524,10 +553,16 @@ fn split(word: &str) -> Tok<'_> {
         .rev()
         .find(|(_, c)| !CLOSERS.contains(c))
         .map_or(0, |(i, c)| i + c.len_utf8());
-    Tok {
-        core: rest.get(..end).unwrap_or(""),
-        trail: rest.get(end..).unwrap_or(""),
+    let mut core = rest.get(..end).unwrap_or("");
+    // `°F).`, `GHz".`: closers before the sentence's period belong to the trail
+    // (`finish` turns a trailing `.` back into the period).
+    if let Some(body) = core.strip_suffix('.') {
+        let trimmed = body.trim_end_matches(CLOSERS);
+        if trimmed.len() < body.len() && !trimmed.is_empty() {
+            core = trimmed;
+        }
     }
+    Tok { core, trail: rest.get(core.len()..).unwrap_or("") }
 }
 
 fn tok<'a>(w: &[&'a str], i: usize) -> Option<Tok<'a>> {
@@ -608,7 +643,7 @@ fn finish(mut spoken: String, trail: &str, period: bool) -> String {
     let pause: String = trail.chars().filter(|c| PAUSES.contains(c)).collect();
     if !pause.is_empty() {
         spoken.push_str(&pause);
-    } else if period {
+    } else if period || trail.ends_with('.') {
         spoken.push('.');
     }
     spoken
@@ -775,6 +810,21 @@ fn domain_words(s: &str) -> Option<String> {
     }
     out.push_str(tld_said);
     Some(out)
+}
+
+/// `Node.js` → "node dot J S", `data.json` → "data dot jason": one name label
+/// and a known file extension (lowercase, as file names are written).
+fn file_words(s: &str) -> Option<String> {
+    let (name, ext) = s.rsplit_once('.')?;
+    let ext_said = find(FILE_EXTS, ext)?;
+    if name.is_empty()
+        || !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let words = separated_words(name, label_words)?;
+    Some(format!("{words} dot {ext_said}"))
 }
 
 /// `https://www.example.org/path?q` → "example dot org slash path". Also a bare
@@ -957,7 +1007,16 @@ fn roman(w: &[&str], i: usize, numeral: &str) -> Option<String> {
         && i.checked_sub(2)
             .and_then(|j| tok(w, j))
             .is_some_and(|t| t.core == "Super");
-    if super_bowl || has(ROMAN_CARDINAL, prev.core) {
+    // `CHAPTER XV`, `class II`: triggers match in any case
+    let mut title = String::new();
+    for (k, c) in prev.core.chars().enumerate() {
+        if k == 0 {
+            title.extend(c.to_uppercase());
+        } else {
+            title.extend(c.to_lowercase());
+        }
+    }
+    if super_bowl || has(ROMAN_CARDINAL, &title) {
         // Single letters: only I, V and X (never `Type C`, `Class D`).
         if single && !matches!(numeral, "I" | "V" | "X") {
             return None;
@@ -986,7 +1045,9 @@ fn roman(w: &[&str], i: usize, numeral: &str) -> Option<String> {
         }
         return Some(format!("the {}", ordinal(value.into())));
     }
-    if numeral.len() >= 4 && is_proper(prev.core) && !has(STARTERS, prev.core) {
+    // `Apollo XIII`, and `Apple II` / `Artemis III` (II and III are never words)
+    let long_or_ii = numeral.len() >= 4 || matches!(numeral, "II" | "III");
+    if long_or_ii && is_proper(prev.core) && !has(STARTERS, prev.core) {
         return Some(cardinal(value.into()));
     }
     None
@@ -1004,6 +1065,9 @@ fn slash_words(s: &str) -> Option<String> {
         _ => {}
     }
     let (a, b) = s.split_once('/')?;
+    if matches!(b, "c2" | "c²") && is_ascii_word(a) {
+        return Some(format!("{a} per c squared"));
+    }
     if !is_ascii_word(a) || !is_ascii_word(b) {
         return None;
     }
@@ -1017,6 +1081,51 @@ fn slash_words(s: &str) -> Option<String> {
         }
     }
     Some(format!("{} {}", caps_piece(a), caps_piece(b)))
+}
+
+/// Math symbols that are read when glued to a letter word.
+fn glued_math(c: char) -> bool {
+    matches!(c, '=' | '×' | '÷' | '<' | '>' | '≤' | '≥' | '≈' | '≠' | '±' | '+' | '∆')
+}
+
+/// Letters and glued math symbols, no digits: each symbol said by its word, a
+/// lone letter said by its name (`a>` → "A greater than"), a unit after a number
+/// said as the unit (`8.34 mm×` → "millimeters times").
+fn glued_symbols(w: &[&str], i: usize, body: &str) -> Option<String> {
+    if !body.chars().any(glued_math) || !body.chars().any(char::is_alphabetic) {
+        return None;
+    }
+    if !body.chars().all(|c| c.is_alphabetic() || glued_math(c)) {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut letters = String::new();
+    let flush = |letters: &mut String, out: &mut Vec<String>| {
+        if letters.is_empty() {
+            return;
+        }
+        let l = std::mem::take(letters);
+        let said = match unit(&l) {
+            Some((one_u, many, _)) if out.is_empty() && prev_is_number(w, i) => {
+                let singular = i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| p.core == "1");
+                (if singular { one_u } else { many }).to_string()
+            }
+            _ if l.chars().count() == 1 => l.to_uppercase(),
+            _ => l,
+        };
+        out.push(said);
+    };
+    for c in body.chars() {
+        if glued_math(c) {
+            flush(&mut letters, &mut out);
+            let mut buf = [0u8; 4];
+            out.push(find(SYMBOLS, c.encode_utf8(&mut buf))?.to_string());
+        } else {
+            letters.push(c);
+        }
+    }
+    flush(&mut letters, &mut out);
+    Some(out.join(" "))
 }
 
 /// `AT&T` → "A T and T", `R&D` → "R and D".
@@ -1078,6 +1187,11 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
     // `3 x 4`
     if core == "x" && prev_is_number(w, i) && next_is_number(w, i) {
         return one("times".into(), false);
+    }
+
+    // A math symbol glued to a letter word: `x×`, `y=`, `b≥`, `was≈`, `∆v`.
+    if let Some(said) = glued_symbols(w, i, strip_period(core).0) {
+        return one(said, strip_period(core).1 && sentence_end(w, i));
     }
 
     // Abbreviations (the period is part of the abbreviation).
@@ -1143,7 +1257,11 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         .or_else(|| url_words(body))
         .or_else(|| {
             if body.contains('.') {
-                domain_words(body)
+                domain_words(body).or_else(|| file_words(body)).or_else(|| {
+                    // `Amazon.com's`
+                    let stem = body.strip_suffix("'s")?;
+                    Some(format!("{}'s", domain_words(stem)?))
+                })
             } else {
                 None
             }
@@ -1161,6 +1279,17 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
     if body.contains('/') {
         if let Some(said) = slash_words(body) {
             return one(said, period);
+        }
+    }
+
+    // `per km²` -> "per square kilometer" (never a single letter or a word-like unit)
+    let after_per = i
+        .checked_sub(1)
+        .and_then(|j| tok(w, j))
+        .is_some_and(|p| p.core.eq_ignore_ascii_case("per") && p.trail.is_empty());
+    if after_per && body.chars().count() > 1 && !has(UNITS_DIGITS_ONLY, body) {
+        if let Some((one_u, _, _)) = unit(body) {
+            return one(one_u.to_string(), period);
         }
     }
 
@@ -1248,6 +1377,7 @@ fn check_tables_sorted() {
     sorted("PER", PER.iter().map(|e| e.0));
     sorted("SYMBOLS", SYMBOLS.iter().map(|e| e.0));
     sorted("TLDS", TLDS.iter().map(|e| e.0));
+    sorted("FILE_EXTS", FILE_EXTS.iter().map(|e| e.0));
     sorted("ROMAN_CARDINAL", ROMAN_CARDINAL.iter());
     sorted("ROMAN_REGNAL", ROMAN_REGNAL.iter());
     sorted("ROMAN_NEVER", ROMAN_NEVER.iter());
@@ -1689,6 +1819,65 @@ mod tests {
         assert_eq!(render("in the U.S. The rest"), "in the U S. The rest");
         assert_eq!(render("Mr. Smith"), "mister Smith");
         assert_eq!(render("the U.S. economy"), "the U S economy");
+    }
+
+    // ---- Task 6 fix rounds ----
+    #[test]
+    fn math_symbols_glued_to_a_letter_are_said() {
+        assert_eq!(render("so x× y= 21"), "so X times Y equals 21");
+        assert_eq!(render("and x÷ y"), "and X divided by y");
+        assert_eq!(render("If a> b and b≥ c,"), "If A greater than b and B greater than or equal to c,");
+        assert_eq!(render("it was≈ 5"), "it was approximately 5");
+        assert_eq!(render("∆v is"), "delta V is");
+        // a plain word with no symbol is untouched
+        assert_eq!(render("so x y"), "so x y");
+    }
+
+    #[test]
+    fn units_before_closing_brackets_and_quotes() {
+        assert_eq!(render("(82–86 °F)."), "(82–86 degrees Fahrenheit.");
+        assert_eq!(render("above 6 GHz\"."), "above 6 gigahertz.");
+        assert_eq!(render("3/4 tsp of salt"), "3/4 teaspoons of salt");
+        assert_eq!(render("1 tbsp sugar"), "1 tablespoon sugar");
+        assert_eq!(render("a 64 kb DRAM"), "a 64 kilobits DRAM");
+    }
+
+    #[test]
+    fn unit_after_per_is_singular() {
+        assert_eq!(render("density: 40 per km²."), "density: 40 per square kilometer.");
+        assert_eq!(render("10 per kg of"), "10 per kilogram of");
+        // a plain word after "per" is untouched
+        assert_eq!(render("per m of"), "per m of");
+    }
+
+    #[test]
+    fn mass_unit_over_c_squared() {
+        assert_eq!(render("a MeV/c² mass"), "a MeV per c squared mass");
+    }
+
+    #[test]
+    fn possessive_domain_and_file_names() {
+        assert_eq!(render("Amazon.com's profits"), "amazon dot com's profits");
+        assert_eq!(render("in Node.js today"), "in node dot J S today");
+        assert_eq!(render("the \"consolidated.db\" file"), "the consolidated dot D B file");
+        assert_eq!(render("open data.json now"), "open data dot jason now");
+        // a sentence glued to the next one is not a file
+        assert_eq!(render("it ended.The next"), "it ended.The next");
+    }
+
+    #[test]
+    fn roman_two_and_three_after_a_name() {
+        assert_eq!(render("the Apple II in"), "the Apple two in");
+        assert_eq!(render("the Phenom II processor"), "the Phenom two processor");
+        assert_eq!(render("Artemis III (late"), "Artemis three (late");
+        assert_eq!(render("class II MHC"), "class two MHC");
+        assert_eq!(render("CHAPTER XV The"), "CHAPTER fifteen The");
+        assert_eq!(render("Article II, Section IV and"), "Article two, Section four and");
+        // still not: initialisms and sizes
+        assert_eq!(render("the Pixel 9 Pro XL were"), "the Pixel 9 Pro XL were");
+        assert_eq!(render("both cited ML data"), "both cited ML data");
+        assert_eq!(render("on the Amazon Console and CLI."), "on the Amazon Console and CLI.");
+        assert_eq!(render("Jacob II"), "Jacob two");
     }
 
     #[test]

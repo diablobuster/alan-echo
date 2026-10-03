@@ -32,6 +32,12 @@ static CARD_PREV: [&str; 38] = [
     "nearly", "no", "nos", "number", "only", "over", "p", "page", "pages", "pp", "rank",
     "room", "roughly", "route", "some", "suite", "than", "total", "unit", "version",
 ];
+/// Determiners before a year-shaped number that make it a year even when the
+/// sentence has other digits ("its 2012 ranking", "the 2026 race"). Sorted.
+static YEAR_DET: [&str; 9] = ["her", "his", "its", "our", "that", "the", "their", "this", "whose"];
+/// Nouns after a model size that make its K/M/B/T suffix a scale word
+/// ("405B parameters" -> "four hundred five billion parameters"). Sorted.
+static AI_NOUNS: [&str; 6] = ["parameter", "parameters", "params", "token", "tokens", "weights"];
 /// Lowercase words between a number and a count noun that keep it a quantity
 /// ("2050 new jobs"). Sorted.
 static COUNT_ADJ: [&str; 7] = ["additional", "extra", "fewer", "more", "new", "other", "total"];
@@ -213,6 +219,8 @@ struct Ctx {
     other_digits: bool,
     /// `3/4` should read as a date (after "on", a weekday ...).
     date_hint: bool,
+    /// An AI-size noun follows (`405B parameters`): a K/M/B/T suffix is a scale word.
+    ai_scale: bool,
 }
 
 fn plain() -> Ctx {
@@ -238,9 +246,33 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
     let range_tail = matches!(prev.as_str(), "to" | "and" | "through" | "until" | "-" | "–")
         && is_year_num(prev2_core);
     let parens = lead.contains('(') && trail.contains(')');
-    let year_hint =
-        in_sorted(&YEAR_PREV, &prev) || after_month || after_month_day || range_tail || parens;
-    let card_hint = in_sorted(&CARD_PREV, &prev) || prev == "#" || in_sorted(&COUNT_NEXT, &next);
+    let modern = words.get(i).is_some_and(|w| {
+        let c = split_punct(w).1;
+        is_year_num(c) && c.parse::<u32>().is_ok_and(|n| (1900..=2099).contains(&n))
+    });
+    // "Windows Server 2012", "Mars 2020": a capitalised name (not the sentence's
+    // first word, not a label like Room) before a modern year-shaped number.
+    let prev_is_name = i >= 1
+        && !ends_sentence(if i >= 2 { words[i - 2] } else { "." })
+        && prev_core.chars().next().is_some_and(char::is_uppercase)
+        && prev_core.chars().skip(1).all(|c| c.is_alphabetic())
+        && prev_core.len() >= 2
+        && split_punct(words[i - 1]).2.is_empty()
+        && month_of(prev_core).is_none();
+    // "since about 2019", "in around 1990"
+    let about_year = matches!(prev.as_str(), "about" | "around" | "circa" | "approximately")
+        && in_sorted(&YEAR_PREV, &prev2_core.to_lowercase());
+    let modern_cue = modern && (prev_is_name || in_sorted(&YEAR_DET, &prev) || prev == "of");
+    let year_hint = in_sorted(&YEAR_PREV, &prev)
+        || after_month
+        || after_month_day
+        || range_tail
+        || parens
+        || about_year
+        || (modern_cue && !in_sorted(&COUNT_NEXT, &next));
+    let card_hint = (in_sorted(&CARD_PREV, &prev) && !about_year)
+        || prev == "#"
+        || in_sorted(&COUNT_NEXT, &next);
     // "2050 new jobs": a lowercase adjective, then a count noun. This overrides only the
     // default year reading, not an explicit cue ("In 2020 new cases rose").
     let next_raw = words.get(i + 1).map(|w| split_punct(w).1).unwrap_or("");
@@ -270,7 +302,8 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
         "on" | "since" | "by" | "until" | "before" | "after" | "date" | "dated" | "monday"
             | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"
     );
-    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint }
+    let ai_scale = in_sorted(&AI_NOUNS, &next);
+    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale }
 }
 
 // ---- currency ----
@@ -660,6 +693,53 @@ fn number_unit(core: &str) -> Option<String> {
     Some(format!("{words} {}", if words == "one" { one } else { many }))
 }
 
+/// `1.23×1010`, `6.02×10^23`, `3×10^8`: a mantissa times ten to a power. A
+/// glued `×1010` (a lost superscript) counts only after a decimal mantissa, so a
+/// plain product (`3×1010`) stays a product.
+fn times_ten(core: &str) -> Option<String> {
+    let (mant, rest) = core.split_once('×').or_else(|| core.split_once('x'))?;
+    let (ip, fp) = number_parts(mant)?;
+    let exp = if let Some(e) = rest.strip_prefix("10^") {
+        e
+    } else {
+        let e = rest.strip_prefix("10")?;
+        if fp.is_empty() {
+            return None;
+        }
+        e
+    };
+    let e = exp.strip_prefix(['-', '−']);
+    let neg = e.is_some();
+    let e = e.unwrap_or(exp);
+    if e.is_empty() || e.len() > 2 || !all_digits(e) {
+        return None;
+    }
+    let n: u64 = e.parse().ok()?;
+    let sign = if neg { "minus " } else { "" };
+    Some(format!("{} times ten to the {sign}{}", decimal(ip, fp), ordinal(n)))
+}
+
+/// `405B` before "parameters": the K/M/B/T suffix is a scale word. `70B-parameter`
+/// carries its own noun.
+fn model_size(core: &str, ctx: &Ctx) -> Option<String> {
+    let (size, noun) = match core.split_once('-') {
+        Some((a, b)) if in_sorted(&AI_NOUNS, &b.to_ascii_lowercase()) => (a, Some(b)),
+        Some(_) => return None,
+        None if ctx.ai_scale => (core, None),
+        None => return None,
+    };
+    let (amt, Some(sc)) = amount_and_scale(size)? else { return None };
+    if !size.ends_with(['K', 'M', 'B', 'T']) {
+        return None;
+    }
+    let (ip, fp) = number_parts(amt)?;
+    let words = format!("{} {sc}", decimal(ip, fp));
+    Some(match noun {
+        Some(n) => format!("{words} {}", n.to_ascii_lowercase()),
+        None => words,
+    })
+}
+
 /// Last resort: digit runs are read as numbers, letter runs kept (a lone
 /// letter is said as its name), a few symbols named, everything else dropped.
 fn generic(core: &str) -> String {
@@ -698,8 +778,25 @@ fn generic(core: &str) -> String {
             let between_digits = k > 0
                 && chars[k - 1].1.is_ascii_digit()
                 && chars.get(j).is_some_and(|(_, n)| n.is_ascii_digit());
+            let has_greek = run.chars().any(|c| crate::ra_names::greek_name(c).is_some());
             if (run == "x" || run == "×") && between_digits {
                 out.push("by".into());
+            } else if has_greek {
+                // `ε4`, `Aβ42`: Greek letters by name, Latin runs as they are
+                let mut latin = String::new();
+                for ch in run.chars() {
+                    if let Some(g) = crate::ra_names::greek_name(ch) {
+                        if !latin.is_empty() {
+                            out.push(std::mem::take(&mut latin));
+                        }
+                        out.push(g.to_string());
+                    } else {
+                        latin.push(ch);
+                    }
+                }
+                if !latin.is_empty() {
+                    out.push(latin);
+                }
             } else if j == k + 1 && c.is_ascii_alphabetic() {
                 out.push(c.to_ascii_uppercase().to_string());
             } else {
@@ -873,6 +970,9 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
         if let Some(s) = amount_and_scale(rest).and_then(|(a, sc)| say_currency(cur, a, sc)) {
             return s;
         }
+        if let Some(s) = times_ten(rest) {
+            return format!("{s} {}", cur.many);
+        }
         if let Some(s) = currency_with_tail(cur, rest) {
             return s;
         }
@@ -893,7 +993,19 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
     if let Some(s) = version(core) {
         return s;
     }
+    if let Some(s) = times_ten(core) {
+        return s;
+    }
+    if let Some(s) = model_size(core, ctx) {
+        return s;
+    }
     if core.contains('/') {
+        // `GeV/c2`, `MeV/c²`: a mass unit
+        if let Some((unit, "c2" | "c²")) = core.split_once('/') {
+            if !unit.is_empty() && unit.chars().all(|c| c.is_ascii_alphabetic()) {
+                return format!("{unit} per c squared");
+            }
+        }
         if let Some(s) = slash_number(core, ctx) {
             return s;
         }
@@ -1468,6 +1580,60 @@ mod tests {
             let s = format!("{w} 1500");
             assert_eq!(at(&s, 1).1, "one thousand five hundred", "{s}");
         }
+    }
+
+    // ---- Task 6 fix rounds ----
+    #[test]
+    fn year_after_a_name_or_a_determiner_beats_other_digits() {
+        // a year right after a month and day, and a product year after a name
+        let s = "On September 4, 2012, Microsoft released Windows Server 2012.";
+        assert_eq!(at(s, 3).1, "twenty twelve,");
+        assert_eq!(at(s, 8).1, "twenty twelve.");
+        // a determiner before a year-shaped number, other digits in the sentence
+        assert_eq!(at("rising 11 places above its 2012 ranking", 5).1, "twenty twelve");
+        assert_eq!(at("She finished 1st out of 22 runners in the 2026 race.", 9).1, "twenty twenty six");
+        assert_eq!(at("overturn the 2020 United States election, 4 counts", 2).1, "twenty twenty");
+        // "of" and "since about"
+        assert_eq!(at("By the end of 1946 the IMF had grown to 39 members.", 4).1, "nineteen forty six");
+        assert_eq!(at("(since about 2019) has found 3 things", 2).1, "twenty nineteen)");
+        // quantities stay quantities
+        assert_eq!(at("the 1500 workers and 3 more", 1).1, "one thousand five hundred");
+        assert_eq!(at("one of 1950 residents and 3 more", 2).1, "one thousand nine hundred fifty");
+        assert_eq!(at("Room 1204, Floor 12", 1).1, "one thousand two hundred four,");
+        assert_eq!(at("Dial 1200 then 3 more.", 1).1, "one thousand two hundred");
+        assert_eq!(at("Six of them are national, 1261 are public, and 53 are private.", 5).1, "one thousand two hundred sixty one");
+    }
+
+    #[test]
+    fn model_sizes_say_billion_only_before_ai_nouns() {
+        assert_eq!(at("has 405B parameters", 1).1, "four hundred five billion");
+        assert_eq!(at("a 7B model with 2T tokens", 4).1, "two trillion");
+        assert_eq!(at("a 70B-parameter model", 1).1, "seventy billion parameter");
+        // no AI noun: letter name (the spoken style for model names)
+        assert_eq!(at("the 70B version", 1).1, "seventy B");
+        assert_eq!(at("a 3M company", 1).1, "three M");
+    }
+
+    #[test]
+    fn greek_letters_inside_a_token_are_named() {
+        assert_eq!(one("ε4"), "epsilon four");
+        assert_eq!(one("α2"), "alpha two");
+        assert_eq!(one("Aβ42"), "A beta forty two");
+    }
+
+    #[test]
+    fn mass_over_c_squared() {
+        assert_eq!(one("GeV/c2"), "GeV per c squared");
+        assert_eq!(one("MeV/c2."), "MeV per c squared.");
+    }
+
+    #[test]
+    fn scientific_notation_with_times_ten() {
+        assert_eq!(one("$1.23×1010"), "one point two three times ten to the tenth dollars");
+        assert_eq!(one("6.02×1023"), "six point zero two times ten to the twenty third");
+        assert_eq!(one("3×10^8"), "three times ten to the eighth");
+        // a plain product stays a product
+        assert_eq!(one("3×4"), "three times four");
     }
 
     /// cargo test --release ra_norm_num::tests::perf -- --ignored --nocapture

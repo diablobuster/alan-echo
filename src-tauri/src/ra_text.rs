@@ -51,7 +51,9 @@ pub fn normalize(raw: &[String]) -> Vec<Word> {
         // glued pieces of one written word: `$` `3` `.` `2B` -> "$3.2B" (spec §2)
         if prev_glued && !tok.starts_with(char::is_whitespace) && !pending_para && !breaks_before(raw, i) {
             if let Some(last) = out.last_mut() {
-                if joins_glued(&last.text, t) {
+                // a letter glued to a following "." (`U` `.` `S` `.`): an initialism
+                let dot_next = glued && raw.get(i + 1).is_some_and(|n| n.starts_with('.'));
+                if joins_glued(&last.text, t, dot_next) {
                     // tokens glued on as punctuation (the ".") are part of this word too
                     let from = last.src.last().map_or(i, |s| s + 1);
                     last.src.extend(from..=i);
@@ -121,14 +123,17 @@ const NUM_SUFFIX: &[&str] = &[
 /// Whether glued token `t` continues the written word `prev` (spec §2: digits,
 /// `.`, `,`, `$`, `%`, `/`, `:` and letters). Deliberately narrow, so a PDF line
 /// end without a space (`end.` + `Next`, `2019` + `the`) never fuses two words.
-fn joins_glued(prev: &str, t: &str) -> bool {
+fn joins_glued(prev: &str, t: &str, dot_next: bool) -> bool {
     let mut back = prev.chars().rev();
     let (Some(a), Some(b)) = (back.next(), t.chars().next()) else { return false };
     let digit_before = back.next().is_some_and(|c| c.is_ascii_digit());
     if b.is_ascii_digit() {
         // 3.|2, 1,|000, 7:|30, 3/|14, $|3, $3|2; never two all-digit tokens (a line end)
         let digits_only = |s: &str| s.chars().all(|c| c.is_ascii_digit());
-        return (a.is_ascii_digit() && !(digits_only(prev) && digits_only(t)))
+        // a year split by glyph runs: `19` `90` (two other numbers stay two)
+        let split_year = matches!(prev, "19" | "20") && t.len() == 2 && digits_only(t);
+        return split_year
+            || (a.is_ascii_digit() && !(digits_only(prev) && digits_only(t)))
             || (matches!(a, '.' | ',' | ':' | '/') && digit_before)
             || is_prefix_char(a);
     }
@@ -141,7 +146,12 @@ fn joins_glued(prev: &str, t: &str) -> bool {
     if a != '.' || !t.chars().all(char::is_alphabetic) {
         return false;
     }
-    // dotted initialism: U.|S, e.|g, Ph.|D (never "end." + "Next" or "it." + "So")
+    // dotted initialism: U.|S, e.|g, Ph.|D (never "end." + "Next" or "it." + "So").
+    // The letter must have its own "." after it: "Plan B." + "I" at a line end
+    // is two words.
+    if !dot_next {
+        return false;
+    }
     let head = prev.strip_suffix('.').unwrap_or(prev);
     let run = head.rsplit('.').next().unwrap_or(head);
     let (rn, tn) = (run.chars().count(), t.chars().count());
@@ -183,6 +193,25 @@ fn ends_sentence(w: &str) -> bool {
     !(letters.len() == 1 && letters[0].is_uppercase() && core.len() == 2)
 }
 
+fn has_digit(s: &str) -> bool {
+    s.bytes().any(|b| b.is_ascii_digit())
+}
+
+/// A cut before `words[k]` would split "September 2," from its year "2021".
+fn date_comma(words: &[Word], k: usize) -> bool {
+    const MONTHS: &[&str] = &[
+        "Jan", "Jan.", "January", "Feb", "Feb.", "February", "March", "Mar.", "April", "Apr.", "May", "June", "July",
+        "Aug", "Aug.", "August", "Sept", "Sept.", "Sep.", "September", "Oct", "Oct.", "October", "Nov", "Nov.",
+        "November", "Dec", "Dec.", "December",
+    ];
+    let day = words[k - 1].text.trim_end_matches(',');
+    k >= 2
+        && day.len() <= 2
+        && day.chars().all(|c| c.is_ascii_digit())
+        && MONTHS.contains(&words[k - 2].text.as_str())
+        && words.get(k).is_some_and(|w| w.text.len() >= 4 && w.text.chars().take(4).all(|c| c.is_ascii_digit()))
+}
+
 fn ends_clause(w: &str) -> bool {
     w.ends_with([',', ';', ':'])
 }
@@ -217,7 +246,15 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
                 break;
             }
             let hard = a + limit;
-            let cut = (a + 1..hard).rev().find(|&k| ends_clause(&words[k - 1].text)).unwrap_or(hard);
+            let cut = (a + 1..hard)
+                .rev()
+                .find(|&k| ends_clause(&words[k - 1].text) && !date_comma(words, k))
+                .unwrap_or_else(|| {
+                    // no clause end: never part a number from its neighbours
+                    // (`450` | `GeV`, `in` | `1990`) when a cut nearby avoids it
+                    let quiet = |k: usize| !has_digit(&words[k - 1].text) && !has_digit(&words[k].text);
+                    (a + 1 + limit / 2..=hard).rev().find(|&k| quiet(k)).unwrap_or(hard)
+                });
             out.push(a..cut);
             a = cut;
         }
@@ -504,6 +541,44 @@ mod tests {
     fn zero_limits_still_progress() {
         let c = chunk(&words("a b c"), 0, 0);
         assert_eq!(c, vec![0..1, 1..2, 2..3]);
+    }
+
+    // ---- Task 6 fix rounds ----
+    #[test]
+    fn line_end_initial_does_not_swallow_the_next_word() {
+        // "Plan B." at a line end, then "I" glued (no space)
+        assert_eq!(texts(&normalize(&raw(&["a ", "Plan ", "B.", "I ", "said"]))), vec!["a", "Plan", "B.", "I", "said"]);
+        assert_eq!(texts(&normalize(&raw(&["Plan ", "B", ".", "I ", "think"]))), vec!["Plan", "B.", "I", "think"]);
+        // real initialisms still join
+        assert_eq!(texts(&normalize(&raw(&["the ", "U", ".", "S", ". ", "team"]))), vec!["the", "U.S.", "team"]);
+        assert_eq!(texts(&normalize(&raw(&["e", ".", "g", ". ", "this"]))), vec!["e.g.", "this"]);
+        assert_eq!(texts(&normalize(&raw(&["a ", "Ph", ".", "D", ". "]))), vec!["a", "Ph.D."]);
+    }
+
+    #[test]
+    fn glyph_split_year_digits_join() {
+        assert_eq!(texts(&normalize(&raw(&["in ", "19", "90 ", "the"]))), vec!["in", "1990", "the"]);
+        assert_eq!(texts(&normalize(&raw(&["by ", "20", "25."]))), vec!["by", "2025."]);
+        // two separate numbers at a line end stay two
+        assert_eq!(texts(&normalize(&raw(&["page ", "12", "34 ", "rows"]))), vec!["page", "12", "34", "rows"]);
+        assert_eq!(texts(&normalize(&raw(&["in ", "2019", "2020 "]))), vec!["in", "2019", "2020"]);
+    }
+
+    #[test]
+    fn no_clause_cut_between_a_date_and_its_year() {
+        let w = words("a b c d e f g on September 2, 2021 the x y z.");
+        let c = chunk(&w, 12, 50);
+        assert_eq!(c[0], 0..12);
+    }
+
+    #[test]
+    fn hard_cut_does_not_split_a_number_from_its_unit() {
+        // no clause end; the hard cut at 12 would fall between "450" and "GeV"
+        let w = words("a b c d e f g h i j k 450 GeV before they are at last injected into it");
+        let c = chunk(&w, 12, 50);
+        // the cut moves back to the nearest gap with no number on either side
+        assert_eq!(c[0], 0..10);
+        assert_eq!(c[1].start, 10);
     }
 
     #[test]

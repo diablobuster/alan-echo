@@ -444,6 +444,15 @@ fn number_words(run: &str, after_point: bool) -> String {
     }
 }
 
+/// The name of a Greek letter (`ε` -> "epsilon"), for the number pass (`ε4`).
+pub(crate) fn greek_name(c: char) -> Option<&'static str> {
+    if matches!(c, '\u{0370}'..='\u{03FF}' | 'µ') {
+        symbol_word(c)
+    } else {
+        None
+    }
+}
+
 /// The word said for a symbol or Greek letter that misaki would drop or pause on.
 fn symbol_word(c: char) -> Option<&'static str> {
     Some(match c {
@@ -816,6 +825,9 @@ mod tests {
         assert_eq!(n.hand("Xi").as_deref(), Some("ʃˈi"));
         assert_eq!(n.hand("XI").as_deref(), Some("ʃˈi"));
         assert_eq!(n.hand("Nguyen").as_deref(), Some("wˈɪn"));
+        // Task 6: said names, not spelled letters
+        assert_eq!(n.hand("IEEE").as_deref(), Some("ˌI tɹˈɪpəl ˈi"));
+        assert_eq!(n.hand("Ng").as_deref(), Some("ˈɪŋ"));
         assert_eq!(n.hand("Xi's").as_deref(), Some("ʃˈiz"));
         assert_eq!(n.hand("Ozempic\u{2019}s").as_deref(), Some("Ozˈɛmpɪks"));
         assert_eq!(n.hand("pelosi"), None, "CMUdict word, not a hand entry");

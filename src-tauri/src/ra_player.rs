@@ -4,7 +4,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 #[derive(Default)]
@@ -12,6 +12,31 @@ pub struct Source {
     pub buf: VecDeque<f32>,
     pub frac: f64,
     pub paused: bool,
+    /// 24 kHz samples consumed since last clear (guarded by the same lock as `buf`).
+    pub pos: u64,
+    /// 24 kHz samples pushed since last clear.
+    pub pushed: u64,
+    /// Fade-in gain 0..=1; reset to 0 on pause/underrun/clear, ramps up over ~2 ms.
+    pub gain: f32,
+}
+
+impl Source {
+    pub fn push(&mut self, pcm: &[f32]) {
+        self.buf.extend(pcm.iter().copied());
+        self.pushed += pcm.len() as u64;
+    }
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.frac = 0.0;
+        self.pos = 0;
+        self.pushed = 0;
+        self.gain = 0.0;
+    }
+    /// mix_into + position bookkeeping, all under the caller's single lock.
+    pub fn render(&mut self, out: &mut [f32], channels: usize, step: f64) {
+        let used = mix_into(out, channels, step, self);
+        self.pos += used;
+    }
 }
 
 /// Fill `out` (interleaved, `channels`) from 24 kHz mono `src`, advancing `step` source samples per frame.
@@ -22,11 +47,13 @@ pub fn mix_into(out: &mut [f32], channels: usize, step: f64, src: &mut Source) -
     let mut used = 0u64;
     for frame in out.chunks_mut(channels) {
         let v = if src.paused || src.buf.is_empty() {
+            src.gain = 0.0;
             0.0
         } else {
             let a = src.buf[0];
             let b = *src.buf.get(1).unwrap_or(&a);
-            let v = a + (b - a) * src.frac as f32;
+            let v = (a + (b - a) * src.frac as f32) * src.gain;
+            src.gain = (src.gain + (step / 48.0) as f32).min(1.0); // ~2 ms ramp
             src.frac += step;
             while src.frac >= 1.0 && !src.buf.is_empty() {
                 src.buf.pop_front();
@@ -44,8 +71,6 @@ pub fn mix_into(out: &mut [f32], channels: usize, step: f64, src: &mut Source) -
 
 pub struct Player {
     src: Arc<Mutex<Source>>,
-    pos: Arc<AtomicU64>,
-    pushed: Arc<AtomicU64>,
     failed: Arc<AtomicBool>,
     stop_tx: mpsc::Sender<()>,
 }
@@ -53,11 +78,10 @@ pub struct Player {
 impl Player {
     pub fn start() -> Result<Player, String> {
         let src = Arc::new(Mutex::new(Source::default()));
-        let pos = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicBool::new(false));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (ok_tx, ok_rx) = mpsc::channel::<Result<(), String>>();
-        let (s2, p2, f2) = (Arc::clone(&src), Arc::clone(&pos), Arc::clone(&failed));
+        let (s2, f2) = (Arc::clone(&src), Arc::clone(&failed));
         std::thread::Builder::new()
             .name("ra-player".into())
             .spawn(move || {
@@ -76,8 +100,7 @@ impl Player {
                         .build_output_stream(
                             &cfg.config(),
                             move |out: &mut [f32], _| {
-                                let used = mix_into(out, ch, step, &mut s2.lock());
-                                p2.fetch_add(used, Ordering::Relaxed);
+                                s2.lock().render(out, ch, step);
                             },
                             move |e| {
                                 log::warn!("read-aloud: output stream error: {e}");
@@ -102,19 +125,14 @@ impl Player {
             })
             .map_err(|e| e.to_string())?;
         ok_rx.recv().map_err(|e| e.to_string())??;
-        Ok(Player { src, pos, pushed: Arc::new(AtomicU64::new(0)), failed, stop_tx })
+        Ok(Player { src, failed, stop_tx })
     }
 
     pub fn push(&self, pcm: &[f32]) {
-        self.src.lock().buf.extend(pcm.iter().copied());
-        self.pushed.fetch_add(pcm.len() as u64, Ordering::Relaxed);
+        self.src.lock().push(pcm);
     }
     pub fn clear(&self) {
-        let mut s = self.src.lock();
-        s.buf.clear();
-        s.frac = 0.0;
-        self.pos.store(0, Ordering::Relaxed);
-        self.pushed.store(0, Ordering::Relaxed);
+        self.src.lock().clear();
     }
     pub fn set_paused(&self, p: bool) {
         self.src.lock().paused = p;
@@ -123,10 +141,10 @@ impl Player {
         self.src.lock().paused
     }
     pub fn position(&self) -> u64 {
-        self.pos.load(Ordering::Relaxed)
+        self.src.lock().pos
     }
     pub fn queued_end(&self) -> u64 {
-        self.pushed.load(Ordering::Relaxed)
+        self.src.lock().pushed
     }
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
@@ -169,6 +187,39 @@ mod tests {
         let mut out = vec![1.0f32; 8];
         assert_eq!(mix_into(&mut out, 2, 0.5, &mut src), 0);
         assert_eq!(src.buf.len(), 10);
+    }
+
+    #[test]
+    fn push_clear_position_bookkeeping() {
+        let mut src = Source::default();
+        src.push(&[0.5f32; 100]);
+        assert_eq!((src.pos, src.pushed), (0, 100));
+        let mut out = vec![0.0f32; 2 * 40];
+        src.render(&mut out, 2, 0.5);
+        assert_eq!((src.pos, src.pushed), (20, 100));
+        src.clear();
+        assert_eq!((src.pos, src.pushed, src.buf.len()), (0, 0, 0));
+        src.render(&mut out, 2, 0.5); // underrun after clear: no stale position
+        assert_eq!(src.pos, 0);
+        src.push(&[0.5f32; 10]);
+        assert_eq!(src.pushed, 10);
+    }
+
+    #[test]
+    fn fades_in_on_start_and_after_resume() {
+        let mut src = Source::default();
+        src.buf.extend([1.0f32; 400]);
+        let mut out = vec![0.0f32; 20];
+        mix_into(&mut out, 1, 0.5, &mut src);
+        assert!(out[0] < 0.05 && out[19] > out[0]);
+        let mut big = vec![0.0f32; 200];
+        mix_into(&mut big, 1, 0.5, &mut src);
+        assert_eq!(big[199], 1.0);
+        src.paused = true;
+        mix_into(&mut out, 1, 0.5, &mut src);
+        src.paused = false;
+        mix_into(&mut out, 1, 0.5, &mut src);
+        assert!(out[0] < 0.05);
     }
 
     #[test]

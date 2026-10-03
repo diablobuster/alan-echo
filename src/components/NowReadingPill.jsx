@@ -65,6 +65,17 @@ export default function NowReadingPill() {
     )
   }
 
+  if (st.state === 'info') {
+    // information, not a failure (e.g. an OCR read reached the end of the screen)
+    return (
+      <div className="ra-pill info"><div className="ra-row" role="status">
+        <div className="ra-grip" onMouseDown={drag} aria-hidden="true">⋮⋮</div>
+        <div className="ra-info">{st.message}</div>
+        <button className="ra-btn stop" aria-label="Dismiss" onClick={() => invoke('ra_stop')}>{Icon.x}</button>
+      </div></div>
+    )
+  }
+
   const paused = st.state === 'paused'
   // follow is off after the user scrolled the page by hand: offer the way back
   const lost = st.follow === false

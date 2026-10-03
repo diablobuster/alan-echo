@@ -38,5 +38,7 @@ html.ra-window, html.ra-window body, html.ra-window #root { background: transpar
 .ra-spin { width: 20px; height: 20px; border-radius: 10px; border: 2.5px solid rgba(255,255,255,0.12); border-top-color: #fff; animation: ra-rot 0.9s linear infinite; }
 @keyframes ra-rot { to { transform: rotate(360deg); } }
 .ra-err { font-size: 14px; color: #fff; flex: 1; margin-left: 8px; }
+.ra-pill.info { background: #000; border-color: rgba(255,255,255,0.14); }
+.ra-info { font-size: 14px; color: #fff; flex: 1; margin-left: 8px; }
 @media (prefers-reduced-motion: reduce) { .ra-hint.shake, .ra-spin { animation: none; } .ra-box { transition: none; } }
 .ra-speed button:disabled { opacity: 0.35; cursor: default; }

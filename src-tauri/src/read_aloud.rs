@@ -69,8 +69,28 @@ pub enum Act {
     ShowReading,
     ShowPaused,
     Teardown,
+    /// An error: the pill shows it in its "error" state and lingers.
     Toast(&'static str),
+    /// Information, not a failure (e.g. an OCR read reached the end of the screen):
+    /// lingers like a toast, in the pill's neutral "info" style.
+    Notice(&'static str),
     BumpGen,
+}
+
+/// How a lingering pill message looks: the `state` the pill gets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToastKind {
+    Error,
+    Info,
+}
+
+impl ToastKind {
+    pub fn state(self) -> &'static str {
+        match self {
+            ToastKind::Error => "error",
+            ToastKind::Info => "info",
+        }
+    }
 }
 
 pub fn step(p: &Phase, ev: Ev) -> (Phase, Vec<Act>) {
@@ -566,8 +586,8 @@ const NOTHING_MSG: &str = "Nothing readable here";
 pub const NOTHING_ON_SCREEN_END: &str = "Read to the end of what's on screen";
 
 /// The notice for the end of a read: only an OCR read says why it stopped. Pure.
-fn end_toast(at_end_of_screen: bool) -> Option<&'static str> {
-    at_end_of_screen.then_some(NOTHING_ON_SCREEN_END)
+fn end_toast(at_end_of_screen: bool) -> Option<Act> {
+    at_end_of_screen.then_some(Act::Notice(NOTHING_ON_SCREEN_END))
 }
 const MISSING_MSG: &str = "Voice files missing — run tools/read-aloud/prepare_model.py";
 /// Non-DirectML synth failures in a row before the read ends (one bad chunk is skipped).
@@ -1199,7 +1219,8 @@ impl Controller {
                 self.emit_word(Vec::new()); // no highlight box while paused
             }
             Act::Teardown => self.teardown(),
-            Act::Toast(msg) => self.toast(msg),
+            Act::Toast(msg) => self.toast(msg, ToastKind::Error),
+            Act::Notice(msg) => self.toast(msg, ToastKind::Info),
         }
     }
 
@@ -1500,8 +1521,8 @@ impl Controller {
         if self.s.finished(pos) {
             let at_end = self.uia.as_ref().is_some_and(|u| u.at_end_of_screen());
             let (p, mut acts) = step(&self.phase, Ev::End);
-            if let Some(msg) = end_toast(at_end) {
-                acts.insert(0, Act::Toast(msg)); // the pill lingers with it after Teardown
+            if let Some(a) = end_toast(at_end) {
+                acts.insert(0, a); // the pill lingers with it after Teardown
             }
             return self.run_acts(p, acts);
         }
@@ -1845,13 +1866,13 @@ impl Controller {
         self.engine.touch(); // the 2-minute idle unload counts from here
     }
 
-    fn toast(&mut self, msg: &'static str) {
+    fn toast(&mut self, msg: &'static str, kind: ToastKind) {
         log::info!("read-aloud: {msg}");
         if self.app.get_webview_window("ra-pill").is_some() {
             self.keep_pill = true;
             self.emit_pill(
                 "ra-state",
-                serde_json::json!({ "state": "error", "speed": self.speed, "device": null, "message": msg }),
+                serde_json::json!({ "state": kind.state(), "speed": self.speed, "device": null, "message": msg }),
             );
         } else {
             use tauri_plugin_notification::NotificationExt;
@@ -2057,7 +2078,10 @@ mod tests {
 
     #[test]
     fn the_end_of_an_ocr_screen_is_announced() {
-        assert_eq!(end_toast(true), Some(NOTHING_ON_SCREEN_END));
+        // information, not an error: the pill's neutral "info" style, not "error"
+        assert_eq!(end_toast(true), Some(Act::Notice(NOTHING_ON_SCREEN_END)));
+        assert_eq!(ToastKind::Info.state(), "info");
+        assert_eq!(ToastKind::Error.state(), "error");
         assert_eq!(NOTHING_ON_SCREEN_END, "Read to the end of what's on screen");
         assert_eq!(end_toast(false), None, "the end of a document is silent");
     }

@@ -27,6 +27,16 @@ fn chunks() -> Vec<Vec<&'static str>> {
     out
 }
 
+/// "threads:spin[:mem_pattern[:opt]]", e.g. "8:0:0:2".
+fn parse_opts(c: &str) -> Option<CpuOpts> {
+    let mut it = c.split(':');
+    let intra = it.next()?.parse().ok()?;
+    let spin = it.next()? == "1";
+    let mem_pattern = it.next().map_or(true, |m| m == "1");
+    let opt = it.next().map_or(Some(0), |o| o.parse().ok())?;
+    Some(CpuOpts { intra, spin, mem_pattern, opt })
+}
+
 fn data_dir() -> PathBuf {
     dirs::data_dir().unwrap().join("ALAN Echo")
 }
@@ -141,13 +151,7 @@ fn tts_sweep() {
     let configs: Vec<CpuOpts> = std::env::var("RA_SWEEP")
         .unwrap_or_else(|_| "8:1,8:0,6:0,5:0,4:0".into())
         .split(',')
-        .filter_map(|c| {
-            let mut it = c.split(':');
-            let n = it.next()?.parse().ok()?;
-            let spin = it.next()? == "1";
-            let mem_pattern = it.next().map_or(true, |m| m == "1");
-            Some(CpuOpts { intra: n, spin, mem_pattern })
-        })
+        .filter_map(parse_opts)
         .collect();
     let rounds: usize = std::env::var("RA_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     println!("physical cores {}, logical {}, {rounds} rounds", num_cpus::get_physical(), cores());
@@ -240,13 +244,7 @@ fn tts_shapes() {
     let configs: Vec<CpuOpts> = std::env::var("RA_SWEEP")
         .unwrap_or_else(|_| "8:1:1,8:0:1,8:0:0".into())
         .split(',')
-        .filter_map(|c| {
-            let mut it = c.split(':');
-            let n = it.next()?.parse().ok()?;
-            let spin = it.next()? == "1";
-            let mem_pattern = it.next().map_or(true, |m| m == "1");
-            Some(CpuOpts { intra: n, spin, mem_pattern })
-        })
+        .filter_map(parse_opts)
         .collect();
     let rounds: usize = std::env::var("RA_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
     let mut firsts: Vec<Vec<f64>> = vec![Vec::new(); configs.len()];

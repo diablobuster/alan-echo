@@ -15,7 +15,7 @@ use crate::{
     ra_wsola,
 };
 use misaki_rs::{Language, Lexicon, G2P};
-use ort::{ep, session::Session, value::Tensor};
+use ort::{ep, session::{builder::GraphOptimizationLevel, Session}, value::Tensor};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -259,6 +259,9 @@ pub(crate) struct CpuOpts {
     pub intra: usize,
     pub spin: bool,
     pub mem_pattern: bool,
+    /// Graph optimisation: 0 = ONNX Runtime's default (all), 1 basic, 2 extended,
+    /// 3 layout, 4 all, 9 none (bench only).
+    pub opt: u8,
 }
 
 /// Measured (Task 8, ra_tts::bench::tts_shapes, interleaved on a shared machine; every
@@ -268,7 +271,7 @@ pub(crate) struct CpuOpts {
 /// the memory pattern only pays off when an input length repeats, which reading never does.
 impl Default for CpuOpts {
     fn default() -> Self {
-        CpuOpts { intra: num_cpus::get_physical().clamp(1, 8), spin: false, mem_pattern: false }
+        CpuOpts { intra: num_cpus::get_physical().clamp(1, 8), spin: false, mem_pattern: false, opt: 0 }
     }
 }
 
@@ -290,6 +293,14 @@ fn open_session_with(path: &Path, gpu: bool, o: CpuOpts) -> Result<Session, Stri
         let b = b.with_execution_providers([cpu]).map_err(s)?;
         let b = b.with_intra_op_spinning(o.spin).map_err(s)?;
         let b = b.with_memory_pattern(o.mem_pattern).map_err(s)?;
+        let b = match o.opt {
+            1 => b.with_optimization_level(GraphOptimizationLevel::Level1).map_err(s)?,
+            2 => b.with_optimization_level(GraphOptimizationLevel::Level2).map_err(s)?,
+            3 => b.with_optimization_level(GraphOptimizationLevel::Level3).map_err(s)?,
+            4 => b.with_optimization_level(GraphOptimizationLevel::All).map_err(s)?,
+            9 => b.with_optimization_level(GraphOptimizationLevel::Disable).map_err(s)?,
+            _ => b,
+        };
         b.with_intra_threads(o.intra).map_err(s)?
     };
     b.commit_from_file(path).map_err(|e| e.to_string())

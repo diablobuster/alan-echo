@@ -253,7 +253,49 @@ fn load_voice_or_default(dir: &Path, voice: &str) -> Result<Vec<f32>, String> {
     })
 }
 
+/// CPU session knobs (the bench sweeps them; production uses `CpuOpts::default()`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CpuOpts {
+    pub intra: usize,
+    pub spin: bool,
+    pub mem_pattern: bool,
+    /// Graph optimisation: 0 = ONNX Runtime's default (all), 1 basic, 2 extended,
+    /// 3 layout, 4 all, 9 none. Bench only: production always uses the default.
+    #[cfg(test)]
+    pub opt: u8,
+}
+
+/// Measured (Task 8, ra_tts::bench::tts_shapes, interleaved on a shared machine; every
+/// reading chunk is a new input length): spinning off + memory pattern off vs ORT's
+/// defaults: CPU per second of speech 5.4 -> 2.8 s, RTF at 2.2x 0.75 -> 0.58, first
+/// chunk no slower (1154 -> 1118 ms). Spinning idle threads burn cores between ops;
+/// the memory pattern only pays off when an input length repeats, which reading never does.
+///
+/// Memory pattern trade-off (controller ruling, Task 8 review): with the pattern ON, a
+/// chunk whose input length was seen before runs ~300 ms faster (an exact replay of the
+/// same 12-word chunk: ~700 vs ~1045 ms), but every NEW length pays extra to plan and
+/// record its pattern, which nearly doubled CPU per second of speech. A read never
+/// repeats a chunk, and a jump re-chunks from the clicked word, so a jump back almost
+/// always gives new lengths too (measured: no slower with it OFF, see `tts_jump_back`).
+/// Only re-reading from the exact same start word replays the same shapes, so the
+/// pattern stays OFF.
+impl Default for CpuOpts {
+    fn default() -> Self {
+        CpuOpts {
+            intra: num_cpus::get_physical().clamp(1, 8),
+            spin: false,
+            mem_pattern: false,
+            #[cfg(test)]
+            opt: 0,
+        }
+    }
+}
+
 fn open_session(path: &Path, gpu: bool) -> Result<Session, String> {
+    open_session_with(path, gpu, CpuOpts::default())
+}
+
+fn open_session_with(path: &Path, gpu: bool, o: CpuOpts) -> Result<Session, String> {
     // CPU arena off: the arena keeps its high-water mark until unload. Measured on the
     // CPU path: steady private 705 -> 455 MB; costs ~0.5 s on a 27-word chunk's first run.
     let cpu = ep::CPU::default().with_arena_allocator(false).build();
@@ -265,7 +307,21 @@ fn open_session(path: &Path, gpu: bool) -> Result<Session, String> {
         b.with_parallel_execution(false).map_err(s)?
     } else {
         let b = b.with_execution_providers([cpu]).map_err(s)?;
-        b.with_intra_threads(num_cpus::get_physical().clamp(1, 8)).map_err(s)?
+        let b = b.with_intra_op_spinning(o.spin).map_err(s)?;
+        let b = b.with_memory_pattern(o.mem_pattern).map_err(s)?;
+        #[cfg(test)]
+        let b = {
+            use ort::session::builder::GraphOptimizationLevel as G;
+            match o.opt {
+                1 => b.with_optimization_level(G::Level1).map_err(s)?,
+                2 => b.with_optimization_level(G::Level2).map_err(s)?,
+                3 => b.with_optimization_level(G::Level3).map_err(s)?,
+                4 => b.with_optimization_level(G::All).map_err(s)?,
+                9 => b.with_optimization_level(G::Disable).map_err(s)?,
+                _ => b,
+            }
+        };
+        b.with_intra_threads(o.intra).map_err(s)?
     };
     b.commit_from_file(path).map_err(|e| e.to_string())
 }
@@ -703,6 +759,10 @@ fn token_phonemes(toks: &[(&str, Option<&str>, bool)], owner: &[Option<usize>]) 
         .filter_map(|(_, ((_, p, ws), o))| Some((o.unwrap_or(NO_WORD), (*p)?.to_string(), *ws)))
         .collect()
 }
+
+#[cfg(test)]
+#[path = "ra_tts_bench.rs"]
+mod bench;
 
 #[cfg(test)]
 mod tests {

@@ -49,6 +49,8 @@ mod ra_norm_num;
 mod ra_norm_text;
 #[cfg(target_os = "windows")]
 mod ra_norm;
+#[cfg(all(test, target_os = "windows"))]
+mod ra_perf;
 
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;

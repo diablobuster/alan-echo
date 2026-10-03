@@ -797,3 +797,76 @@ mod tests {
         assert!(down && up, "down and up reported");
     }
 }
+
+/// Task 8: cost of one hook callback (the hook procs called directly with a synthetic
+/// event; no hook is installed and no input is sent). Must be microseconds.
+/// cargo test --release ra_hook::bench -- --ignored --nocapture --test-threads=1
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    fn call(p: unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT, msg: u32, x: i32, y: i32) -> f64 {
+        let info = MSLLHOOKSTRUCT { pt: POINT { x, y }, ..Default::default() };
+        let t = Instant::now();
+        unsafe { p(0, WPARAM(msg as usize), LPARAM(&info as *const MSLLHOOKSTRUCT as isize)) };
+        t.elapsed().as_secs_f64() * 1e6
+    }
+
+    fn report(label: &str, mut us: Vec<f64>) {
+        us.sort_by(|a, b| a.total_cmp(b));
+        let at = |p: f64| us[((us.len() - 1) as f64 * p).round() as usize];
+        println!("{label}: p50 {:.2} us, p95 {:.2} us, p99 {:.2} us, max {:.1} us (n={})", at(0.5), at(0.95), at(0.99), at(1.0), us.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn hook_callback_cost() {
+        assert!(!INSTALLED.swap(true, Ordering::AcqRel), "a pick hook is alive");
+        assert!(!WATCH_INSTALLED.swap(true, Ordering::AcqRel), "a watch hook is alive");
+        let (tx, rx) = mpsc::channel::<(i32, i32)>();
+        // the same move callback as read_aloud::enter_pick (33 ms throttle, then a send)
+        let (t0, last) = (Instant::now(), Arc::new(AtomicU64::new(0)));
+        let tm = tx.clone();
+        *slot(&MOVE).lock() = Some(Box::new(move |x, y| {
+            let now = t0.elapsed().as_millis() as u64 + 33;
+            if now.saturating_sub(last.load(Ordering::Relaxed)) >= 33 {
+                last.store(now, Ordering::Relaxed);
+                let _ = tm.send((x, y));
+            }
+        }));
+        let tc = tx.clone();
+        *slot(&CLICK).lock() = Some(Box::new(move |x, y| {
+            let _ = tc.send((x, y));
+        }));
+        let tw = tx.clone();
+        *watch_slot().lock() = Some(Box::new(move |ev| {
+            let (MouseEv::Down { x, y, .. } | MouseEv::Up { x, y, .. }) = ev;
+            let _ = tw.send((x, y));
+        }));
+        let n = 20_000;
+        let moves: Vec<f64> = (0..n).map(|i| call(hook_proc, WM_MOUSEMOVE, i % 1000, 300)).collect();
+        // a click far off any window of ours; the up that follows is swallowed
+        let downs: Vec<f64> = (0..2000).map(|i| {
+            let d = call(hook_proc, WM_LBUTTONDOWN, 5 + i % 50, 5);
+            call(hook_proc, WM_LBUTTONUP, 5 + i % 50, 5);
+            d
+        }).collect();
+        let watch_moves: Vec<f64> = (0..n).map(|i| call(watch_proc, WM_MOUSEMOVE, i % 1000, 300)).collect();
+        let watch_downs: Vec<f64> = (0..n).map(|i| call(watch_proc, WM_LBUTTONDOWN, i % 1000, 300)).collect();
+        *slot(&MOVE).lock() = None;
+        *slot(&CLICK).lock() = None;
+        *watch_slot().lock() = None;
+        SWALLOW_UP.store(false, Ordering::Release);
+        INSTALLED.store(false, Ordering::Release);
+        WATCH_INSTALLED.store(false, Ordering::Release);
+        drop(tx);
+        println!("sent {} messages", rx.try_iter().count());
+        report("pick hook, move (throttled send)", moves);
+        report("pick hook, left down (own-window check + send)", downs);
+        report("watch hook, move (ignored)", watch_moves);
+        report("watch hook, left down (modifier check + send)", watch_downs);
+    }
+}

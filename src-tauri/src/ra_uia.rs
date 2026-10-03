@@ -215,6 +215,22 @@ impl Uia {
         r.recv_timeout(Duration::from_millis(50)).ok()
     }
 
+    /// `hover` with a longer wait, so a bench sees the worker's real latency.
+    #[cfg(test)]
+    pub fn hover_wait(&self, x: i32, y: i32, wait: Duration) -> Option<Vec<Rect>> {
+        let (t, r) = mpsc::channel();
+        self.tx.send(Req::Hover(x, y, t)).ok()?;
+        r.recv_timeout(wait).ok()
+    }
+
+    /// `rects` with a longer wait (bench only).
+    #[cfg(test)]
+    pub fn rects_wait(&self, src: Vec<usize>, wait: Duration) -> Option<Vec<Rect>> {
+        let (t, r) = mpsc::channel();
+        self.tx.send(Req::Rects(src, t)).ok()?;
+        r.recv_timeout(wait).ok().flatten()
+    }
+
     /// Validate the click (rules 2/3) on whatever window is under the point and return
     /// raw tokens from the clicked word forward (≤ 200; ≤ 60 from Acrobat). Token `i` ↔
     /// source index `i` for `rects`/`scroll_to`. The source (UIA, Acrobat, OCR) is chosen

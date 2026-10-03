@@ -409,23 +409,70 @@ impl<N: Node + Clone> Walk<N> {
 }
 
 /// Hover answer: `Some([box])` for the on-screen word under the point, `Some([])` when
-/// there is none, `None` when the deadline passed first (no answer).
+/// there is none, `None` when the deadline passed first (no answer). Hover itself uses
+/// `hover_seen`; this is the plain walk it builds on (tests and the live checks).
+#[cfg(test)]
 pub(crate) fn hover_rects<N: Node>(
     ws: &mut Words<N>,
     x: f64,
     y: f64,
     deadline: Instant,
 ) -> Option<Vec<Rect>> {
+    hover_rects_into(ws, x, y, deadline, &mut |_, _| {})
+}
+
+/// `hover_rects`, reporting every on-screen word box it passes to `seen`.
+fn hover_rects_into<N: Node>(
+    ws: &mut Words<N>,
+    x: f64,
+    y: f64,
+    deadline: Instant,
+    seen: &mut dyn FnMut(&N, &Rect),
+) -> Option<Vec<Rect>> {
     // A container's box is the union of its on-screen parts: if it does not contain
     // the point, no word inside it does.
     while Instant::now() < deadline {
         match ws.on_screen_word_in(|b| hit(b, x, y)) {
             None => return Some(Vec::new()),
-            Some((_, r)) if hit(&r, x, y) => return Some(vec![r]),
-            Some(_) => {}
+            Some((n, r)) => {
+                seen(&n, &r);
+                if hit(&r, x, y) {
+                    return Some(vec![r]);
+                }
+            }
         }
     }
     None
+}
+
+/// Most word boxes a hover view remembers.
+const SEEN_MAX: usize = 4000;
+
+/// Word boxes earlier hovers on this page view walked past: (node, box when seen).
+pub(crate) type Seen<N> = Vec<(N, Rect)>;
+
+/// Hover with memory: a remembered box under the point is answered after ONE location
+/// check of its node (a scroll or zoom moves it; then everything remembered is
+/// forgotten), instead of walking the DOM from the top (one cross-process call per
+/// node). Otherwise `hover_rects` from `root`, remembering every box it passes.
+pub(crate) fn hover_seen<N: Node + Clone>(
+    seen: &mut Seen<N>,
+    root: N,
+    x: f64,
+    y: f64,
+    deadline: Instant,
+) -> Option<Vec<Rect>> {
+    if let Some((n, r)) = seen.iter().find(|(_, r)| hit(r, x, y)) {
+        match n.location() {
+            Some(now) if now == *r => return Some(vec![now]),
+            _ => seen.clear(),
+        }
+    }
+    hover_rects_into(&mut words(root, MAX_WORDS), x, y, deadline, &mut |n, r| {
+        if seen.len() < SEEN_MAX && !seen.iter().any(|(_, s)| s == r) {
+            seen.push((n.clone(), r.clone()));
+        }
+    })
 }
 
 /// Pick the visible page view among AVL_AVView candidates: (hwnd, visible, area).
@@ -795,6 +842,8 @@ pub struct HoverView {
     /// `None`: the DOM could not be reached (retried after `HOVER_RETRY`).
     root: Option<IPDDomNode>,
     at: Instant,
+    /// Word boxes earlier hovers walked past (`hover_seen`).
+    seen: Seen<IPDDomNode>,
 }
 
 /// What hover found in an Acrobat window.
@@ -837,12 +886,13 @@ pub fn hover_cached(cache: &mut Option<HoverView>, x: i32, y: i32) -> Hover {
         let Some((_, pv)) = view_at(x, y) else {
             return Hover::Rects(Vec::new());
         };
-        *cache = Some(HoverView { pv, root: dom_root(pv).ok(), at: Instant::now() });
+        *cache = Some(HoverView { pv, root: dom_root(pv).ok(), at: Instant::now(), seen: Vec::new() });
     }
-    let Some(root) = cache.as_ref().and_then(|c| c.root.clone()) else {
+    let Some(c) = cache.as_mut() else { return Hover::NoDom };
+    let Some(root) = c.root.clone() else {
         return Hover::NoDom;
     };
-    match hover_rects(&mut words(root, MAX_WORDS), x as f64, y as f64, deadline) {
+    match hover_seen(&mut c.seen, root, x as f64, y as f64, deadline) {
         Some(v) => Hover::Rects(v),
         None => Hover::NoAnswer,
     }
@@ -1127,6 +1177,34 @@ mod tests {
     }
 
     #[test]
+    fn hover_remembers_boxes_and_rechecks_them_instead_of_walking() {
+        let mut seen: Seen<F> = Vec::new();
+        let two = Rect { x: 60.0, y: 0.0, w: 50.0, h: 20.0 };
+        assert_eq!(hover_seen(&mut seen, screen(), 70.0, 10.0, far()), Some(vec![two.clone()]));
+        assert!(seen.iter().any(|(n, _)| n.text() == "one "), "boxes walked past are kept");
+        // "one" again, and "two" again: answered from memory, no DOM walk
+        let f0 = fetches();
+        assert_eq!(hover_seen(&mut seen, screen(), 20.0, 10.0, far()), Some(vec![Rect { x: 0.0, y: 0.0, w: 50.0, h: 20.0 }]));
+        assert_eq!(hover_seen(&mut seen, screen(), 70.0, 10.0, far()), Some(vec![two]));
+        assert_eq!(fetches(), f0, "remembered words need no walk");
+        // no word under the point: walked as before, the answer stays "none"
+        assert_eq!(hover_seen(&mut seen, screen(), 200.0, 35.0, far()), Some(vec![]));
+        // out of time with nothing remembered there: no answer
+        assert_eq!(hover_seen(&mut seen, screen(), 20.0, 60.0, Instant::now()), None);
+    }
+
+    #[test]
+    fn a_moved_word_is_never_answered_from_memory() {
+        // remembered at (300, 300) but the node now says (0, 0): the page scrolled
+        let mut seen: Seen<F> = vec![(w("one ", r(0.0, 0.0, 50.0, 20.0)), Rect { x: 300.0, y: 300.0, w: 50.0, h: 20.0 })];
+        assert_eq!(hover_seen(&mut seen, screen(), 310.0, 310.0, far()), Some(vec![]), "nothing really there");
+        assert!(seen.iter().all(|(_, b)| b.x < 300.0), "the stale memory was dropped");
+        // an off-screen node (no location now) is not answered either
+        let mut seen: Seen<F> = vec![(w("gone ", None), Rect { x: 300.0, y: 300.0, w: 50.0, h: 20.0 })];
+        assert_eq!(hover_seen(&mut seen, screen(), 310.0, 310.0, far()), Some(vec![]));
+    }
+
+    #[test]
     fn the_page_view_under_the_point_is_chosen() {
         let rc = |x, w| Rect { x, y: 0.0, w, h: 100.0 };
         // split view: two visible page views side by side, plus a hidden tab's view
@@ -1326,6 +1404,150 @@ mod live {
 
     fn center(r: &Rect) -> (i32, i32) {
         ((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32)
+    }
+
+    /// Task 8 bench: hover latency over a dense page (~440 words), the cost of walking
+    /// every on-screen word box, and pick at the bottom of the page. Same launch and
+    /// cleanup rules as `acro_live`. Run in release:
+    /// cargo test --release acro_bench -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore]
+    fn acro_bench() {
+        use crate::ra_perf::{ms, pct, thread_cpu};
+        if running("Acrobat.exe") || running("AcroRd32.exe") {
+            println!("skipped: Acrobat already running");
+            return;
+        }
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let pdf = std::env::temp_dir().join(format!("ra_acro_bench_{}.pdf", std::process::id()));
+        let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("tools").join("read-aloud").join("mkpdf.py");
+        let mut py = Command::new("py");
+        py.arg(&tool).arg(&pdf).arg("--dense");
+        if std::env::var_os("RA_ACRO_UNTAGGED").is_some() {
+            py.arg("--untagged");
+        }
+        let made = py.output().expect("run py mkpdf.py");
+        assert!(made.status.success() && pdf.exists(), "mkpdf failed: {made:?}");
+        let child = Command::new(ACROBAT).arg(&pdf).spawn().expect("launch Acrobat");
+        let mut guard = Launched { child, frame: None, pdf: pdf.clone() };
+        let t0 = Instant::now();
+        let frame = loop {
+            if let Some(f) = acrobat_frames().into_iter().next() {
+                break f;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no Acrobat frame in 40 s");
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        guard.frame = Some(frame);
+        let raise = || unsafe {
+            if IsIconic(frame).as_bool() {
+                let _ = ShowWindow(frame, SW_SHOWNOACTIVATE);
+            }
+            let _ = SetWindowPos(frame, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        };
+        // every on-screen word box, once the document is ready
+        let (pv, boxes) = loop {
+            raise();
+            std::thread::sleep(Duration::from_millis(300));
+            let pv = page_views(frame).into_iter().filter(|(_, vis, r)| *vis && r.w > 0.0 && r.h > 0.0).map(|(h, _, _)| h).next();
+            let found = pv.and_then(|pv| {
+                let mut ws = words(dom_root(pv).ok()?, MAX_WORDS);
+                let v: Vec<Rect> = std::iter::from_fn(|| ws.on_screen_word().map(|(_, r)| r)).collect();
+                (v.len() > 100).then_some((pv, v))
+            });
+            if let Some(x) = found {
+                break x;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no dense page in 40 s");
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        std::thread::sleep(Duration::from_millis(1500)); // past the post-load stalls
+        let mut walk = Vec::new();
+        for _ in 0..3 {
+            let t = Instant::now();
+            let mut ws = words(dom_root(pv).unwrap(), MAX_WORDS);
+            let n = std::iter::from_fn(|| ws.on_screen_word()).count();
+            walk.push(ms(t.elapsed()));
+            assert_eq!(n, boxes.len());
+        }
+        println!("dense page: {} on-screen words; full on-screen walk (attach + every box) {}", boxes.len(), pct(&walk));
+        let centre = |r: &Rect| ((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32);
+        // The DOM part of hover (no window checks, so it runs even when a window of the
+        // user's covers the page): the plain walk from the root vs `hover_seen`, same
+        // points, same attached root.
+        {
+            let root = dom_root(pv).expect("DOM root");
+            let all: Vec<(f64, f64)> = boxes.iter().step_by((boxes.len() / 60).max(1)).map(|r| (r.x + r.w / 2.0, r.y + r.h / 2.0)).collect();
+            let run = |f: &mut dyn FnMut(f64, f64) -> Option<Vec<Rect>>| {
+                let (mut t_ok, mut none, c0) = (Vec::new(), 0, thread_cpu());
+                for _ in 0..2 {
+                    for &(x, y) in &all {
+                        let t = Instant::now();
+                        match f(x, y) {
+                            Some(v) if v.len() == 1 && hit(&v[0], x, y) => t_ok.push(ms(t.elapsed())),
+                            Some(v) => panic!("wrong answer at ({x},{y}): {v:?}"),
+                            None => none += 1,
+                        }
+                    }
+                }
+                format!("answered {} ({}), no answer {none}, CPU {:.0} ms", t_ok.len(), pct(&t_ok), ms(thread_cpu() - c0))
+            };
+            let plain = run(&mut |x, y| hover_rects(&mut words(root.clone(), MAX_WORDS), x, y, Instant::now() + HOVER_BUDGET));
+            let mut seen = Vec::new();
+            let remembered = run(&mut |x, y| hover_seen(&mut seen, root.clone(), x, y, Instant::now() + HOVER_BUDGET));
+            println!("DOM hover over {} words x2, plain walk: {plain}", all.len());
+            println!("DOM hover over {} words x2, hover_seen: {remembered}; {} boxes remembered at the end", all.len(), seen.len());
+        }
+        // only points where our Acrobat is really on top (a window of the user's may cover part)
+        let pts: Vec<(i32, i32)> = boxes
+            .iter()
+            .step_by((boxes.len() / 60).max(1))
+            .map(centre)
+            .filter(|&(x, y)| root_at(x, y) == Some(frame))
+            .collect();
+        let (lx, ly) = centre(boxes.last().unwrap());
+        if pts.len() < 10 || root_at(lx, ly) != Some(frame) {
+            println!("NOTE: the page is covered by another window ({} points free); point-based hover skipped", pts.len());
+        } else {
+            let mut cache = None;
+            let (mut t_ok, mut none, mut wrong) = (Vec::new(), 0, 0);
+            let c0 = thread_cpu();
+            for _ in 0..2 {
+                for (i, &(x, y)) in pts.iter().enumerate() {
+                    let t = Instant::now();
+                    let h = hover_cached(&mut cache, x, y);
+                    let d = ms(t.elapsed());
+                    match h {
+                        Hover::Rects(v) if v.len() == 1 && hit(&v[0], x as f64, y as f64) => t_ok.push(d),
+                        Hover::NoAnswer => none += 1,
+                        other => {
+                            wrong += 1;
+                            println!("hover {i} at ({x},{y}): {other:?}");
+                        }
+                    }
+                }
+            }
+            println!(
+                "hover over {} points x2: answered {} ({}), no answer (>50 ms) {none}, wrong {wrong}; worker CPU {:.0} ms",
+                pts.len(),
+                t_ok.len(),
+                pct(&t_ok),
+                ms(thread_cpu() - c0)
+            );
+            let (bx, by) = centre(boxes.last().unwrap());
+            let mut picks = Vec::new();
+            for _ in 0..3 {
+                let t = Instant::now();
+                let r = AcroRead::pick(bx, by);
+                picks.push(ms(t.elapsed()));
+                assert!(r.is_ok(), "pick at the last word: {:?}", r.err());
+            }
+            println!("pick at the page's last word: {}", pct(&picks));
+        }
+        drop(guard);
     }
 
     #[test]

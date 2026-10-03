@@ -1,5 +1,6 @@
 # Test tool for ra_acro's manual test (acro_live): writes a hand-built 3-page text PDF.
-# Usage: py mkpdf.py OUT.pdf [--untagged]   (no dependencies)
+# Usage: py mkpdf.py OUT.pdf [--untagged] [--dense]   (no dependencies)
+# --dense: page one holds 40 lines (~440 words) at 11 pt, for the hover bench.
 # Page 3 holds the marker word ZEBRAFINCH, which the test reads up to and scrolls to.
 import sys
 PAGES = [
@@ -17,16 +18,21 @@ PAGES = [
   "Last line on page three with Pelosi one more time."],
 ]
 def esc(s): return s  # test text has no parens or backslashes
-def build(tagged, out):
+def build(tagged, out, dense=False):
+    pages = [list(p) for p in PAGES]
+    if dense:
+        words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo".split()
+        pages[0] += [f"Row{i:02} " + ' '.join(words[(i + k) % len(words)] for k in range(10)) for i in range(36)]
+    size, gap, top = (11, 16, 740) if dense else (16, 40, 720)
     objs = {}
     # 1 catalog, 2 pages, 3 font, then per page: page obj, content obj
-    n_pages = len(PAGES)
+    n_pages = len(pages)
     page_ids = [4+2*i for i in range(n_pages)]
     cont_ids = [5+2*i for i in range(n_pages)]
     nxt = 4+2*n_pages
     struct_root = nxt; doc_elem = nxt+1; parent_tree = nxt+2; nxt += 3
     p_elems = []  # (objid, page_index, mcid)
-    for pi, lines in enumerate(PAGES):
+    for pi, lines in enumerate(pages):
         for li in range(len(lines)):
             p_elems.append((nxt, pi, li)); nxt += 1
     cat = "<< /Type /Catalog /Pages 2 0 R"
@@ -35,14 +41,14 @@ def build(tagged, out):
     objs[1] = cat + " >>"
     objs[2] = f"<< /Type /Pages /Count {n_pages} /Kids [{' '.join(f'{p} 0 R' for p in page_ids)}] >>"
     objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
-    for pi, lines in enumerate(PAGES):
+    for pi, lines in enumerate(pages):
         extra = f" /StructParents {pi} /Tabs /S" if tagged else ""
         objs[page_ids[pi]] = (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             f"/Resources << /Font << /F1 3 0 R >> >> /Contents {cont_ids[pi]} 0 R{extra} >>")
         s = ""
         for li, ln in enumerate(lines):
-            y = 720 - li*40
-            body = f"BT /F1 16 Tf 72 {y} Td ({esc(ln)}) Tj ET\n"
+            y = top - li*gap
+            body = f"BT /F1 {size} Tf 72 {y} Td ({esc(ln)}) Tj ET\n"
             s += (f"/P << /MCID {li} >> BDC\n{body}EMC\n") if tagged else body
         objs[cont_ids[pi]] = f"<< /Length {len(s.encode('latin-1'))} >>\nstream\n{s}endstream"
     if tagged:
@@ -70,6 +76,6 @@ def build(tagged, out):
     open(out,'wb').write(buf)
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("usage: mkpdf.py OUT.pdf [--untagged]")
-    build("--untagged" not in sys.argv[2:], sys.argv[1])
+        sys.exit("usage: mkpdf.py OUT.pdf [--untagged] [--dense]")
+    build("--untagged" not in sys.argv[2:], sys.argv[1], "--dense" in sys.argv[2:])
     print("ok")

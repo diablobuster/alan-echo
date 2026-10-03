@@ -7,7 +7,7 @@
 //! after OCR. No background work: staleness is checked only when asked, at most every
 //! 500 ms.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
@@ -70,6 +70,11 @@ pub struct OcrRead {
     made: Instant,
     /// Last staleness answer and when it was computed.
     memo: Cell<Option<(Instant, bool)>>,
+    /// The last two staleness readings (client rect, fingerprint), oldest first: equal
+    /// readings at least 500 ms apart mean the window stopped changing (`settled`).
+    readings: RefCell<[Option<(Rect, u64)>; 2]>,
+    /// Hover cache only: re-OCRs of this window in a row with no use in between.
+    rebuilds: u32,
 }
 
 impl OcrRead {
@@ -226,6 +231,8 @@ impl OcrRead {
             strip,
             made: Instant::now(),
             memo: Cell::new(None),
+            readings: RefCell::new([None, None]),
+            rebuilds: 0,
         })
     }
 
@@ -238,18 +245,40 @@ impl OcrRead {
                 return v;
             }
         }
+        let mut reading = None;
         let v = match client_rect(HWND(self.hwnd as *mut _)) {
             Some(win) if win == self.orig.0 => match clip_to_screen(&win).and_then(|r| self.strip_sum(&r)) {
-                Some(sum) => is_stale(self.orig.clone(), (win, sum)),
+                Some(sum) => {
+                    reading = Some((win.clone(), sum));
+                    is_stale(self.orig.clone(), (win, sum))
+                }
                 None => {
                     log::warn!("read-aloud: OCR fingerprint capture failed; hiding boxes");
                     true
                 }
             },
+            // moved / resized: only a hover cache that is backing off needs the
+            // fingerprint (to see the window settle); a read just hides its boxes
+            Some(win) if self.rebuilds > 0 => {
+                reading = clip_to_screen(&win).and_then(|r| self.strip_sum(&r)).map(|sum| (win, sum));
+                true
+            }
             _ => true,
         };
+        {
+            let mut r = self.readings.borrow_mut();
+            r[0] = r[1].take();
+            r[1] = reading;
+        }
         self.memo.set(Some((Instant::now(), v)));
         v
+    }
+
+    /// The last two staleness readings match: the window stopped changing (a scroll
+    /// ended). Free: it only compares what `stale` recorded.
+    fn settled(&self) -> bool {
+        let r = self.readings.borrow();
+        r[0].is_some() && r[0] == r[1]
     }
 
     /// `thumb_sum` of the fingerprint column, read from the screen with one BitBlt.
@@ -301,22 +330,58 @@ pub(crate) fn span_of(words: &[OcrWord], reg_y: f64, reg_h: u32) -> (u32, u32) {
 pub(crate) enum HoverPlan {
     /// The cached OCR is current: look the point up in it.
     Use,
-    /// Stale, but re-OCR'd less than 500 ms ago: no box for now.
+    /// Stale, but re-OCR'd too recently (`rebuild_wait`): no box for now.
     NoBox,
+    /// Stale while backing off, but the window stopped changing: OCR again now and
+    /// end the back-off.
+    Settled,
     /// Another window, no cache, or stale and old enough: OCR again.
     Rebuild,
 }
 
-/// Hover's cache decision. `stale` is only asked when the cache is for this window.
-pub(crate) fn hover_plan(same_window: bool, stale: impl FnOnce() -> bool, age: Duration) -> HoverPlan {
+/// Longest wait between re-OCRs of a window that keeps changing.
+const REBUILD_MAX: Duration = Duration::from_secs(4);
+
+/// How long a stale hover cache waits before it is OCR'd again, after `rebuilds`
+/// re-OCRs in a row that went stale before the hover ever used them (video, an
+/// animation): 0.5 s, then 1, 2, 4 s. A window that changed once (a scroll) is
+/// re-OCR'd after 0.5 s as before.
+pub(crate) fn rebuild_wait(rebuilds: u32) -> Duration {
+    STALE_EVERY.saturating_mul(1u32 << rebuilds.min(3)).min(REBUILD_MAX)
+}
+
+/// Hover's cache decision. `stale` is only asked when the cache is for this window;
+/// `settled` (the window stopped changing) only while backing off (`rebuilds` > 0:
+/// the cache's re-OCRs in a row, see `rebuild_wait`), so a scroll that ends is
+/// re-OCR'd at once instead of after the back-off.
+pub(crate) fn hover_plan(
+    same_window: bool,
+    stale: impl FnOnce() -> bool,
+    age: Duration,
+    rebuilds: u32,
+    settled: impl FnOnce() -> bool,
+) -> HoverPlan {
     if !same_window {
         HoverPlan::Rebuild
     } else if !stale() {
         HoverPlan::Use
-    } else if age < STALE_EVERY {
+    } else if rebuilds > 0 && settled() {
+        HoverPlan::Settled
+    } else if age < rebuild_wait(rebuilds) {
         HoverPlan::NoBox
     } else {
         HoverPlan::Rebuild
+    }
+}
+
+/// The hover cache's `rebuilds` after `plan`; `cached` = (the cache is for this
+/// window, its `rebuilds`). Re-OCR of a stale same-window cache counts one more; a
+/// current cache, a settled window, another window or no cache start over.
+pub(crate) fn rebuilds_after(plan: &HoverPlan, cached: Option<(bool, u32)>) -> u32 {
+    match (plan, cached) {
+        (HoverPlan::Rebuild, Some((true, n))) => n.saturating_add(1),
+        (HoverPlan::NoBox, Some((_, n))) => n,
+        _ => 0,
     }
 }
 
@@ -335,31 +400,43 @@ impl OcrRead {
             strip: (0, 0, 0, 0),
             made: Instant::now(),
             memo: Cell::new(None),
+            readings: RefCell::new([None, None]),
+            rebuilds: 0,
         }
     }
 }
 
 /// Hover in pick mode: the box of the OCR word under the point. OCRs once per window;
-/// a stale cache is re-OCR'd at most every 500 ms (until then: no box). A failed OCR
-/// is cached too (as an empty read: `None` now, then no box until it is retried).
+/// a stale cache is re-OCR'd after 500 ms, backing off up to 4 s while the window keeps
+/// changing (`rebuild_wait`; until then: no box). A failed OCR is cached too (as an
+/// empty read: `None` now, then no box until it is retried).
 pub fn hover_cached(cache: &mut Option<OcrRead>, hwnd: isize, x: i32, y: i32) -> Option<Vec<Rect>> {
     let plan = match cache.as_ref() {
-        Some(c) => hover_plan(c.hwnd == hwnd, || c.stale(), c.made.elapsed()),
+        Some(c) => hover_plan(c.hwnd == hwnd, || c.stale(), c.made.elapsed(), c.rebuilds, || c.settled()),
         None => HoverPlan::Rebuild,
     };
+    let rebuilds = rebuilds_after(&plan, cache.as_ref().map(|c| (c.hwnd == hwnd, c.rebuilds)));
     match plan {
         HoverPlan::NoBox => return Some(Vec::new()),
-        HoverPlan::Use => {}
-        HoverPlan::Rebuild => {
+        HoverPlan::Use => {
+            if let Some(c) = cache.as_mut() {
+                c.rebuilds = rebuilds; // seen current: the next change re-OCRs quickly again
+            }
+        }
+        HoverPlan::Rebuild | HoverPlan::Settled => {
             *cache = None;
-            *cache = Some(match OcrRead::build(hwnd) {
+            let mut r = match OcrRead::build(hwnd) {
                 Ok(r) => r,
                 Err(e) => {
                     log::info!("read-aloud: OCR hover: {e}");
-                    *cache = Some(OcrRead::failed(hwnd));
+                    let mut f = OcrRead::failed(hwnd);
+                    f.rebuilds = rebuilds;
+                    *cache = Some(f);
                     return None;
                 }
-            });
+            };
+            r.rebuilds = rebuilds;
+            *cache = Some(r);
         }
     }
     let c = cache.as_ref()?;
@@ -953,10 +1030,69 @@ mod tests {
     fn hover_plan_decisions() {
         let young = Duration::from_millis(100);
         let old = Duration::from_millis(600);
-        assert_eq!(hover_plan(false, || panic!("not asked"), young), HoverPlan::Rebuild);
-        assert_eq!(hover_plan(true, || false, old), HoverPlan::Use);
-        assert_eq!(hover_plan(true, || true, young), HoverPlan::NoBox);
-        assert_eq!(hover_plan(true, || true, old), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(false, || panic!("not asked"), young, 0, || false), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(true, || false, old, 0, || false), HoverPlan::Use);
+        assert_eq!(hover_plan(true, || true, young, 0, || false), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, old, 0, || false), HoverPlan::Rebuild);
+    }
+
+    #[test]
+    fn a_window_that_keeps_changing_is_reocrd_less_and_less_often() {
+        let ms = Duration::from_millis;
+        assert_eq!(rebuild_wait(0), ms(500), "a one-off change (scroll): 0.5 s as before");
+        assert_eq!(rebuild_wait(1), ms(1000));
+        assert_eq!(rebuild_wait(2), ms(2000));
+        assert_eq!(rebuild_wait(3), ms(4000));
+        assert_eq!(rebuild_wait(u32::MAX), ms(4000), "capped");
+        assert_eq!(hover_plan(true, || true, ms(600), 1, || false), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, ms(1100), 1, || false), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(true, || true, ms(3900), 9, || false), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, ms(4100), 9, || false), HoverPlan::Rebuild);
+        // another window or a current cache: no waiting at all
+        assert_eq!(hover_plan(false, || true, ms(0), 9, || false), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(true, || false, ms(0), 9, || false), HoverPlan::Use);
+    }
+
+    #[test]
+    fn a_scroll_that_ends_is_reocrd_at_once() {
+        let ms = Duration::from_millis;
+        // scrolling: stale and still changing -> back off
+        assert_eq!(hover_plan(true, || true, ms(600), 1, || false), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, ms(2500), 3, || false), HoverPlan::NoBox);
+        // the scroll stopped (two equal readings): OCR now, back-off over
+        assert_eq!(hover_plan(true, || true, ms(600), 1, || true), HoverPlan::Settled);
+        assert_eq!(hover_plan(true, || true, ms(2500), 3, || true), HoverPlan::Settled);
+        assert_eq!(rebuilds_after(&HoverPlan::Settled, Some((true, 3))), 0);
+        // not backing off: settledness is not asked (the 0.5 s rule as before)
+        assert_eq!(hover_plan(true, || true, ms(100), 0, || panic!("not asked")), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || false, ms(100), 3, || panic!("not asked")), HoverPlan::Use);
+    }
+
+    #[test]
+    fn rebuilds_are_carried_and_reset() {
+        // a same-window re-OCR counts one more; NoBox keeps the count
+        assert_eq!(rebuilds_after(&HoverPlan::Rebuild, Some((true, 0))), 1);
+        assert_eq!(rebuilds_after(&HoverPlan::Rebuild, Some((true, 2))), 3);
+        assert_eq!(rebuilds_after(&HoverPlan::NoBox, Some((true, 2))), 2);
+        assert_eq!(rebuilds_after(&HoverPlan::Rebuild, Some((true, u32::MAX))), u32::MAX);
+        // seen current, settled, another window, or no cache: start over
+        assert_eq!(rebuilds_after(&HoverPlan::Use, Some((true, 3))), 0);
+        assert_eq!(rebuilds_after(&HoverPlan::Settled, Some((true, 3))), 0);
+        assert_eq!(rebuilds_after(&HoverPlan::Rebuild, Some((false, 3))), 0);
+        assert_eq!(rebuilds_after(&HoverPlan::Rebuild, None), 0);
+    }
+
+    #[test]
+    fn settled_needs_two_equal_readings() {
+        let f = OcrRead::failed(1);
+        assert!(!f.settled(), "no readings yet");
+        let rd = |y| Some((r(0.0, y, 10.0, 10.0), 7u64));
+        *f.readings.borrow_mut() = [rd(0.0), rd(5.0)];
+        assert!(!f.settled(), "still moving");
+        *f.readings.borrow_mut() = [rd(5.0), rd(5.0)];
+        assert!(f.settled());
+        *f.readings.borrow_mut() = [None, None];
+        assert!(!f.settled(), "failed captures never count as settled");
     }
 
     #[test]
@@ -964,8 +1100,8 @@ mod tests {
         // a failed OCR is kept (hover returns early without re-OCR) until 500 ms pass
         let f = OcrRead::failed(12345);
         assert!(f.words.is_empty() && f.toks.is_empty());
-        assert_eq!(hover_plan(f.hwnd == 12345, || true, f.made.elapsed()), HoverPlan::NoBox);
-        assert_eq!(hover_plan(true, || true, Duration::from_millis(501)), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(f.hwnd == 12345, || true, f.made.elapsed(), f.rebuilds, || false), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, Duration::from_millis(501), 0, || false), HoverPlan::Rebuild);
     }
 
     #[test]
@@ -1292,5 +1428,216 @@ mod tests {
             let _ = PostMessageW(HWND(h as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
         let _ = win.join();
+    }
+
+    /// Frames painted by the bench window (with a timer, the page moves every frame).
+    static BENCH_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    /// While set, the bench window's timer stops moving the page (the scroll ended).
+    static BENCH_FROZEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    unsafe extern "system" fn bench_wndproc(
+        h: windows::Win32::Foundation::HWND,
+        msg: u32,
+        wp: windows::Win32::Foundation::WPARAM,
+        lp: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        use std::sync::atomic::Ordering::Relaxed;
+        use windows::core::w;
+        use windows::Win32::Graphics::Gdi::*;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        match msg {
+            WM_TIMER if BENCH_FROZEN.load(Relaxed) => windows::Win32::Foundation::LRESULT(0),
+            WM_TIMER => {
+                BENCH_FRAME.fetch_add(1, Relaxed);
+                let _ = InvalidateRect(h, None, true);
+                windows::Win32::Foundation::LRESULT(0)
+            }
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let dc = BeginPaint(h, &mut ps);
+                let mut rc = windows::Win32::Foundation::RECT::default();
+                let _ = GetClientRect(h, &mut rc);
+                FillRect(dc, &rc, HBRUSH(GetStockObject(WHITE_BRUSH).0));
+                let font = CreateFontW(-28, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, w!("Segoe UI"));
+                let old = SelectObject(dc, font);
+                SetBkMode(dc, TRANSPARENT);
+                let f = BENCH_FRAME.load(Relaxed);
+                for i in 0..20 {
+                    let line = format!("Line {i} frame {f} the quick brown fox jumps over the lazy dog again and again.");
+                    let mut t: Vec<u16> = line.encode_utf16().collect();
+                    // the whole page moves a few px every frame (scrolling / video)
+                    let top = 30 + i * 42 + (f % 50) as i32 * 3;
+                    let mut r = windows::Win32::Foundation::RECT { left: 40, top, right: rc.right, bottom: top + 42 };
+                    DrawTextW(dc, &mut t, &mut r, DT_LEFT | DT_TOP | DT_NOPREFIX | DT_SINGLELINE);
+                }
+                SelectObject(dc, old);
+                let _ = DeleteObject(font);
+                let _ = EndPaint(h, &ps);
+                windows::Win32::Foundation::LRESULT(0)
+            }
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                windows::Win32::Foundation::LRESULT(0)
+            }
+            _ => DefWindowProcW(h, msg, wp, lp),
+        }
+    }
+
+    /// Opens the bench window (1280x900 at the virtual screen's corner, topmost, never
+    /// activated). With `tick_ms` > 0 its text changes every `tick_ms`.
+    fn open_bench_window(tick_ms: u32) -> (isize, std::thread::JoinHandle<()>) {
+        use std::sync::mpsc;
+        use windows::core::w;
+        use windows::Win32::Foundation::HINSTANCE;
+        use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let (vx, vy) = unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)) };
+        let (htx, hrx) = mpsc::channel::<isize>();
+        let win = std::thread::spawn(move || unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let wc = WNDCLASSW { lpfnWndProc: Some(bench_wndproc), lpszClassName: w!("RaOcrBenchWnd"), ..Default::default() };
+            RegisterClassW(&wc);
+            let h = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("RaOcrBenchWnd"),
+                w!("ra_ocr bench"),
+                WS_POPUP | WS_VISIBLE,
+                vx,
+                vy,
+                1280,
+                900,
+                None,
+                None,
+                HINSTANCE::default(),
+                None,
+            )
+            .expect("bench window");
+            if tick_ms > 0 {
+                SetTimer(h, 1, tick_ms, None);
+            }
+            let _ = htx.send(h.0 as isize);
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        });
+        let h = hrx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        (h, win)
+    }
+
+    /// Task 8 bench: OCR pick cost (and its parts: engine creation, screen grab,
+    /// recognition) on a static 1280x900 window, then pick-mode hover over a window
+    /// whose text keeps changing: how many re-OCRs and how much CPU in 6 s of hovering.
+    /// Own window only. Run in release:
+    /// cargo test --release ocr_bench -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore]
+    fn ocr_bench() {
+        use crate::ra_perf::{cores, mem, ms, pct, process_cpu};
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let (h, win) = open_bench_window(0);
+        let reg = clip_to_screen(&client_rect(HWND(h as *mut _)).unwrap()).unwrap();
+        // the centre of the 6th OCR word
+        let probe = OcrRead::build(h).expect("build");
+        let w5 = &probe.words[5].rect;
+        let (x, y) = ((w5.x + w5.w / 2.0) as i32, (w5.y + w5.h / 2.0) as i32);
+        drop(probe);
+        let mut engine_ms = Vec::new();
+        for _ in 0..5 {
+            let t = Instant::now();
+            let e = OcrEngine::TryCreateFromUserProfileLanguages().unwrap();
+            engine_ms.push(ms(t.elapsed()));
+            drop(e);
+        }
+        let engine = OcrEngine::TryCreateFromUserProfileLanguages().unwrap();
+        let (mut grab_ms, mut rec_ms) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let t = Instant::now();
+            let bgra = grab(&reg).unwrap();
+            grab_ms.push(ms(t.elapsed()));
+            let t = Instant::now();
+            let lines = recognize(&engine, &bgra, reg.w, reg.h).unwrap();
+            rec_ms.push(ms(t.elapsed()));
+            assert!(lines.len() >= 15, "{} lines", lines.len());
+        }
+        let mut pick_ms = Vec::new();
+        let m0 = mem();
+        for _ in 0..5 {
+            let t = Instant::now();
+            let r = OcrRead::pick(h, x, y);
+            pick_ms.push(ms(t.elapsed()));
+            assert!(r.is_ok());
+        }
+        let m1 = mem();
+        println!("OCR {}x{}: engine create {}", reg.w, reg.h, pct(&engine_ms));
+        println!("  screen grab {}", pct(&grab_ms));
+        println!("  recognize   {}", pct(&rec_ms));
+        println!("  pick total  {}", pct(&pick_ms));
+        println!("  RAM after picks: private {:.1} -> {:.1} MB, peak ws {:.1} MB", m0.1, m1.1, m1.2);
+        // static window: hover cost when the cache is current
+        let mut cache = None;
+        let _ = hover_cached(&mut cache, h, x, y);
+        let mut warm = Vec::new();
+        for i in 0..200 {
+            let t = Instant::now();
+            let _ = hover_cached(&mut cache, h, x + (i % 10) * 3, y);
+            warm.push(ms(t.elapsed()));
+        }
+        println!("  hover, static window, cached: {}", pct(&warm));
+        close_live(h, win);
+
+        // a window that changes every 100 ms (video, animation): hover every 33 ms
+        let (h, win) = open_bench_window(100);
+        // control: the same 6 s with no hovering (the window's own painting, in this process)
+        let (t0, c0) = (Instant::now(), process_cpu());
+        std::thread::sleep(Duration::from_secs(6));
+        let base = ms(process_cpu() - c0) / ms(t0.elapsed());
+        let mut cache: Option<OcrRead> = None;
+        let (t0, c0) = (Instant::now(), process_cpu());
+        let (mut rebuilds, mut last_made, mut boxes, mut calls) = (0, None, 0, Vec::new());
+        while t0.elapsed() < Duration::from_secs(6) {
+            let t = Instant::now();
+            if hover_cached(&mut cache, h, x, y).is_some_and(|v| !v.is_empty()) {
+                boxes += 1;
+            }
+            calls.push(ms(t.elapsed()));
+            let made = cache.as_ref().map(|c| c.made);
+            if made != last_made {
+                rebuilds += 1;
+                last_made = made;
+            }
+            std::thread::sleep(Duration::from_millis(33).saturating_sub(t.elapsed()));
+        }
+        let (wall, cpu) = (ms(t0.elapsed()), ms(process_cpu() - c0));
+        // the scroll ends: how long until hover shows boxes again (a fresh OCR)?
+        BENCH_FROZEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        let t_stop = Instant::now();
+        let settle_ms = loop {
+            let _ = hover_cached(&mut cache, h, x, y);
+            if cache.as_ref().is_some_and(|c| c.made > t_stop && !c.words.is_empty()) {
+                break Some(ms(t_stop.elapsed()));
+            }
+            if t_stop.elapsed() > Duration::from_secs(8) {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(33));
+        };
+        BENCH_FROZEN.store(false, std::sync::atomic::Ordering::Relaxed);
+        println!("  scroll ended after 6 s: fresh OCR after {settle_ms:?} ms");
+        close_live(h, win);
+        println!("  changing window, hover call {}; frames painted {}", pct(&calls), BENCH_FRAME.load(std::sync::atomic::Ordering::Relaxed));
+        println!(
+            "  changing window, 6 s of hover: {rebuilds} OCR builds, {boxes} hovers with a box, CPU {cpu:.0} ms = {:.2} cores; minus the window's own painting ({base:.3} cores): {:.3} cores ({:.2}% of the machine)",
+            cpu / wall,
+            cpu / wall - base,
+            (cpu / wall - base) * 100.0 / cores() as f64
+        );
     }
 }

@@ -325,9 +325,9 @@ mod tests {
     fn under_5ms_per_word_release() {
         let g = G2pEn::load().unwrap();
         let t = std::time::Instant::now();
-        for _ in 0..10 { for w in ["zelensky", "lukashenko", "kubernetes"] { g.predict(w); } }
-        eprintln!("ra_g2pen: {:.3} ms/word", t.elapsed().as_secs_f64() * 1000.0 / 30.0);
-        assert!(t.elapsed().as_secs_f64() * 1000.0 / 30.0 < 5.0, "{:?}", t.elapsed());
+        for _ in 0..100 { for w in ["zelensky", "lukashenko", "kubernetes"] { g.predict(w); } }
+        eprintln!("ra_g2pen: {:.3} ms/word", t.elapsed().as_secs_f64() * 1000.0 / 300.0);
+        assert!(t.elapsed().as_secs_f64() * 1000.0 / 300.0 < 5.0, "{:?}", t.elapsed());
     }
 
     #[test]

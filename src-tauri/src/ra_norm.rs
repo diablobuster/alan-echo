@@ -85,7 +85,6 @@ pub fn prepare(word: &str) -> Cow<'_, str> {
 /// Latin accent fold for one character: Latin-1 letters (À–ÿ), Latin Extended-A
 /// (Ā–ſ) and Romanian comma-below Ș ș Ț ț, to ASCII. Keeps the case
 /// (`É` → "E", `Æ` → "AE", `ß` → "ss"). `None` for ASCII and everything else.
-#[cfg_attr(not(test), allow(dead_code))] // for ra_names' accent fold (phase 3 Task 3)
 pub fn fold(c: char) -> Option<&'static str> {
     let lower = match c {
         '\u{C0}'..='\u{C5}' | '\u{E0}'..='\u{E5}' | '\u{100}'..='\u{105}' => "a",

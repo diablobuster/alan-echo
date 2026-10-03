@@ -62,7 +62,8 @@ fn letter_name(c: char) -> Option<&'static str> {
     })
 }
 
-/// Russian Cyrillic (33 letters, BGN/PCGN-style) plus Ukrainian і ї є ґ, as
+/// Russian Cyrillic (33 letters, BGN/PCGN-style) plus Ukrainian і ї є ґ and
+/// Belarusian ў, as
 /// lowercase Latin: "Путин" -> "putin", "Хрущёв" -> "khrushchyov". The hard and soft
 /// signs are silent (""). `None` for anything that is not Cyrillic.
 fn cyrillic(c: char) -> Option<&'static str> {
@@ -104,6 +105,7 @@ fn cyrillic(c: char) -> Option<&'static str> {
         'ї' => "yi",
         'є' => "ye",
         'ґ' => "g",
+        'ў' => "w", // Belarusian short u
         _ => return None,
     })
 }
@@ -453,9 +455,31 @@ pub(crate) fn greek_name(c: char) -> Option<&'static str> {
     }
 }
 
+/// A Greek vowel without its tonos or dialytika (`ά` -> `α`, `ΰ` -> `υ`): the
+/// NFD base letter, so an accented letter is named like the plain one.
+fn greek_base(c: char) -> char {
+    match c {
+        'ά' => 'α',
+        'έ' => 'ε',
+        'ή' => 'η',
+        'ί' | 'ϊ' | 'ΐ' => 'ι',
+        'ό' => 'ο',
+        'ύ' | 'ϋ' | 'ΰ' => 'υ',
+        'ώ' => 'ω',
+        'Ά' => 'Α',
+        'Έ' => 'Ε',
+        'Ή' => 'Η',
+        'Ί' | 'Ϊ' => 'Ι',
+        'Ό' => 'Ο',
+        'Ύ' | 'Ϋ' => 'Υ',
+        'Ώ' => 'Ω',
+        other => other,
+    }
+}
+
 /// The word said for a symbol or Greek letter that misaki would drop or pause on.
 fn symbol_word(c: char) -> Option<&'static str> {
-    Some(match c {
+    Some(match greek_base(c) {
         '$' => "dollar",
         '€' => "euro",
         '£' => "pound",
@@ -827,7 +851,9 @@ mod tests {
         assert_eq!(n.hand("Nguyen").as_deref(), Some("wˈɪn"));
         // Task 6: said names, not spelled letters
         assert_eq!(n.hand("IEEE").as_deref(), Some("ˌI tɹˈɪpəl ˈi"));
-        assert_eq!(n.hand("Ng").as_deref(), Some("ˈɪŋ"));
+        // "ng" / "NG" alone is not "ing" (a gauge, a tag, an abbreviation)
+        assert_eq!(n.hand("Ng"), None);
+        assert_eq!(n.hand("NG"), None);
         assert_eq!(n.hand("Xi's").as_deref(), Some("ʃˈiz"));
         assert_eq!(n.hand("Ozempic\u{2019}s").as_deref(), Some("Ozˈɛmpɪks"));
         assert_eq!(n.hand("pelosi"), None, "CMUdict word, not a hand entry");
@@ -1305,6 +1331,25 @@ mod tests {
         for c in "αβγδεζηθικλμνξοπρσςτυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ".chars() {
             assert!(!f.phonemize(&c.to_string()).unwrap().trim().is_empty(), "{c}");
         }
+    }
+
+    #[test]
+    fn accented_greek_folds_to_the_plain_letter() {
+        use misaki_rs::fallback::Fallback;
+        let f = cmu_fallback();
+        for (acc, plain) in [('ά', 'α'), ('έ', 'ε'), ('ή', 'η'), ('ί', 'ι'), ('ό', 'ο'), ('ύ', 'υ'), ('ώ', 'ω'), ('ΐ', 'ι'), ('ΰ', 'υ'), ('ϊ', 'ι'), ('ϋ', 'υ'), ('Ά', 'Α'), ('Ώ', 'Ω')] {
+            assert_eq!(greek_name(acc), greek_name(plain), "{acc}");
+            assert!(greek_name(acc).is_some(), "{acc}");
+            assert_eq!(f.phonemize(&acc.to_string()).unwrap(), f.phonemize(&plain.to_string()).unwrap(), "{acc}");
+        }
+    }
+
+    #[test]
+    fn belarusian_short_u_is_w() {
+        assert_eq!(cyrillic('ў'), Some("w"));
+        assert_eq!(cyrillic('Ў'), Some("w"));
+        assert_eq!(lower("Каўнас"), "kawnas");
+        assert_eq!(spell("Ў"), spell("w"));
     }
 
     #[test]

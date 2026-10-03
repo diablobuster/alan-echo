@@ -53,7 +53,8 @@ pub fn normalize(raw: &[String]) -> Vec<Word> {
             if let Some(last) = out.last_mut() {
                 // a letter glued to a following "." (`U` `.` `S` `.`): an initialism
                 let dot_next = glued && raw.get(i + 1).is_some_and(|n| n.starts_with('.'));
-                if joins_glued(&last.text, t, dot_next) {
+                let prev_raw = i.checked_sub(1).and_then(|j| raw.get(j)).map_or("", |s| s.as_str());
+                if joins_glued(&last.text, t, dot_next, prev_raw) {
                     // tokens glued on as punctuation (the ".") are part of this word too
                     let from = last.src.last().map_or(i, |s| s + 1);
                     last.src.extend(from..=i);
@@ -121,21 +122,39 @@ const NUM_SUFFIX: &[&str] = &[
 ];
 
 /// Whether glued token `t` continues the written word `prev` (spec §2: digits,
-/// `.`, `,`, `$`, `%`, `/`, `:` and letters). Deliberately narrow, so a PDF line
-/// end without a space (`end.` + `Next`, `2019` + `the`) never fuses two words.
-fn joins_glued(prev: &str, t: &str, dot_next: bool) -> bool {
+/// `.`, `,`, `$`, `%`, `/`, `:` and letters). `prev_raw` is the raw token just
+/// before `t`. Deliberately narrow, so a PDF line end without a space (`end.` +
+/// `Next`, `2019` + `the`, `3,` + `2024`, `Q3` + `2025`) never fuses two words.
+fn joins_glued(prev: &str, t: &str, dot_next: bool, prev_raw: &str) -> bool {
     let mut back = prev.chars().rev();
     let (Some(a), Some(b)) = (back.next(), t.chars().next()) else { return false };
     let digit_before = back.next().is_some_and(|c| c.is_ascii_digit());
     if b.is_ascii_digit() {
-        // 3.|2, 1,|000, 7:|30, 3/|14, $|3, $3|2; never two all-digit tokens (a line end)
         let digits_only = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+        let lead_digits = t.chars().take_while(char::is_ascii_digit).count();
         // a year split by glyph runs: `19` `90` (two other numbers stay two)
-        let split_year = matches!(prev, "19" | "20") && t.len() == 2 && digits_only(t);
-        return split_year
-            || (a.is_ascii_digit() && !(digits_only(prev) && digits_only(t)))
-            || (matches!(a, '.' | ',' | ':' | '/') && digit_before)
-            || is_prefix_char(a);
+        if matches!(prev, "19" | "20") && t.len() == 2 && digits_only(t) {
+            return true;
+        }
+        if a.is_ascii_digit() {
+            // never two all-digit tokens (a line end), nor `Q3` + `2025`
+            let tail = prev.trim_end_matches(|c: char| c.is_ascii_digit());
+            let letter_led = tail.chars().next_back().is_some_and(char::is_alphabetic);
+            return !(digits_only(prev) && digits_only(t)) && !(letter_led && lead_digits >= 3);
+        }
+        if !digit_before {
+            // $|3
+            return is_prefix_char(a);
+        }
+        return match a {
+            // 1,|000: only a thousands group (`3,` + `2024` is a date at a line end)
+            ',' => lead_digits == 3,
+            // 3.|2 only when the "." was its own glued token (`2019.` + `2020` ends a sentence)
+            '.' => prev_raw == ".",
+            // 7:|30, 3/|14, and a range split at a line end: 2019–|2021
+            ':' | '/' | '-' | '\u{2013}' => true,
+            _ => is_prefix_char(a),
+        };
     }
     if !b.is_alphabetic() {
         return false;
@@ -164,11 +183,13 @@ fn joins_glued(prev: &str, t: &str, dot_next: bool) -> bool {
 
 /// Suffixes that are also words (`a`, `am`, `s`, `m`, ...) merge only into a known
 /// pattern, so `2019` + `a` at a PDF line end stays two words: a clock time
-/// (`7am`, `7:30pm`), a decade (`1990s`, `90s`), or money (`$5m`).
+/// (`7am`, `7:30pm`, `7:30a`), a decade (`1990s`, `90s`), or money (`$5m`).
 fn suffix_fits(prev: &str, t: &str) -> bool {
     let digits: String = prev.chars().rev().take_while(char::is_ascii_digit).collect();
     match t {
-        "a" | "p" | "am" | "pm" | "AM" | "PM" => prev.contains(':') || digits.len() <= 2,
+        // `7:30a`; a bare `10` + `a` at a line end is "10 a day", never "ten A"
+        "a" | "p" => prev.contains(':'),
+        "am" | "pm" | "AM" | "PM" => prev.contains(':') || digits.len() <= 2,
         "s" => (digits.len() == 4 || digits.len() == 2) && digits.starts_with('0') && !prev.contains(['.', ',', '$']),
         "m" | "M" | "k" | "K" | "b" | "B" | "bn" | "tn" | "T" => prev.starts_with(is_prefix_char) || t.len() > 1 || t.chars().all(char::is_uppercase),
         _ => true,
@@ -191,6 +212,15 @@ fn ends_sentence(w: &str) -> bool {
     // single capital initial like "A." or "J."
     let letters: Vec<char> = core.chars().filter(|c| c.is_alphabetic()).collect();
     !(letters.len() == 1 && letters[0].is_uppercase() && core.len() == 2)
+}
+
+/// A short month (`Jan.`, `Sept.`) before a word that starts with a digit is a
+/// date ("Jan. 5, 2024"), never a sentence end: a cut there reads "Jan" as a name
+/// with a falling tone. "I met Jan. She ..." still ends the sentence.
+fn month_before_number(w: &str, next: Option<&Word>) -> bool {
+    const SHORT_MONTHS: &[&str] =
+        &["Jan.", "Feb.", "Mar.", "Apr.", "Jun.", "Jul.", "Aug.", "Sept.", "Sep.", "Oct.", "Nov.", "Dec."];
+    SHORT_MONTHS.contains(&w) && next.is_some_and(|n| n.text.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// Conjunctions, prepositions and relatives a phrase can start with: a chunk cut
@@ -239,7 +269,7 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
             sentences.push(start..i);
             start = i;
         }
-        if ends_sentence(&w.text) {
+        if ends_sentence(&w.text) && !month_before_number(&w.text, words.get(i + 1)) {
             sentences.push(start..i + 1);
             start = i + 1;
         }
@@ -612,6 +642,56 @@ mod tests {
         // ... but never next to a number ("iPhone 6 | and")
         let w = words("Some users experienced bending issues from normal use with the iPhone 6 and 6 Plus, particularly.");
         assert_eq!(chunk(&w, 12, 50)[0], 0..8);
+    }
+
+    // ---- final review fixes ----
+    #[test]
+    fn short_month_before_a_number_never_ends_a_sentence() {
+        assert_eq!(chunk(&words("On Jan. 5, 2024, it closed."), 12, 50), vec![0..6]);
+        assert_eq!(chunk(&words("On Nov. 6 the board met."), 12, 50), vec![0..6]);
+        assert_eq!(chunk(&words("Sept. 30"), 12, 50), vec![0..2]);
+        for m in ["Jan.", "Feb.", "Mar.", "Apr.", "Aug.", "Sept.", "Sep.", "Oct.", "Nov.", "Dec."] {
+            let s = format!("By {m} 12 it was done.");
+            assert_eq!(chunk(&words(&s), 12, 50), vec![0..6], "{m}");
+        }
+        // Jan the name still ends a sentence
+        assert_eq!(chunk(&words("I met Jan. She said hi."), 12, 50), vec![0..3, 3..6]);
+        // a month at a real sentence end, before a word
+        assert_eq!(chunk(&words("It shipped in Nov. Then it sold."), 12, 50), vec![0..4, 4..7]);
+    }
+
+    #[test]
+    fn line_end_punctuated_number_does_not_glue_the_next_number() {
+        let t = |v: &[&str]| texts(&normalize(&raw(v))).into_iter().map(String::from).collect::<Vec<_>>();
+        // `3,` then `2024` at a PDF line end: a date, two words
+        assert_eq!(t(&["Jan. ", "3", ",", "2024 "]), vec!["Jan.", "3,", "2024"]);
+        assert_eq!(t(&["Jan. ", "3,", "2024 "]), vec!["Jan.", "3,", "2024"]);
+        // `2019.` (one token) then `2020`: a sentence end, not a decimal
+        assert_eq!(t(&["in ", "2019.", "2020 ", "was"]), vec!["in", "2019.", "2020", "was"]);
+        // `Q3` then `2025`
+        assert_eq!(t(&["in ", "Q3", "2025 "]), vec!["in", "Q3", "2025"]);
+        // `10` then `a`
+        assert_eq!(t(&["about ", "10", "a ", "day"]), vec!["about", "10", "a", "day"]);
+        assert_eq!(t(&["at ", "7", "a ", "dog"]), vec!["at", "7", "a", "dog"]);
+        // the real merges still hold
+        assert_eq!(t(&["about ", "1", ",", "000 ", "people"]), vec!["about", "1,000", "people"]);
+        assert_eq!(t(&["1", ",", "000", ",", "000 "]), vec!["1,000,000"]);
+        assert_eq!(t(&["$", "3", ".", "2B "]), vec!["$3.2B"]);
+        assert_eq!(t(&["8", ".", "6", "% "]), vec!["8.6%"]);
+        assert_eq!(t(&["7", ":", "30", "pm "]), vec!["7:30pm"]);
+        assert_eq!(t(&["7:30", "am "]), vec!["7:30am"]);
+        assert_eq!(t(&["U", ".", "S", ". "]), vec!["U.S."]);
+        assert_eq!(t(&["on ", "3", "/", "14 "]), vec!["on", "3/14"]);
+    }
+
+    #[test]
+    fn line_end_dash_after_a_year_rejoins_the_range() {
+        let t = |v: &[&str]| texts(&normalize(&raw(v))).into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(t(&["from ", "2019\u{2013}", "2021 ", "it"]), vec!["from", "2019\u{2013}2021", "it"]);
+        assert_eq!(t(&["from ", "2019", "\u{2013}", "2021 "]), vec!["from", "2019\u{2013}2021"]);
+        assert_eq!(t(&["from ", "2019-", "2021 "]), vec!["from", "2019-2021"]);
+        // a dash then a word still stays apart from the next number's rules
+        assert_eq!(t(&["the ", "2019\u{2013}", "then "]), vec!["the", "2019\u{2013}", "then"]);
     }
 
     #[test]

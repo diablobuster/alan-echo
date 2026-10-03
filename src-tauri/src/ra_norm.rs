@@ -260,6 +260,23 @@ mod tests {
         }
     }
 
+    /// A short month + day + year in one chunk (the chunker keeps them together).
+    #[test]
+    fn short_month_dates_read_as_dates() {
+        let w = ["On", "Jan.", "5,", "2024,", "it", "closed."];
+        assert_eq!(spans(&w), vec![span(1, 3, "January fifth,"), span(3, 4, "twenty twenty four,")]);
+        let w = ["On", "Nov.", "6", "the", "board", "met."];
+        assert_eq!(spans(&w), vec![span(1, 3, "November sixth")]);
+        assert_eq!(spans(&["Sept.", "30"]), vec![span(0, 2, "September thirtieth")]);
+        // a year after "Month D," is a year even with other numbers around
+        let w = ["Sales", "of", "3", "units", "on", "Jan.", "5,", "2024", "and", "Feb.", "9,", "1998."];
+        let s = spans(&w);
+        assert!(s.contains(&span(7, 8, "twenty twenty four")), "{s:?}");
+        assert!(s.contains(&span(11, 12, "nineteen ninety eight.")), "{s:?}");
+        // Jan the name is untouched
+        assert!(spans(&["I", "met", "Jan.", "She", "said", "hi."]).is_empty());
+    }
+
     #[test]
     fn spans_handle_curly_apostrophes() {
         let w = ["the", "U.S.’s", "debt"];

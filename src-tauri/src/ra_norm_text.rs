@@ -22,8 +22,10 @@ enum Rule {
     Always,
     /// A title: only when the next word is a capitalised name (`Sen. Warren`).
     Title,
-    /// Only before a number (`No. 5`, `p. 12`).
+    /// Only before a number or a Roman numeral (`p. 12`, `Vol. III`).
     Number,
+    /// Only before a digit (`No. 5`, `Jan. 5`); never before a letter (`No. C.`).
+    Digit,
     /// `Sat.` / `Sun.`: only before a number or a month (they are also words).
     DateNext,
     /// `Dr.`: Drive after a street name, else Doctor.
@@ -72,10 +74,10 @@ static ABBREVS: &[(&str, &str, Rule)] = &[
     ("Hwy.", "highway", Rule::Always),
     ("I.e.", "that is", Rule::Always),
     ("Inc.", "incorporated", Rule::Always),
-    ("Jan.", "january", Rule::Always),
+    ("Jan.", "january", Rule::Digit),
     ("Jr.", "junior", Rule::Always),
     ("Jul.", "july", Rule::Always),
-    ("Jun.", "june", Rule::Always),
+    ("Jun.", "june", Rule::Digit),
     ("Ln.", "lane", Rule::Always),
     ("Lt.", "lieutenant", Rule::Title),
     ("Ltd.", "limited", Rule::Always),
@@ -88,8 +90,8 @@ static ABBREVS: &[(&str, &str, Rule)] = &[
     ("Ms.", "miz", Rule::Always),
     ("Mt.", "mount", Rule::Title),
     ("Mtn.", "mountain", Rule::Always),
-    ("No.", "number", Rule::Number),
-    ("Nos.", "numbers", Rule::Number),
+    ("No.", "number", Rule::Digit),
+    ("Nos.", "numbers", Rule::Digit),
     ("Nov.", "november", Rule::Always),
     ("Oct.", "october", Rule::Always),
     ("P.M.", "P M", Rule::Always),
@@ -140,8 +142,8 @@ static ABBREVS: &[(&str, &str, Rule)] = &[
     ("mins.", "minutes", Rule::Always),
     ("mos.", "months", Rule::Always),
     ("natl.", "national", Rule::Always),
-    ("no.", "number", Rule::Number),
-    ("nos.", "numbers", Rule::Number),
+    ("no.", "number", Rule::Digit),
+    ("nos.", "numbers", Rule::Digit),
     ("p.", "page", Rule::Number),
     ("p.m.", "P M", Rule::Always),
     ("pct.", "percent", Rule::Always),
@@ -361,6 +363,24 @@ static ROMAN_REGNAL: &[&str] = &[
     "Queen",
     "Richard",
     "William",
+    // END SORTED
+];
+
+/// Abbreviations that never come before a name, so a capital after them starts a
+/// new sentence (`Apple Inc. Shares rose`). Sorted.
+static SUFFIX_ABBREVS: &[&str] = &[
+    // BEGIN SORTED
+    "A.M.", "Bros.", "Co.", "Corp.", "Esq.", "Inc.", "Jr.", "Ltd.", "P.M.", "Sr.", "a.m.", "etc.",
+    "p.m.",
+    // END SORTED
+];
+
+/// Units that are also words or letters (`one gal`, `Route 66 W`): they expand
+/// only after digits, never after a number word. Single letters are always in
+/// this class. Sorted.
+static UNITS_DIGITS_ONLY: &[&str] = &[
+    // BEGIN SORTED
+    "gal", "ha", "in", "mi", "min", "s",
     // END SORTED
 ];
 
@@ -1040,6 +1060,21 @@ fn roman(w: &[&str], i: usize, numeral: &str) -> Option<String> {
         if single && !matches!(numeral, "I" | "V" | "X") {
             return None;
         }
+        // A lone I is usually the pronoun (`the Cold War I moved`, `Part I think`).
+        // Read it only after World/Great War or when it ends the clause.
+        if numeral == "I" {
+            let named_war = prev.core == "War"
+                && i.checked_sub(2)
+                    .and_then(|j| tok(w, j))
+                    .is_some_and(|t| t.core == "World" || t.core == "Great");
+            let me = tok(w, i);
+            let clause_end = i + 1 >= w.len()
+                || me.is_some_and(|t| !t.trail.is_empty() || t.core.ends_with('.'))
+                || (next_is_cap(w, i) && !next_is_starter(w, i));
+            if !named_war && !clause_end {
+                return None;
+            }
+        }
         return Some(cardinal(value.into()));
     }
     if has(ROMAN_REGNAL, prev.core) {
@@ -1226,8 +1261,9 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             Rule::Number => (next_is_number(w, i)
                 || next_core(w, i)
                     .map(|c| strip_period(c).0)
-                    .is_some_and(|c| c != "I" && roman_value(c).is_some()))
+                    .is_some_and(|c| c.len() >= 2 && roman_value(c).is_some()))
             .then_some(said),
+            Rule::Digit => next_is_number(w, i).then_some(said),
             Rule::DateNext => (next_is_number(w, i)
                 || next_core(w, i).is_some_and(|c| MONTHS.contains(&c)))
             .then_some(said),
@@ -1245,13 +1281,15 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             }
         };
         if let Some(said) = said {
-            return one(said.to_string(), sentence_end(w, i));
+            let period = sentence_end(w, i) || (has(SUFFIX_ABBREVS, core) && next_is_cap(w, i));
+            return one(said.to_string(), period);
         }
     }
 
     // Dotted initialisms, also glued to a hyphenated word (`U.S.-China`).
     if let Some((said, period)) = initialism(core) {
-        return one(said, period && sentence_end(w, i));
+        // `the U.S. Trump said` is ambiguous: keep the pause before any capital.
+        return one(said, period && (sentence_end(w, i) || next_is_cap(w, i)));
     }
     if let Some((left, right)) = core.split_once('-') {
         if let Some((said, _)) = initialism(left) {
@@ -1309,12 +1347,25 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
                 }
             }
         }
-        let prev_money = tok(w, i - 1).is_some_and(|p| p.core.contains(['$', '€', '£', '¥', '₹']));
-        if let Some((one_u, many, _)) = unit(body) {
-            if !(body == "m" && prev_money) {
-                let singular = tok(w, i - 1).is_some_and(|p| p.core == "1" || p.core == "one");
-                return one((if singular { one_u } else { many }).to_string(), period);
-            }
+        let prev = tok(w, i - 1);
+        let prev_money = prev.is_some_and(|p| p.core.contains(['$', '€', '£', '¥', '₹']));
+        let prev_digits =
+            prev.is_some_and(|p| p.core.chars().last().is_some_and(|c| c.is_ascii_digit()));
+        let single = body.chars().count() == 1;
+        let ambiguous = single || has(UNITS_DIGITS_ONLY, body);
+        // `Route 66 W`: a single letter after a number that follows a name is a
+        // direction or a label, not a unit.
+        let after_name = i
+            .checked_sub(2)
+            .and_then(|j| tok(w, j))
+            .is_some_and(|p| is_cap(p.core) && p.trail.is_empty());
+        let ok = !(ambiguous && !prev_digits)
+            && !(single && after_name)
+            && !has(ROMAN_NEVER, body)
+            && !(body == "m" && prev_money);
+        if let Some((one_u, many, _)) = unit(body).filter(|_| ok) {
+            let singular = prev.is_some_and(|p| p.core == "1" || p.core == "one");
+            return one((if singular { one_u } else { many }).to_string(), period);
         }
     }
     if let Some(said) = glued_unit(body)
@@ -1513,8 +1564,10 @@ mod tests {
     #[test]
     fn handle() {
         assert_eq!(render("@ElonMusk"), "at elon musk");
-        // A lowercase blob has no case boundary; the CMU split is downstream (ra_names).
-        assert_eq!(render("@elonmusk"), "at elonmusk");
+        // Controller ruling: a lowercase blob has no case boundary, so text_spans
+        // does NOT meet the §3 "at elon musk" row here. Dictionary segmentation
+        // ("elonmusk" -> "elon musk") happens in ra_names' NameFallback (Task 3).
+        assert_eq!(sp("@elonmusk"), vec![(0, 1, "at elonmusk".to_string())]);
         assert_eq!(render("@john_doe"), "at john underscore doe");
     }
 
@@ -1741,6 +1794,58 @@ mod tests {
             number_words(&"9".repeat(60)).map(|s| s.split(' ').count()),
             Some(60)
         );
+    }
+
+    #[test]
+    fn lone_i_after_a_trigger_is_usually_the_pronoun() {
+        assert_eq!(render("the Cold War I moved"), "the Cold War I moved");
+        assert_eq!(render("Before the War I lived"), "Before the War I lived");
+        assert_eq!(render("Part I think"), "Part I think");
+        assert_eq!(render("In Class I learned"), "In Class I learned");
+        assert_eq!(render("World War I ended"), "World War one ended");
+        assert_eq!(render("after Great War I"), "after Great War one");
+        assert_eq!(render("Chapter I."), "Chapter one.");
+        assert_eq!(render("Part I, the start"), "Part one, the start");
+        assert_eq!(render("Part I Introduction"), "Part one Introduction");
+        assert_eq!(render("in Part I"), "in Part one");
+    }
+
+    #[test]
+    fn no_needs_a_digit() {
+        assert_eq!(render("Is it A? No. C."), "Is it A? No. C.");
+        assert_eq!(render("No. IV"), "No. IV");
+        assert_eq!(render("No. 5"), "number 5");
+        assert_eq!(render("Vol. III"), "volume three");
+    }
+
+    #[test]
+    fn ambiguous_units_need_digits() {
+        assert_eq!(render("one gal told me"), "one gal told me");
+        assert_eq!(render("Route 66 W"), "Route 66 W");
+        assert_eq!(render("ten W"), "ten W");
+        assert_eq!(render("60 W bulb"), "60 watts bulb");
+        assert_eq!(render("5 gal tank"), "5 gallons tank");
+        assert_eq!(render("five km away"), "five kilometers away");
+    }
+
+    #[test]
+    fn jan_and_jun_need_a_day() {
+        assert_eq!(render("Jan. 5"), "january 5");
+        assert_eq!(render("Jun. 12th"), "june 12th");
+        assert_eq!(render("met Jan. today"), "met Jan. today");
+        assert_eq!(render("said Jun."), "said Jun.");
+        assert_eq!(render("Feb. 3"), "february 3");
+    }
+
+    #[test]
+    fn initialism_before_a_capital_keeps_the_period() {
+        assert_eq!(render("the U.S. Trump said"), "the U S. Trump said");
+        assert_eq!(
+            render("Apple Inc. Shares rose"),
+            "Apple incorporated. Shares rose"
+        );
+        assert_eq!(render("Mr. Smith"), "mister Smith");
+        assert_eq!(render("the U.S. economy"), "the U S economy");
     }
 
     #[test]

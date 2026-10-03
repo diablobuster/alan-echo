@@ -582,6 +582,58 @@ fn fraction_words(num: u64, den: u64) -> String {
     format!("{} {den_word}", cardinal(num))
 }
 
+/// A day-month date (`25/12` -> "the twenty fifth of December"): only when the
+/// day is above 12, so it cannot be a US month/day.
+fn day_month_words(d: u64, m: u64, y: Option<&str>) -> Option<String> {
+    if !(13..=31).contains(&d) || !(1..=12).contains(&m) {
+        return None;
+    }
+    let base = format!("the {} of {}", ordinal(d), MONTHS[(m - 1) as usize]);
+    Some(match y {
+        None => base,
+        Some(y) if y.len() == 4 => format!("{base}, {}", year(y.parse().ok()?)),
+        Some(y) if y.len() == 2 => format!("{base}, {}", two_digit_year(y)),
+        Some(_) => return None,
+    })
+}
+
+/// Units a fraction can measure, as written after it (lowercase key, sorted) ->
+/// the singular said ("3/4 cup" -> "three quarters of a cup").
+static FRACTION_UNITS: [(&str, &str); 52] = [
+    ("acre", "acre"), ("acres", "acre"), ("cm", "centimeter"), ("cup", "cup"), ("cups", "cup"),
+    ("feet", "foot"), ("foot", "foot"), ("ft", "foot"), ("gal", "gallon"), ("gallon", "gallon"),
+    ("gallons", "gallon"), ("hour", "hour"), ("hours", "hour"), ("hr", "hour"), ("in", "inch"),
+    ("inch", "inch"), ("inches", "inch"), ("kg", "kilogram"), ("lb", "pound"), ("lbs", "pound"),
+    ("liter", "liter"), ("liters", "liter"), ("litre", "liter"), ("litres", "liter"), ("mi", "mile"),
+    ("mile", "mile"), ("miles", "mile"), ("min", "minute"), ("minute", "minute"), ("minutes", "minute"),
+    ("mm", "millimeter"), ("ounce", "ounce"), ("ounces", "ounce"), ("oz", "ounce"), ("pint", "pint"),
+    ("pints", "pint"), ("pound", "pound"), ("pounds", "pound"), ("qt", "quart"), ("quart", "quart"),
+    ("quarts", "quart"), ("second", "second"), ("stick", "stick"), ("sticks", "stick"),
+    ("tablespoon", "tablespoon"), ("tablespoons", "tablespoon"), ("tbsp", "tablespoon"),
+    ("teaspoon", "teaspoon"), ("teaspoons", "teaspoon"), ("tsp", "teaspoon"), ("yard", "yard"),
+    ("yards", "yard"),
+];
+
+/// `a/b` with 1 <= a < b <= 64 (a common fraction), as (a, b).
+fn common_fraction(core: &str) -> Option<(u64, u64)> {
+    let (a, b) = core.split_once('/')?;
+    if a.is_empty() || b.is_empty() || a.len() > 2 || b.len() > 2 || !all_digits(a) || !all_digits(b) {
+        return None;
+    }
+    let (a, b) = (a.parse::<u64>().ok()?, b.parse::<u64>().ok()?);
+    (a >= 1 && a < b && b <= 64).then_some((a, b))
+}
+
+/// A fraction measuring a unit: "thirteen sixteenths of an inch", "half a cup".
+fn fraction_of_unit(a: u64, b: u64, unit: &str) -> String {
+    let art = if unit.starts_with(['a', 'e', 'i', 'o', 'u']) || unit == "hour" { "an" } else { "a" };
+    if (a, b) == (1, 2) {
+        format!("half {art} {unit}")
+    } else {
+        format!("{} of {art} {unit}", fraction_words(a, b))
+    }
+}
+
 /// `1/2`, `3/14`, `3/14/2025`, `24/7`; ratings (`9/10` -> "nine out of ten") and
 /// blood pressure (`120/80` -> "one hundred twenty over eighty").
 fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
@@ -616,8 +668,11 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         if (2..=10).contains(&b) && a >= 1 && a < b {
             return Some(fraction_words(a, b));
         }
+        if a == 24 && b == 7 {
+            return Some("twenty four seven".into());
+        }
         if short {
-            if let Some(d) = date_words(a, b, None) {
+            if let Some(d) = date_words(a, b, None).or_else(|| day_month_words(a, b, None)) {
                 return Some(d);
             }
         }
@@ -632,7 +687,7 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         }
     }
     if parts.len() == 3 && parts[0].len() <= 2 && parts[1].len() <= 2 {
-        if let Some(d) = date_words(n[0], n[1], Some(parts[2])) {
+        if let Some(d) = date_words(n[0], n[1], Some(parts[2])).or_else(|| day_month_words(n[0], n[1], Some(parts[2]))) {
             return Some(d);
         }
     }
@@ -1168,6 +1223,32 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
         if let (Some(d), true) = (day_of(core), glued && c2.len() > 3 && month_of(c2).is_some()) {
             return Some((i + 1, format!("{lead}the {} of", ordinal(d))));
         }
+        // A fraction before a unit or "of": "13/16 inch", "3/4 cup", "2/3 of".
+        if let (Some((a, b)), true, true) = (common_fraction(core), glued, lead.is_empty()) {
+            let key = c2.to_ascii_lowercase();
+            if key == "of" {
+                return Some((i + 1, fraction_words(a, b)));
+            }
+            // a bare "in" is a unit only before a lowercase word ("3/8 in thick", not "5/10 in 2024")
+            let bare_in = key == "in" && t2.is_empty();
+            let in_ok = !bare_in
+                || words.get(i + 2).is_some_and(|w| {
+                    let c = split_punct(w).1;
+                    c.chars().next().is_some_and(char::is_lowercase)
+                        && !matches!(c, "the" | "a" | "an" | "my" | "his" | "her" | "its" | "our" | "their" | "this" | "that")
+                });
+            if let (Ok(k), true) = (FRACTION_UNITS.binary_search_by(|e| e.0.cmp(key.as_str())), in_ok) {
+                let unit = FRACTION_UNITS[k].1;
+                // an abbreviation's period ("in.") ends the sentence only before a capital or nothing
+                let abbr = !c2.eq_ignore_ascii_case(unit) && !key.starts_with(unit);
+                let next_lower = words
+                    .get(i + 2)
+                    .and_then(|w| split_punct(w).1.chars().next())
+                    .is_some_and(|c| !c.is_uppercase());
+                let t2 = if abbr && next_lower { t2.strip_prefix('.').unwrap_or(t2) } else { t2 };
+                return Some((i + 2, format!("{}{t2}", fraction_of_unit(a, b, unit))));
+            }
+        }
         // Currency amount + a scale word: "$5 billion", "€18.5 million".
         if let (Some((cur, rest)), true) = (currency_prefix(core), glued) {
             if let (Some((amt, None)), Some(sc)) =
@@ -1436,6 +1517,45 @@ mod tests {
         assert_eq!(one("1/2"), "one half");
         assert_eq!(one("3/4"), "three quarters");
         assert_eq!(one("2/3"), "two thirds");
+    }
+
+    /// Round 2: a fraction before a unit or "of" reads as a fraction, with
+    /// "of a/an <unit>" for a unit; any denominator up to 64.
+    #[test]
+    fn fractions_before_a_unit_or_of() {
+        let t = |s: &str, start: usize| at(s, start);
+        assert_eq!(t("a 13/16 inch bolt", 1), (3, "thirteen sixteenths of an inch".to_string()));
+        assert_eq!(t("cut 3/8 in. thick", 1), (3, "three eighths of an inch".to_string()));
+        assert_eq!(t("add 3/4 cup sugar", 1), (3, "three quarters of a cup".to_string()));
+        assert_eq!(t("add 3/4 cups sugar", 1), (3, "three quarters of a cup".to_string()));
+        assert_eq!(t("add 1/2 tsp salt", 1), (3, "half a teaspoon".to_string()));
+        assert_eq!(t("about 1/2 inch.", 1), (3, "half an inch.".to_string()));
+        assert_eq!(t("a 5/32 mile stretch", 1), (3, "five thirty seconds of a mile".to_string()));
+        assert_eq!(t("only 7/64 oz", 1), (3, "seven sixty fourths of an ounce".to_string()));
+        assert_eq!(t("won 2/3 of the vote", 1), (2, "two thirds".to_string()));
+        assert_eq!(t("about 11/16 of it", 1), (2, "eleven sixteenths".to_string()));
+        assert!(FRACTION_UNITS.windows(2).all(|p| p[0].0 < p[1].0), "FRACTION_UNITS sorted");
+        // a bare "in" before a year or a name is the preposition
+        assert_eq!(t("due 5/10 in 2024", 1), (2, "May tenth".to_string()));
+        // without a unit or "of", unchanged
+        assert_eq!(one("13/16"), "thirteen sixteen");
+        assert_eq!(one("3/4"), "three quarters");
+    }
+
+    /// Round 2: a day above 12 reads as a day-month date (UK); US month/day stays the default.
+    #[test]
+    fn day_month_dates_when_the_day_is_above_twelve() {
+        assert_eq!(one("25/12"), "the twenty fifth of December");
+        assert_eq!(one("31/1"), "the thirty first of January");
+        assert_eq!(one("25/12/2025"), "the twenty fifth of December, twenty twenty five");
+        assert_eq!(one("13/04/24"), "the thirteenth of April, twenty four");
+        // US default
+        assert_eq!(one("12/10"), "December tenth");
+        assert_eq!(one("3/14"), "March fourteenth");
+        assert_eq!(one("3/14/2025"), "March fourteenth, twenty twenty five");
+        // not dates
+        assert_eq!(one("60/40"), "sixty forty");
+        assert_eq!(one("20/20"), "twenty twenty");
     }
 
     #[test]

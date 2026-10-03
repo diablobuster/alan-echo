@@ -2009,7 +2009,9 @@ mod tests {
                     continue; // a lone letter after a number word is not a unit ("two V")
                 }
                 let got = last(&[n, u]);
-                if got != *many {
+                // round 2: "1/2 cup" -> "half a cup" for a measuring unit
+                let half = n == "1/2" && got.starts_with("half a") && got.ends_with(one_u.trim_end_matches('s'));
+                if got != *many && !half {
                     bad.push(format!("{n} {u}: {got:?} (want {many:?})"));
                 }
             }

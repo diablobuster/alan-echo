@@ -7,6 +7,8 @@ import LicenseGate from './components/LicenseGate'
 import EulaGate from './components/EulaGate'
 import UpdateBanner from './components/UpdateBanner'
 import { invoke } from '@tauri-apps/api/core'
+import ReadAloudOverlay from './components/ReadAloudOverlay'
+import NowReadingPill from './components/NowReadingPill'
 import { applyTheme } from './theme'
 import { EULA_VERSION } from './legal/eulaVersion'
 
@@ -98,4 +100,16 @@ function App() {
   return <><UpdateBanner /><Dashboard /></>
 }
 
-createRoot(document.getElementById('root')).render(<App />)
+// Route by window label BEFORE App mounts: the read-aloud windows must not
+// run App's EULA/license/engine init.
+// (Read from Tauri's injected metadata; a static window.js import would defeat
+// Dashboard's dynamic import of the same module.)
+const label = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label
+const root = createRoot(document.getElementById('root'))
+if (label === 'ra-overlay' || label === 'ra-pill') {
+  // Synchronously, before first paint, so there is no opaque first frame.
+  document.documentElement.classList.add('ra-window')
+}
+if (label === 'ra-overlay') root.render(<ReadAloudOverlay />)
+else if (label === 'ra-pill') root.render(<NowReadingPill />)
+else root.render(<App />)

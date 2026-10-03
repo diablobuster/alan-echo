@@ -229,9 +229,10 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
 /// word) when misaki knows the lowercase word (`known`), the names dictionary
 /// knows it (`names_knows`, e.g. PELOSI), or it is 5+ letters (the letter-to-sound
 /// model says it). It stays caps (spelled) when it is a common acronym
-/// (`KEEP_CAPS`), the lexicon has the caps spelling itself (`known(upper)`, e.g.
-/// NATO), or it is a short unknown (GDP, NFLX). Leading/trailing punctuation,
-/// possessive 'S and hyphen-joined parts are handled. Never panics.
+/// (`KEEP_CAPS`, `ra_names::SPELLED`), has no vowel (HTTPS), the lexicon has the
+/// caps spelling itself (`known(upper)`, e.g. NATO), or it is a short unknown (GDP).
+/// Leading/trailing punctuation, possessive 'S and hyphen-joined parts are handled.
+/// Never panics.
 pub fn speakable_caps<'a>(word: &'a str, known: &dyn Fn(&str) -> bool, names_knows: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
     if !word.contains('-') {
         return caps_part(word, known, names_knows);
@@ -259,7 +260,9 @@ fn caps_part<'a>(w: &'a str, known: &dyn Fn(&str) -> bool, names_knows: &dyn Fn(
     if base.chars().count() < 2 || !base.chars().all(|c| c.is_alphabetic() && c.is_uppercase()) {
         return Cow::Borrowed(w);
     }
-    if KEEP_CAPS.contains(&base) || known(base) {
+    // an acronym (spelled list) or a caps run with no vowel (HTTPS, NFLX) is never a word
+    let no_vowel = !base.chars().any(|c| matches!(c, 'A' | 'E' | 'I' | 'O' | 'U' | 'Y'));
+    if KEEP_CAPS.contains(&base) || crate::ra_names::SPELLED.contains(&base) || no_vowel || known(base) {
         return Cow::Borrowed(w);
     }
     let lower = base.to_lowercase();
@@ -319,6 +322,17 @@ mod tests {
         for w in ["FBI", "GDP", "CEO", "US", "IT", "WHO", "AM", "PM", "OK", "ID", "US.", "NATO", "NASA", "A", "I"] {
             assert_eq!(caps(w), w, "{w}");
         }
+    }
+
+    #[test]
+    fn caps_without_a_vowel_or_on_the_spelled_list_stay_caps() {
+        // HTTPS is 5+ letters but has no vowel; AWS/SEC/FYI are words to some dictionary
+        // every lowercase word is known; no caps spelling is
+        let lower_known = |w: &str| !w.chars().any(char::is_uppercase);
+        for w in ["HTTPS", "NFLX", "HTTPS,", "AWS", "SEC", "SEC'S", "FYI", "CPU"] {
+            assert_eq!(speakable_caps(w, &lower_known, &lower_known), w, "{w}");
+        }
+        assert_eq!(speakable_caps("SPY", &known, &|w| w == "spy"), "spy", "Y counts as a vowel");
     }
 
     #[test]

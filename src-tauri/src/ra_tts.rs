@@ -9,7 +9,7 @@
 use crate::{
     ra_g2pen::G2pEn,
     ra_homograph, ra_model,
-    ra_names::{Lts, NameFallback, Names},
+    ra_names::{self, Lex, Lts, NameFallback, Names},
     ra_norm, ra_text,
     ra_timing::{self, WordTime},
     ra_wsola,
@@ -813,15 +813,20 @@ fn g2p_chunk<'a>(g: &G2P, names: &Names, words: &[&'a str], depth: u8) -> Fed<'a
     Fed { words, inner, spoken }
 }
 
-/// The pre-existing per-word path: hand override, caps rule, page brackets.
+/// The per-word path outside spans: hand override, acronym/CamelCase rule
+/// (`rule_override`), caps rule, page brackets.
 fn word_path<'b>(g: &G2P, names: &Names, w: &'b str) -> Cow<'b, str> {
     let known = |x: &str| lexicon_knows(&g.lexicon, x);
     let names_knows = |x: &str| names.knows(x);
+    let lex_knows = |x: &str| lexicon_has(&g.lexicon, x);
+    let lex_phonemes = |x: &str| lexicon_phonemes(&g.lexicon, x);
+    let lex = Lex { knows: &lex_knows, phonemes: &lex_phonemes };
     let part = |p: &'b str| -> Cow<'b, str> {
-        match hand_override(p, names) {
-            Some(o) => Cow::Owned(o),
-            None => unbracket(ra_text::speakable_caps(p, &known, &names_knows)),
+        // hand list, then the acronym / CamelCase / compound rules, then the caps rule
+        if let Some(o) = hand_override(p, names).or_else(|| rule_override(p, names, &lex)) {
+            return Cow::Owned(o);
         }
+        unbracket(ra_text::speakable_caps(p, &known, &names_knows))
     };
     if !w.contains('-') {
         return part(w);
@@ -943,6 +948,45 @@ fn hand_override(w: &str, names: &Names) -> Option<String> {
     let lead = unbracket(Cow::Borrowed(&w[..start]));
     let trail = unbracket(Cow::Borrowed(&w[end..]));
     Some(format!("{lead}[{core}](/{ph}/){trail}"))
+}
+
+/// A word (no hyphen, no digit) that an acronym or compound rule reads, as misaki's
+/// phoneme override with its punctuation kept: `SEC's` -> `[SEC's](/ˌɛsˌisˈiz/)`,
+/// `TechReview` -> its parts, `elonmusk` -> "elon musk". Plain all-caps words with a
+/// vowel (FBI, NASA) stay with misaki and the caps rule; words with digits stay with
+/// misaki (and the number pre-pass).
+fn rule_override(w: &str, names: &Names, lex: &Lex) -> Option<String> {
+    let start = w.find(char::is_alphanumeric)?;
+    let (last, ch) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric())?;
+    let end = last + ch.len_utf8();
+    let core = &w[start..end];
+    if !core.chars().all(|c| c.is_ascii_alphabetic() || c == '\'' || c == '\u{2019}') {
+        return None;
+    }
+    let bare_caps = core.bytes().all(|b| b.is_ascii_uppercase());
+    let acronym = if bare_caps && !ra_names::SPELLED.contains(&core) { None } else { names.acronym(core, lex) };
+    let ph = acronym.or_else(|| names.compound(core, lex))?;
+    if ph.is_empty() || ph.contains(['[', ']', '(', ')', '/']) {
+        return None;
+    }
+    let lead = unbracket(Cow::Borrowed(&w[..start]));
+    let trail = unbracket(Cow::Borrowed(&w[end..]));
+    Some(format!("{lead}[{core}](/{ph}/){trail}"))
+}
+
+/// The misaki gold lexicon has an entry for `w` itself, in any case misaki matches.
+/// No stems and no silver (silver adds forms like "deeps" that would split
+/// "deepseek" as "deeps eek"); `lexicon_phonemes` still finds both.
+fn lexicon_has(lx: &Lexicon, w: &str) -> bool {
+    lx.in_gold(w)
+}
+
+/// The misaki lexicon's phonemes for `w` (noun reading first), if it has them.
+/// Tagged entries may have no noun reading (seek): verb, adjective, adverb next.
+fn lexicon_phonemes(lx: &Lexicon, w: &str) -> Option<String> {
+    ["NN", "VB", "JJ", "RB"]
+        .iter()
+        .find_map(|tag| lx.get_word(w, tag, None, None).map(|(p, _)| p).filter(|p| !p.trim().is_empty()))
 }
 
 /// A `g2p_words` entry as misaki tokenizes it: every `[text](/ph/)` override
@@ -1505,6 +1549,175 @@ mod tests {
             let _ = g2p_words(g, test_names(), &words);
         }
         assert!(t.elapsed() < Duration::from_millis(500), "{:?} for 100 chunks", t.elapsed());
+    }
+
+    // ---- phase 3 task 3: acronyms, CamelCase, compounds, fold through the real path ----
+
+    fn say(w: &str) -> String {
+        spoken(&["The", w, "said."])[1].clone()
+    }
+
+    fn tight(w: &str) -> String {
+        kokoro_phonemes(&crate::ra_names::spell_tight(w))
+    }
+
+    #[test]
+    fn spelled_list_and_suffixed_acronyms_read_letters() {
+        for (w, stem, suf) in [
+            ("SEC", "SEC", ""),
+            ("SEC's", "SEC", "z"),
+            ("AWS", "AWS", ""),
+            ("GPUs", "GPU", "z"),
+            ("ETFs", "ETF", "s"),
+            ("HTTPS", "HTTPS", ""),
+            ("FTX's", "FTX", "ɪz"),
+            ("SVB's", "SVB", "z"),
+            ("QQQ", "QQQ", ""),
+            ("NVMe", "NVMe", ""),
+            ("PCIe", "PCIe", ""),
+            ("FYI", "FYI", ""),
+            ("IPOs", "IPO", "z"),
+            ("CEOs", "CEO", "z"),
+        ] {
+            assert_eq!(say(w), format!("{}{suf}", tight(stem)), "{w}");
+        }
+    }
+
+    #[test]
+    fn word_acronyms_are_still_words() {
+        for w in ["NASA", "NATO", "COVID", "AIDS", "NASA's", "FEMA's", "OPEC"] {
+            let p = say(w);
+            let marks = p.matches(['ˈ', 'ˌ']).count();
+            assert!(marks < 3, "{w} spelled: {p}");
+            let fed = g2p_words(test_g2p(), test_names(), &[w]);
+            assert!(!fed[0].contains('['), "{w} -> {}", fed[0]);
+        }
+    }
+
+    #[test]
+    fn camel_case_brands_read_their_parts() {
+        for (w, has) in [
+            ("TechReview", &["tˈɛk", "vjˈu"][..]),
+            ("OpenAI", &["ˈOpən", "A", "ˈI"][..]),
+            ("JPMorgan", &["ʤˌA", "pˈi", "mˈɔɹɡ"][..]),
+            ("PostgreSQL", &["ɛskjˌu", "ˈɛl"][..]),
+            ("iHeartMedia", &["ˈI", "hˈɑ", "ɹt", "mˈidiə"][..]),
+            ("UnitedHealth", &["ju", "nˈI", "hˈɛlθ"][..]),
+            ("DocuSign", &["sˈIn"][..]),
+            ("DeepSeek", &["dˈip", "sˈik"][..]),
+            ("ChatGPT", &["ʧˈæt", "ʤˌi"][..]),
+        ] {
+            // length marks (ː) vary between lexicon entries; the sounds are what count
+            let p = say(w).replace('ː', "");
+            let mut at = 0;
+            for h in has {
+                let Some(i) = p[at..].find(h) else { panic!("{w}: {h:?} not in {p:?} (after byte {at})") };
+                at += i + h.len();
+            }
+            assert!(!p.contains(' '), "{w}: one word, no gap: {p:?}");
+        }
+    }
+
+    #[test]
+    fn camel_case_known_words_are_not_split() {
+        let words = ["McDonald", "iPhone", "YouTube", "McDonald's", "LinkedIn"];
+        let fed = g2p_words(test_g2p(), test_names(), &words);
+        for (w, f) in words.iter().zip(&fed) {
+            assert!(matches!(f, Cow::Borrowed(_)), "{w} -> {f}");
+        }
+    }
+
+    #[test]
+    fn lowercase_compounds_read_as_two_words() {
+        let musk = say("musk");
+        assert!(say("elonmusk").ends_with(&musk), "{} / {musk}", say("elonmusk"));
+        assert!(say("elonmusk").starts_with("ˈil") || say("elonmusk").starts_with("ˈɛl"), "{}", say("elonmusk"));
+        assert_eq!(say("techreview"), format!("{}{}", say("tech"), say("review")));
+        assert_eq!(say("deepseek"), format!("{}{}", say("deep"), say("seek")));
+        // real words (misaki lexicon or CMUdict) are never segmented
+        let words = ["together", "carpet", "kingdom", "manage", "nowhere", "pelosi", "therapist"];
+        let fed = g2p_words(test_g2p(), test_names(), &words);
+        for (w, f) in words.iter().zip(&fed) {
+            assert!(matches!(f, Cow::Borrowed(_)), "{w} -> {f}");
+        }
+    }
+
+    #[test]
+    fn microsoft_is_said_not_spelled() {
+        // Alex's report: "it doesn't know Microsoft"
+        let ms = "mˈIkɹˌOsˈɔft";
+        assert_eq!(say("Microsoft"), ms);
+        assert_eq!(say("MICROSOFT"), ms);
+        assert_eq!(say("Microsoft's"), format!("{ms}s"));
+        assert_eq!(spoken(&["MICROSOFT", "SAID"])[0], ms);
+    }
+
+    #[test]
+    fn accented_names_fold_through_the_real_path() {
+        let hand = kokoro_phonemes(&test_names().lookup("erdogan").unwrap());
+        assert_eq!(say("Erdoğan"), hand);
+        let p = say("Łukasz");
+        assert!(p.matches(['ˈ', 'ˌ']).count() < 4, "Łukasz spelled: {p}");
+        let p = say("Călin");
+        assert!(p.matches(['ˈ', 'ˌ']).count() < 4, "Călin spelled: {p}");
+    }
+
+    #[test]
+    fn brand_list_entries_win() {
+        // spec section 3 rows that are brand-list entries
+        assert_eq!(say("EBITDA"), "ˈibɪtdˌɑ");
+        assert_eq!(say("PayPal"), "pˈApˌæl");
+        assert_eq!(say("SaaS"), "sˈæs");
+        assert_eq!(say("GAAP"), "ɡˈæp", "GAAP is said as a word");
+        assert_eq!(say("Coinbase's"), "kˈYnbˌAsɪz");
+        // brand entries are whole words only: their parts still read normally
+        assert_eq!(say("Coin"), spoken(&["The", "coin", "said."])[1]);
+    }
+
+    #[test]
+    fn rule_overrides_keep_one_span_per_word() {
+        let g = test_g2p();
+        for words in [
+            vec!["The", "SEC's", "TechReview", "said", "elonmusk", "posted."],
+            vec!["\u{201C}GPUs,", "OpenAI's", "(AWS)", "JPMorgan-led", "deal\u{201D}"],
+        ] {
+            let fed = g2p_words(g, test_names(), &words);
+            let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+            let plain: Vec<&str> = plain.iter().map(|c| c.as_ref()).collect();
+            let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+            let (_, toks) = g.g2p(&fed.join(" ")).unwrap();
+            let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+            let owner = ra_timing::align(&plain, &tt);
+            for w in 0..words.len() {
+                assert!(owner.contains(&Some(w)), "{words:?}: word {w} has no token ({tt:?})");
+            }
+            let ph: String = toks.iter().filter_map(|t| t.phonemes.clone()).collect();
+            assert!(!ph.contains("  "), "{ph}");
+        }
+    }
+
+    /// Brand review sheet (tools/read-aloud/brand_candidates.py drives it):
+    /// BRAND_IN = "word<TAB>count" lines, BRAND_OUT = TSV of word, count, the reading
+    /// through the real path (hand list, acronym / CamelCase / compound rules, misaki,
+    /// NameFallback), and what the GRU alone says for the lowercase word.
+    #[test]
+    #[ignore]
+    fn brand_review_dump() {
+        use std::io::Write as _;
+        let inp = std::env::var("BRAND_IN").expect("set BRAND_IN");
+        let out = std::env::var("BRAND_OUT").expect("set BRAND_OUT");
+        let gru = G2pEn::load().expect("g2p_en");
+        let text = std::fs::read_to_string(&inp).expect("read BRAND_IN");
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&out).expect("create BRAND_OUT"));
+        writeln!(f, "word\tcount\tnew_reading\tgru_reading").unwrap();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let (w, n) = line.split_once('\t').unwrap_or((line, ""));
+            let new = say(w.trim());
+            let low = w.trim().to_lowercase();
+            let g = gru.predict(&low).map(|a| kokoro_phonemes(&crate::ra_names::arpa_to_misaki(&a))).unwrap_or_default();
+            writeln!(f, "{}\t{}\t{new}\t{g}", w.trim(), n.trim()).unwrap();
+        }
+        f.flush().unwrap();
     }
 
     fn vocab() -> HashMap<char, i64> {

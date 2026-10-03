@@ -614,8 +614,53 @@ static FRACTION_UNITS: [(&str, &str); 52] = [
     ("yards", "yard"),
 ];
 
-/// `a/b` with 1 <= a < b <= 64 (a common fraction), as (a, b).
+/// A vulgar fraction character as (a, b).
+fn vulgar(core: &str) -> Option<(u64, u64)> {
+    let mut cs = core.chars();
+    let c = cs.next()?;
+    if cs.next().is_some() {
+        return None;
+    }
+    Some(match c {
+        '½' => (1, 2),
+        '⅓' => (1, 3),
+        '⅔' => (2, 3),
+        '¼' => (1, 4),
+        '¾' => (3, 4),
+        '⅕' => (1, 5),
+        '⅖' => (2, 5),
+        '⅗' => (3, 5),
+        '⅘' => (4, 5),
+        '⅙' => (1, 6),
+        '⅚' => (5, 6),
+        '⅛' => (1, 8),
+        '⅜' => (3, 8),
+        '⅝' => (5, 8),
+        '⅞' => (7, 8),
+        _ => return None,
+    })
+}
+
+/// The fraction after a whole number: "a half", "an eighth", "three quarters".
+fn mixed_tail(a: u64, b: u64) -> String {
+    if a != 1 {
+        return fraction_words(a, b);
+    }
+    let w = match b {
+        2 => "half".to_string(),
+        4 => "quarter".to_string(),
+        _ => ordinal(b),
+    };
+    let art = if w.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+    format!("{art} {w}")
+}
+
+/// `a/b` with 1 <= a < b <= 64 (a common fraction), as (a, b); a vulgar
+/// fraction character too.
 fn common_fraction(core: &str) -> Option<(u64, u64)> {
+    if let Some(f) = vulgar(core) {
+        return Some(f);
+    }
     let (a, b) = core.split_once('/')?;
     if a.is_empty() || b.is_empty() || a.len() > 2 || b.len() > 2 || !all_digits(a) || !all_digits(b) {
         return None;
@@ -1204,10 +1249,16 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
         }
         return None;
     }
-    if !has_digit(core) {
+    if !has_digit(core) && vulgar(core).is_none() {
         return None;
     }
     if let Some((l2, c2, t2)) = next {
+        // A whole number and a fraction: "2 1/2", "1 ½" -> "two and a half".
+        let whole = (1..=3).contains(&core.len()) && all_digits(core) && trail.is_empty() && l2.is_empty();
+        if let (true, Some((a, b))) = (whole, common_fraction(c2).filter(|_| whole)) {
+            let n = core.parse::<u64>().unwrap_or(0);
+            return Some((i + 2, format!("{lead}{} and {}{t2}", cardinal(n), mixed_tail(a, b))));
+        }
         // An area code + a local number: "(555) 123-4567".
         let local = c2.split_once('-').filter(|(a, b)| {
             a.len() == 3 && b.len() == 4 && all_digits(a) && all_digits(b)
@@ -1273,6 +1324,9 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
                 return Some((i + 2, format!("{lead}{t}{t2}")));
             }
         }
+    }
+    if !has_digit(core) {
+        return None; // a lone vulgar fraction: the text pass says it
     }
     let ctx = build_ctx(words, i, lead, trail);
     let body = read_core(core, &ctx);
@@ -1540,6 +1594,22 @@ mod tests {
         // without a unit or "of", unchanged
         assert_eq!(one("13/16"), "thirteen sixteen");
         assert_eq!(one("3/4"), "three quarters");
+    }
+
+    /// Round 2: a whole number and a fraction ("2 1/2 cups", "1 ½ cups") is one
+    /// mixed number; a lone vulgar fraction before a unit is "half a cup".
+    #[test]
+    fn mixed_numbers_and_vulgar_fractions() {
+        assert_eq!(at("and 2 1/2 cups of milk", 1), (3, "two and a half".to_string()));
+        assert_eq!(at("add 1 ½ cups flour", 1), (3, "one and a half".to_string()));
+        assert_eq!(at("a 2 3/4 inch gap", 1), (3, "two and three quarters".to_string()));
+        assert_eq!(at("about 3 1/3 miles", 1), (3, "three and a third".to_string()));
+        assert_eq!(at("then 1 ⅛ tsp salt", 1), (3, "one and an eighth".to_string()));
+        assert_eq!(at("Pour in ½ cup of milk.", 2), (4, "half a cup".to_string()));
+        assert_eq!(at("add ¾ cup sugar", 1), (3, "three quarters of a cup".to_string()));
+        // not a mixed number
+        assert_eq!(at("won 3 1/2 of", 1), (3, "three and a half".to_string()));
+        assert_eq!(at("in 2024 1/2 the votes", 1), (2, "twenty twenty four".to_string()));
     }
 
     /// Round 2: a day above 12 reads as a day-month date (UK); US month/day stays the default.

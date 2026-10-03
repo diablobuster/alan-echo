@@ -2010,7 +2010,7 @@ mod tests {
                 }
                 let got = last(&[n, u]);
                 // round 2: "1/2 cup" -> "half a cup" for a measuring unit
-                let half = n == "1/2" && got.starts_with("half a") && got.ends_with(one_u.trim_end_matches('s'));
+                let half = (n == "1/2" || n == "½") && got.starts_with("half a") && got.ends_with(one_u.trim_end_matches('s'));
                 if got != *many && !half {
                     bad.push(format!("{n} {u}: {got:?} (want {many:?})"));
                 }

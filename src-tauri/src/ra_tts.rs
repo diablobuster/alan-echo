@@ -1582,7 +1582,11 @@ mod tests {
             })
             .min()
             .unwrap_or_default();
-        assert!(best * 10 < Duration::from_millis(500), "{:?} for 100 chunks", best * 10);
+        // A debug smoke bound against a blow-up (an O(n²) slip costs 10x+), not the
+        // budget: the release budget is `prepass_cost_per_chunk` (<= 1 ms per chunk).
+        // 500 ms failed at b8d044c too once the machine was busy (536-568 ms), so
+        // the bound has 2x headroom.
+        assert!(best * 10 < Duration::from_millis(1000), "{:?} for 100 chunks", best * 10);
     }
 
     // ---- phase 3 task 3: acronyms, CamelCase, compounds, fold through the real path ----

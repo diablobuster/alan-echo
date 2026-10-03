@@ -1,0 +1,1326 @@
+//! Read Aloud: Adobe Acrobat source (spec 3.3).
+//!
+//! Acrobat's page view has no usable UIA TextPattern, but its own accessibility DOM
+//! (`IPDDomNode`, reached through MSAA + `IServiceProvider::QueryService`) gives every
+//! Word node's text, its box in physical screen pixels and `ScrollTo`. COM calls only:
+//! nothing here sends input, focus or scroll messages to Acrobat. Every call runs on the
+//! `ra-uia` worker thread (COM initialised MTA, per-monitor DPI aware). Never panics.
+//!
+//! Spike facts this code relies on (2026-10-02, Acrobat Reader 64-bit):
+//! - only the *visible* `AVL_AVView` page view (window text `AVPageView`) has a DOM; a
+//!   hidden background tab's view does not;
+//! - `AccessibleObjectFromWindow` on it answers with a client wrapper (role 10) whose
+//!   child is the document (role 15); only the document answers `QueryService`;
+//! - the page view belongs to the `--type=renderer` child process;
+//! - `GetLocation` is (0,0,0,0) off screen, and a container's box is the union of its
+//!   on-screen parts, so an off-screen container has no on-screen descendants.
+
+// Task 6 wires this module into the worker; until then only tests call it.
+#![cfg_attr(not(test), allow(dead_code))]
+
+use std::time::{Duration, Instant};
+
+use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, BSTR, GUID, HRESULT, VARIANT};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::System::Com::{IDispatch, IServiceProvider};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::Accessibility::{AccessibleChildren, AccessibleObjectFromWindow, IAccessible};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumChildWindows, GetAncestor, GetClassNameW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, WindowFromPoint, GA_PARENT, GA_ROOT, OBJID_CLIENT,
+};
+
+use crate::ra_uia::Rect;
+
+/// Error text when the point is not on an Acrobat word (the caller may try OCR next).
+pub const NO_TEXT_ACRO: &str = "no Acrobat text under the point";
+/// Tokens returned by `pick` (same as the UIA source).
+const FIRST_BATCH: usize = 200;
+/// Tokens per `more` call (same as the UIA source).
+const MORE_BATCH: usize = 400;
+/// Words walked per read, in total (seek + reads).
+const MAX_WORDS: usize = 20_000;
+/// Time budget for one `pick` / `more` call (the caller waits 5 s).
+const CALL_BUDGET: Duration = Duration::from_secs(3);
+/// Time budget for one `hover` (the caller waits 50 ms).
+const HOVER_BUDGET: Duration = Duration::from_millis(50);
+/// Window class of Acrobat's views; the page view's window text is `AVPageView`.
+const VIEW_CLASS: &str = "AVL_AVView";
+const PAGE_VIEW_TEXT: &str = "AVPageView";
+/// MSAA `ROLE_SYSTEM_DOCUMENT`.
+const ROLE_DOCUMENT: i32 = 15;
+/// Max MSAA children looked at when unwrapping the client wrapper.
+const MAX_ACC_KIDS: usize = 64;
+/// Sanity cap on one DOM node's child count.
+const MAX_KIDS: i32 = 100_000;
+
+// ---------------------------------------------------------------------------------
+// COM bindings (from Adobe's public AcrobatAccess.idl; vtable order must match it)
+// ---------------------------------------------------------------------------------
+
+/// `SID_GetPDDomNode`: the service id that hands out `IGetPDDomNode`.
+const SID_GET_PD_DOM_NODE: GUID = GUID::from_u128(0xc0a1d5e9_1142_4cf3_b607_82fc3b96a4df);
+
+/// `CPDDomNode_Word` in the IDL's `CPDDomNodeType` enum (Document = 1, Page = 2,
+/// StructElement = 3, Text = 4, Word = 5, Char = 6, ...).
+pub(crate) const WORD: i32 = 5;
+
+/// IDL method order of `IPDDomNode` (after IDispatch's 7). `com_bindings_match_the_idl`
+/// checks the vtable against it.
+pub(crate) const IPDDOMNODE_METHODS: [&str; 14] = [
+    "GetParent",
+    "GetType",
+    "GetChildCount",
+    "GetChild",
+    "GetName",
+    "GetValue",
+    "IsSame",
+    "GetTextContent",
+    "GetLocation",
+    "GetFontInfo",
+    "GetFromID",
+    "GetIAccessible",
+    "ScrollTo",
+    "GetTextInLines",
+];
+
+#[allow(non_snake_case, non_camel_case_types, clippy::too_many_arguments)]
+mod com {
+    use super::*;
+    use std::ffi::c_void;
+
+    /// `IGetPDDomNode : IUnknown`.
+    #[interface("f9f2fe81-f764-4bd0-afa5-5de841ddb625")]
+    pub unsafe trait IGetPDDomNode: IUnknown {
+        pub fn get_PDDomNode(&self, varid: VARIANT, out: *mut Option<IPDDomNode>) -> HRESULT;
+    }
+
+    /// `IPDDomNode : IDispatch`. Declared on IUnknown with IDispatch's 4 slots spelled
+    /// out (the same vtable; deriving from IDispatch would need the windows crate's
+    /// `implement` feature). All 14 own methods are declared so the offsets are right.
+    #[interface("5007373a-20d7-458f-9ffb-abc900e3a831")]
+    pub unsafe trait IPDDomNode: IUnknown {
+        // IDispatch (never called)
+        pub fn GetTypeInfoCount(&self, n: *mut u32) -> HRESULT;
+        pub fn GetTypeInfo(&self, i: u32, lcid: u32, out: *mut *mut c_void) -> HRESULT;
+        pub fn GetIDsOfNames(
+            &self,
+            riid: *const GUID,
+            names: *const *const u16,
+            count: u32,
+            lcid: u32,
+            ids: *mut i32,
+        ) -> HRESULT;
+        pub fn Invoke(
+            &self,
+            id: i32,
+            riid: *const GUID,
+            lcid: u32,
+            flags: u16,
+            params: *mut c_void,
+            result: *mut VARIANT,
+            excep: *mut c_void,
+            arg_err: *mut u32,
+        ) -> HRESULT;
+        // IPDDomNode
+        pub fn GetParent(&self, out: *mut Option<IPDDomNode>) -> HRESULT;
+        pub fn GetType(&self, out: *mut i32) -> HRESULT;
+        pub fn GetChildCount(&self, out: *mut i32) -> HRESULT;
+        pub fn GetChild(&self, index: i32, out: *mut Option<IPDDomNode>) -> HRESULT;
+        pub fn GetName(&self, out: *mut BSTR) -> HRESULT;
+        pub fn GetValue(&self, out: *mut BSTR) -> HRESULT;
+        pub fn IsSame(&self, node: *mut c_void, out: *mut BOOL) -> HRESULT;
+        pub fn GetTextContent(&self, out: *mut BSTR) -> HRESULT;
+        pub fn GetLocation(&self, x: *mut i32, y: *mut i32, w: *mut i32, h: *mut i32) -> HRESULT;
+        pub fn GetFontInfo(
+            &self,
+            status: *mut i32,
+            name: *mut BSTR,
+            size: *mut f32,
+            flags: *mut i32,
+            red: *mut f32,
+            green: *mut f32,
+            blue: *mut f32,
+        ) -> HRESULT;
+        pub fn GetFromID(&self, id: *mut c_void, out: *mut Option<IPDDomNode>) -> HRESULT;
+        pub fn GetIAccessible(&self, out: *mut Option<IAccessible>) -> HRESULT;
+        pub fn ScrollTo(&self) -> HRESULT;
+        pub fn GetTextInLines(&self, visible_only: BOOL, out: *mut Option<IPDDomNode>) -> HRESULT;
+    }
+
+    /// `IPDDomNodeExt : IUnknown`. We only call `GetPageNum` (manual test); never
+    /// `SetFocus` / `DoDefaultAction` (that would act on the user's document).
+    #[interface("4A894040-247E-4aff-BB08-3489E9905235")]
+    pub unsafe trait IPDDomNodeExt: IUnknown {
+        pub fn GetState(&self, out: *mut i32) -> HRESULT;
+        pub fn Navigate(&self, dir: i32, out: *mut Option<IPDDomNode>) -> HRESULT;
+        pub fn SetFocus(&self) -> HRESULT;
+        pub fn GetIndex(&self, out: *mut i32) -> HRESULT;
+        pub fn GetPageNum(&self, first: *mut i32, last: *mut i32) -> HRESULT;
+        pub fn DoDefaultAction(&self) -> HRESULT;
+        pub fn ScrollToEx(&self, favor_left: BOOL, favor_top: BOOL) -> HRESULT;
+        pub fn Relationship(&self, node: *mut c_void, out: *mut i32) -> HRESULT;
+    }
+}
+use com::{IGetPDDomNode, IPDDomNode};
+
+// ---------------------------------------------------------------------------------
+// Pure logic: the DOM walk over a node trait (unit-tested with a fake tree)
+// ---------------------------------------------------------------------------------
+
+/// The node operations the walk needs. Children are fetched one at a time: a DOM call
+/// costs ~1-2 ms across processes, and an untagged page is one Text node holding every
+/// word of the page, so fetching a node's children all at once is too slow for hover.
+pub(crate) trait Node: Sized {
+    fn kind(&self) -> i32;
+    fn child_count(&self) -> usize;
+    /// `None` on an error (that child is skipped).
+    fn child(&self, i: usize) -> Option<Self>;
+    fn text(&self) -> String;
+    /// `None` = off screen ((0,0,0,0) or an empty box) or an error.
+    fn location(&self) -> Option<Rect>;
+}
+
+/// One open container on the walk: the next child to fetch.
+#[derive(Clone)]
+struct Level<N> {
+    node: N,
+    next: usize,
+    count: usize,
+}
+
+/// Depth-first document-order iterator over Word leaves; stops after `cap` words.
+#[derive(Clone)]
+pub(crate) struct Words<N: Node> {
+    root: Option<N>,
+    stack: Vec<Level<N>>,
+    cap: usize,
+    seen: usize,
+}
+
+pub(crate) fn words<N: Node>(root: N, cap: usize) -> Words<N> {
+    Words {
+        root: Some(root),
+        stack: Vec::new(),
+        cap,
+        seen: 0,
+    }
+}
+
+impl<N: Node> Iterator for Words<N> {
+    type Item = N;
+    fn next(&mut self) -> Option<N> {
+        while self.seen < self.cap {
+            let n = self.next_node()?;
+            if n.kind() == WORD {
+                self.seen += 1;
+                return Some(n);
+            }
+            self.open(n);
+        }
+        None
+    }
+}
+
+impl<N: Node> Words<N> {
+    /// The next node in document order at the current depth (popping finished levels).
+    fn next_node(&mut self) -> Option<N> {
+        if let Some(r) = self.root.take() {
+            return Some(r);
+        }
+        loop {
+            let top = self.stack.last_mut()?;
+            if top.next >= top.count {
+                self.stack.pop();
+                continue;
+            }
+            let i = top.next;
+            top.next += 1;
+            if let Some(c) = top.node.child(i) {
+                return Some(c);
+            }
+        }
+    }
+
+    /// Walk into a container (its children come next).
+    fn open(&mut self, n: N) {
+        let count = n.child_count();
+        if count > 0 {
+            self.stack.push(Level { node: n, next: 0, count });
+        }
+    }
+
+    /// Next on-screen word and its box, in document order. Skips (without walking into)
+    /// containers that are off screen: Acrobat gives a container the union of its
+    /// on-screen parts, so such a subtree has no on-screen words. Off-screen words
+    /// count toward the cap; skipped subtrees do not.
+    pub(crate) fn on_screen_word(&mut self) -> Option<(N, Rect)> {
+        self.on_screen_word_in(|_| true)
+    }
+
+    /// `on_screen_word`, also skipping containers whose box fails `keep`.
+    fn on_screen_word_in(&mut self, keep: impl Fn(&Rect) -> bool) -> Option<(N, Rect)> {
+        while self.seen < self.cap {
+            let n = self.next_node()?;
+            let loc = n.location();
+            if n.kind() == WORD {
+                self.seen += 1;
+                if let Some(r) = loc {
+                    return Some((n, r));
+                }
+            } else if loc.as_ref().is_some_and(&keep) {
+                self.open(n);
+            }
+        }
+        None
+    }
+}
+
+fn hit(r: &Rect, x: f64, y: f64) -> bool {
+    crate::ra_uia::contains(std::slice::from_ref(r), x, y)
+}
+
+/// Index (in the iterator's order) of the first word whose location contains (x, y).
+pub(crate) fn word_at<N: Node>(ws: &[N], x: f64, y: f64) -> Option<usize> {
+    ws.iter()
+        .position(|n| n.location().is_some_and(|r| hit(&r, x, y)))
+}
+
+/// A word that starts reading when the click hits no word: below the point, or on the
+/// point's line and to its right.
+pub(crate) fn after_point(r: &Rect, x: f64, y: f64) -> bool {
+    r.y > y || (y >= r.y && y <= r.y + r.h && r.x > x)
+}
+
+/// Move `ws` to the word under (x, y) and return it; the iterator then continues
+/// right after it. No word under the point: the first on-screen word below or after
+/// the point (the iterator is rewound to just after that word). Walks on-screen words
+/// only, and stops at the deadline (then the fallback, if one was seen, is used).
+pub(crate) fn seek<N: Node + Clone>(
+    ws: &mut Words<N>,
+    x: f64,
+    y: f64,
+    deadline: Instant,
+) -> Option<N> {
+    let mut fallback: Option<(N, Words<N>)> = None;
+    while Instant::now() < deadline {
+        let Some((n, r)) = ws.on_screen_word() else { break };
+        if hit(&r, x, y) {
+            return Some(n);
+        }
+        if fallback.is_none() && after_point(&r, x, y) {
+            fallback = Some((n, ws.clone()));
+        }
+    }
+    let (n, state) = fallback?;
+    let seen = ws.seen; // the work done stays counted against the cap
+    *ws = state;
+    ws.seen = seen;
+    Some(n)
+}
+
+/// Hover answer: `Some([box])` for the on-screen word under the point, `Some([])` when
+/// there is none, `None` when the deadline passed first (no answer).
+pub(crate) fn hover_rects<N: Node>(
+    ws: &mut Words<N>,
+    x: f64,
+    y: f64,
+    deadline: Instant,
+) -> Option<Vec<Rect>> {
+    // A container's box is the union of its on-screen parts: if it does not contain
+    // the point, no word inside it does.
+    while Instant::now() < deadline {
+        match ws.on_screen_word_in(|b| hit(b, x, y)) {
+            None => return Some(Vec::new()),
+            Some((_, r)) if hit(&r, x, y) => return Some(vec![r]),
+            Some(_) => {}
+        }
+    }
+    None
+}
+
+/// Pick the visible page view among AVL_AVView candidates: (hwnd, visible, area).
+/// A hidden background tab's view has no DOM, however big it is.
+pub(crate) fn visible_page_view(c: &[(isize, bool, i64)]) -> Option<isize> {
+    c.iter()
+        .filter(|(_, vis, area)| *vis && *area > 0)
+        .max_by_key(|(_, _, area)| *area)
+        .map(|(h, _, _)| *h)
+}
+
+/// The page view under the point: visible, non-empty, rect containing (x, y); the
+/// largest if several (split view).
+pub(crate) fn page_view_for(c: &[(isize, bool, Rect)], x: f64, y: f64) -> Option<isize> {
+    let under: Vec<(isize, bool, i64)> = c
+        .iter()
+        .filter(|(_, _, r)| hit(r, x, y))
+        .map(|(h, vis, r)| (*h, *vis, (r.w.max(0.0) * r.h.max(0.0)) as i64))
+        .collect();
+    visible_page_view(&under)
+}
+
+/// True for the image path of Acrobat or the 32-bit Reader.
+pub(crate) fn is_acrobat_image(path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or("");
+    name.eq_ignore_ascii_case("Acrobat.exe") || name.eq_ignore_ascii_case("AcroRd32.exe")
+}
+
+// ---------------------------------------------------------------------------------
+// The real DOM
+// ---------------------------------------------------------------------------------
+
+/// `GetLocation`: `Ok(None)` = off screen (Acrobat answers (0,0,0,0)); `Err` = COM error.
+fn location_of(n: &IPDDomNode) -> windows::core::Result<Option<Rect>> {
+    let (mut x, mut y, mut w, mut h) = (0i32, 0i32, 0i32, 0i32);
+    unsafe { n.GetLocation(&mut x, &mut y, &mut w, &mut h) }.ok()?;
+    Ok((w > 0 && h > 0).then_some(Rect {
+        x: x as f64,
+        y: y as f64,
+        w: w as f64,
+        h: h as f64,
+    }))
+}
+
+impl Node for IPDDomNode {
+    fn kind(&self) -> i32 {
+        let mut t = -1;
+        match unsafe { self.GetType(&mut t) }.ok() {
+            Ok(()) => t,
+            Err(e) => {
+                log::debug!("read-aloud: acro GetType {e}");
+                -1
+            }
+        }
+    }
+
+    fn child_count(&self) -> usize {
+        let mut n = 0;
+        match unsafe { self.GetChildCount(&mut n) }.ok() {
+            Ok(()) => n.clamp(0, MAX_KIDS) as usize,
+            Err(e) => {
+                log::debug!("read-aloud: acro GetChildCount {e}");
+                0
+            }
+        }
+    }
+
+    fn child(&self, i: usize) -> Option<Self> {
+        let mut c = None;
+        match unsafe { self.GetChild(i as i32, &mut c) }.ok() {
+            Ok(()) => c,
+            Err(e) => {
+                log::debug!("read-aloud: acro GetChild({i}) {e}");
+                None
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut b = BSTR::new();
+        match unsafe { self.GetTextContent(&mut b) }.ok() {
+            Ok(()) => b.to_string(),
+            Err(e) => {
+                log::debug!("read-aloud: acro GetTextContent {e}");
+                String::new()
+            }
+        }
+    }
+
+    fn location(&self) -> Option<Rect> {
+        location_of(self).unwrap_or_else(|e| {
+            log::debug!("read-aloud: acro GetLocation {e}");
+            None
+        })
+    }
+}
+
+fn class_of(h: HWND) -> String {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(h, &mut buf) }.clamp(0, buf.len() as i32) as usize;
+    String::from_utf16_lossy(&buf[..n])
+}
+
+fn text_of(h: HWND) -> String {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetWindowTextW(h, &mut buf) }.clamp(0, buf.len() as i32) as usize;
+    String::from_utf16_lossy(&buf[..n])
+}
+
+fn pid_of(h: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    pid
+}
+
+fn process_image(pid: u32) -> Option<String> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(h);
+        ok.ok()?;
+        Some(String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]))
+    }
+}
+
+fn root_at(x: i32, y: i32) -> Option<HWND> {
+    let w = unsafe { WindowFromPoint(POINT { x, y }) };
+    if w.is_invalid() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(w, GA_ROOT) };
+    (!root.is_invalid()).then_some(root)
+}
+
+fn window_rect(h: HWND) -> Rect {
+    let mut r = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(h, &mut r);
+    }
+    Rect {
+        x: r.left as f64,
+        y: r.top as f64,
+        w: (r.right - r.left) as f64,
+        h: (r.bottom - r.top) as f64,
+    }
+}
+
+/// The window under the point (or an ancestor) is an Acrobat view (`AVL_AVView`) and
+/// its process image is `Acrobat.exe` or `AcroRd32.exe`.
+pub fn is_acrobat_view(hwnd: isize) -> bool {
+    let start = HWND(hwnd as *mut _);
+    let mut h = start;
+    let mut view = false;
+    for _ in 0..64 {
+        if h.is_invalid() {
+            break;
+        }
+        if class_of(h) == VIEW_CLASS {
+            view = true;
+            break;
+        }
+        h = unsafe { GetAncestor(h, GA_PARENT) };
+    }
+    view && process_image(pid_of(start)).is_some_and(|p| is_acrobat_image(&p))
+}
+
+/// All Acrobat page views under the frame: (hwnd, visible, screen rect).
+fn page_views(frame: HWND) -> Vec<(isize, bool, Rect)> {
+    unsafe extern "system" fn cb(h: HWND, l: LPARAM) -> BOOL {
+        let v = &mut *(l.0 as *mut Vec<HWND>);
+        v.push(h);
+        BOOL(1)
+    }
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumChildWindows(frame, Some(cb), LPARAM(&mut all as *mut Vec<HWND> as isize));
+    }
+    all.into_iter()
+        .filter(|&h| class_of(h) == VIEW_CLASS && text_of(h) == PAGE_VIEW_TEXT)
+        .map(|h| (h.0 as isize, unsafe { IsWindowVisible(h) }.as_bool(), window_rect(h)))
+        .collect()
+}
+
+fn role_of(acc: &IAccessible) -> i32 {
+    unsafe { acc.get_accRole(&VARIANT::from(0i32)) }
+        .ok()
+        .and_then(|v| i32::try_from(&v).ok())
+        .unwrap_or(0)
+}
+
+/// The window's MSAA object may be a client wrapper (role 10) around the document
+/// (role 15); only the document answers `QueryService`.
+fn document_acc(acc: IAccessible) -> IAccessible {
+    if role_of(&acc) == ROLE_DOCUMENT {
+        return acc;
+    }
+    let n = unsafe { acc.accChildCount() }.unwrap_or(0).clamp(0, MAX_ACC_KIDS as i32) as usize;
+    let mut kids: Vec<VARIANT> = (0..n).map(|_| VARIANT::default()).collect();
+    let mut got = 0i32;
+    if n > 0 && unsafe { AccessibleChildren(&acc, 0, &mut kids, &mut got) }.is_ok() {
+        for v in kids.iter().take(got.clamp(0, n as i32) as usize) {
+            let raw = v.as_raw();
+            // VT_DISPATCH = 9: a child object (VT_I4 would be a simple child id)
+            if unsafe { raw.Anonymous.Anonymous.vt } != 9 {
+                continue;
+            }
+            let p = unsafe { raw.Anonymous.Anonymous.Anonymous.pdispVal };
+            let Some(d) = (unsafe { IDispatch::from_raw_borrowed(&p) }) else {
+                continue;
+            };
+            if let Ok(c) = d.cast::<IAccessible>() {
+                if role_of(&c) == ROLE_DOCUMENT {
+                    return c;
+                }
+            }
+        }
+    }
+    acc
+}
+
+/// MSAA page view → document → `QueryService(SID_GetPDDomNode)` → the DOM root.
+fn dom_root(page_view: isize) -> Result<IPDDomNode, String> {
+    let fail = |what: &str, e: windows::core::Error| {
+        log::debug!("read-aloud: acro {what}: {e}");
+        format!("Acrobat DOM unavailable ({what})")
+    };
+    unsafe {
+        let mut p = std::ptr::null_mut();
+        AccessibleObjectFromWindow(
+            HWND(page_view as *mut _),
+            OBJID_CLIENT.0 as u32,
+            &IAccessible::IID,
+            &mut p,
+        )
+        .map_err(|e| fail("AccessibleObjectFromWindow", e))?;
+        if p.is_null() {
+            return Err("Acrobat DOM unavailable (no MSAA object)".into());
+        }
+        let acc = IAccessible::from_raw(p);
+        let sp: IServiceProvider = document_acc(acc)
+            .cast()
+            .map_err(|e| fail("IServiceProvider", e))?;
+        let g: IGetPDDomNode = sp
+            .QueryService(&SID_GET_PD_DOM_NODE)
+            .map_err(|e| fail("QueryService", e))?;
+        let mut root = None;
+        g.get_PDDomNode(VARIANT::from(0i32), &mut root)
+            .ok()
+            .map_err(|e| fail("get_PDDomNode", e))?;
+        root.ok_or_else(|| "Acrobat DOM unavailable (no root)".into())
+    }
+}
+
+/// Frame and page view under the point.
+fn view_at(x: i32, y: i32) -> Option<(HWND, isize)> {
+    let frame = root_at(x, y)?;
+    let pv = page_view_for(&page_views(frame), x as f64, y as f64)?;
+    Some((frame, pv))
+}
+
+/// The current Acrobat read: Word nodes from the clicked word on (index = source index).
+pub struct AcroRead {
+    frame: isize,
+    /// Lazy document-order walk; continues after the last word handed out.
+    walk: Words<IPDDomNode>,
+    nodes: Vec<IPDDomNode>,
+    /// The walk reached the end of the document (or the word cap).
+    ended: bool,
+}
+
+impl AcroRead {
+    /// Tokens (≤ 200) from the word under (x, y) on. No word exactly there: from the
+    /// first on-screen word below or after the point. `Err(NO_TEXT_ACRO)` when there is
+    /// no page view or no on-screen word; other `Err`s mean the DOM was unreachable.
+    pub fn pick(x: i32, y: i32) -> Result<(AcroRead, Vec<String>), String> {
+        let (frame, pv) = view_at(x, y).ok_or(NO_TEXT_ACRO)?;
+        Self::pick_in(frame, pv, x, y)
+    }
+
+    /// `pick` on a known frame and page view (the window lookup already done).
+    fn pick_in(frame: HWND, pv: isize, x: i32, y: i32) -> Result<(AcroRead, Vec<String>), String> {
+        let deadline = Instant::now() + CALL_BUDGET;
+        let mut walk = words(dom_root(pv)?, MAX_WORDS);
+        let first = seek(&mut walk, x as f64, y as f64, deadline).ok_or(NO_TEXT_ACRO)?;
+        let mut out = vec![first.text()];
+        let mut read = AcroRead {
+            frame: frame.0 as isize,
+            walk,
+            nodes: vec![first],
+            ended: false,
+        };
+        out.extend(read.take(FIRST_BATCH - 1, deadline));
+        Ok((read, out))
+    }
+
+    /// Up to `n` more tokens, stopping early at the deadline or the end.
+    fn take(&mut self, n: usize, deadline: Instant) -> Vec<String> {
+        let mut out = Vec::new();
+        while out.len() < n && !self.ended && Instant::now() < deadline {
+            match self.walk.next() {
+                Some(w) => {
+                    out.push(w.text());
+                    self.nodes.push(w);
+                }
+                None => self.ended = true,
+            }
+        }
+        out
+    }
+
+    /// Next ≤ 400 tokens; source indices continue. `Ok(empty)` = end of the document
+    /// (or the 20 000-word cap); `Err` = the time budget ran out before any word.
+    pub fn more(&mut self) -> Result<Vec<String>, String> {
+        let out = self.take(MORE_BATCH, Instant::now() + CALL_BUDGET);
+        if out.is_empty() && !self.ended {
+            return Err("Acrobat read timed out".into());
+        }
+        Ok(out)
+    }
+
+    /// Fresh boxes of the words at source indices `src`. `Some(empty)` = a word is off
+    /// screen; `None` = unknown index or a COM error (no answer, not "off screen").
+    pub fn rects(&self, src: &[usize]) -> Option<Vec<Rect>> {
+        let mut out = Vec::with_capacity(src.len());
+        for &i in src {
+            match location_of(self.nodes.get(i)?) {
+                Ok(Some(r)) => out.push(r),
+                Ok(None) => return Some(Vec::new()),
+                Err(e) => {
+                    log::debug!("read-aloud: acro rects GetLocation {e}");
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Scroll Acrobat so word `idx` is on screen (`IPDDomNode::ScrollTo`, no input).
+    pub fn scroll_to(&self, idx: usize) {
+        if let Some(n) = self.nodes.get(idx) {
+            if let Err(e) = unsafe { n.ScrollTo() }.ok() {
+                log::debug!("read-aloud: acro ScrollTo {e}");
+            }
+        }
+    }
+
+    /// The top-level Acrobat frame of this read (for `source_hwnd`).
+    pub fn hwnd(&self) -> isize {
+        self.frame
+    }
+}
+
+/// Box of the on-screen word under the point: `Some(empty)` = no word there, `None` =
+/// no answer (DOM unreachable or over the 50 ms budget).
+pub fn hover(x: i32, y: i32) -> Option<Vec<Rect>> {
+    let deadline = Instant::now() + HOVER_BUDGET;
+    let Some((_, pv)) = view_at(x, y) else {
+        return Some(Vec::new());
+    };
+    hover_in(pv, x, y, deadline)
+}
+
+/// `hover` on a known page view.
+fn hover_in(pv: isize, x: i32, y: i32, deadline: Instant) -> Option<Vec<Rect>> {
+    let mut ws = words(dom_root(pv).ok()?, MAX_WORDS);
+    hover_rects(&mut ws, x as f64, y as f64, deadline)
+}
+
+/// First and last page (as Acrobat numbers them) of a node; manual test only.
+#[cfg(test)]
+fn page_of(n: &IPDDomNode) -> Option<(i32, i32)> {
+    let ext: com::IPDDomNodeExt = n.cast().ok()?;
+    let (mut a, mut b) = (0, 0);
+    unsafe { ext.GetPageNum(&mut a, &mut b) }.ok().ok()?;
+    Some((a, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fake DOM node: (kind, text, location, children).
+    #[derive(Clone, Debug)]
+    struct F(i32, &'static str, Option<(f64, f64, f64, f64)>, Vec<F>);
+
+    impl Node for F {
+        fn kind(&self) -> i32 {
+            self.0
+        }
+        fn child_count(&self) -> usize {
+            self.3.len()
+        }
+        fn child(&self, i: usize) -> Option<F> {
+            FETCHES.with(|c| c.set(c.get() + 1));
+            self.3.get(i).cloned()
+        }
+        fn text(&self) -> String {
+            self.1.to_string()
+        }
+        fn location(&self) -> Option<Rect> {
+            self.2.map(|(x, y, w, h)| Rect { x, y, w, h })
+        }
+    }
+
+    thread_local! {
+        /// Child fetches made by the fake DOM on this test thread.
+        static FETCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn fetches() -> usize {
+        FETCHES.with(|c| c.get())
+    }
+
+    const DOC: i32 = 1;
+    const STRUCT: i32 = 3;
+    const TEXT: i32 = 4;
+
+    fn w(t: &'static str, loc: Option<(f64, f64, f64, f64)>) -> F {
+        F(WORD, t, loc, vec![])
+    }
+
+    /// Doc > [Struct > [Text > [a, b], Struct > [Text > [c]]], Text > [d, e]]
+    fn tree() -> F {
+        F(
+            DOC,
+            "",
+            None,
+            vec![
+                F(
+                    STRUCT,
+                    "",
+                    None,
+                    vec![
+                        F(TEXT, "", None, vec![w("a ", None), w("b ", Some((10.0, 10.0, 20.0, 10.0)))]),
+                        F(STRUCT, "", None, vec![F(TEXT, "", None, vec![w("c ", Some((40.0, 10.0, 20.0, 10.0)))])]),
+                    ],
+                ),
+                F(TEXT, "", None, vec![w("d ", Some((10.0, 30.0, 20.0, 10.0))), w("e", None)]),
+            ],
+        )
+    }
+
+    fn texts(v: impl Iterator<Item = F>) -> Vec<String> {
+        v.map(|n| n.text()).collect()
+    }
+
+    #[test]
+    fn words_come_out_in_document_order() {
+        assert_eq!(texts(words(tree(), 100)), ["a ", "b ", "c ", "d ", "e"]);
+    }
+
+    #[test]
+    fn a_word_root_is_itself_and_words_are_leaves() {
+        // a Word's own children (Char nodes) are never walked into
+        let word_with_chars = F(WORD, "hi ", None, vec![F(6, "h", None, vec![])]);
+        assert_eq!(texts(words(word_with_chars, 10)), ["hi "]);
+        assert_eq!(texts(words(F(DOC, "", None, vec![]), 10)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_cap_stops_the_walk() {
+        assert_eq!(texts(words(tree(), 3)), ["a ", "b ", "c "]);
+        assert_eq!(texts(words(tree(), 0)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn word_at_finds_the_word_under_the_point() {
+        let ws: Vec<F> = words(tree(), 100).collect();
+        assert_eq!(word_at(&ws, 45.0, 15.0), Some(2)); // "c "
+        assert_eq!(word_at(&ws, 10.0, 10.0), Some(1)); // edge of "b "
+        assert_eq!(word_at(&ws, 35.0, 15.0), None); // gap between words
+    }
+
+    #[test]
+    fn word_at_never_matches_an_off_screen_word() {
+        // Acrobat reports (0,0,0,0) off screen: such a word must not match (0, 0)
+        let ws = vec![w("off ", None), w("on ", Some((0.0, 0.0, 5.0, 5.0)))];
+        assert_eq!(word_at(&ws, 0.0, 0.0), Some(1));
+        assert_eq!(word_at(&[w("off ", None)], 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn visible_page_view_ignores_hidden_views_and_takes_the_largest() {
+        // a hidden background tab's view is the biggest, but has no DOM
+        let c = [(1, false, 9_000_000), (2, true, 500_000), (3, true, 1_400_000)];
+        assert_eq!(visible_page_view(&c), Some(3));
+        assert_eq!(visible_page_view(&[(1, false, 10)]), None);
+        assert_eq!(visible_page_view(&[(4, true, 0)]), None, "zero-size view");
+        assert_eq!(visible_page_view(&[]), None);
+    }
+
+    // ---- on-screen walk, seek, hover ----
+
+    fn r(x: f64, y: f64, w: f64, h: f64) -> Option<(f64, f64, f64, f64)> {
+        Some((x, y, w, h))
+    }
+
+    /// Like Acrobat: containers carry the union box of their on-screen parts, or None.
+    /// Page 1 is scrolled away (off screen); page 2 is on screen, two lines.
+    fn screen() -> F {
+        F(
+            DOC,
+            "",
+            r(0.0, 0.0, 500.0, 100.0),
+            vec![
+                F(STRUCT, "", None, vec![F(TEXT, "", None, vec![w("gone ", None), w("away ", None)])]),
+                F(
+                    STRUCT,
+                    "",
+                    r(0.0, 0.0, 500.0, 100.0),
+                    vec![
+                        // a paragraph that starts off screen and ends on it
+                        F(TEXT, "", r(0.0, 0.0, 300.0, 20.0), vec![w("half ", None), w("one ", r(0.0, 0.0, 50.0, 20.0)), w("two ", r(60.0, 0.0, 50.0, 20.0))]),
+                        F(TEXT, "", r(0.0, 50.0, 300.0, 20.0), vec![w("three ", r(0.0, 50.0, 50.0, 20.0)), w("four", r(60.0, 50.0, 50.0, 20.0))]),
+                    ],
+                ),
+            ],
+        )
+    }
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
+    #[test]
+    fn the_on_screen_walk_skips_off_screen_subtrees() {
+        let mut ws = words(screen(), 100);
+        let mut got = Vec::new();
+        while let Some((n, _)) = ws.on_screen_word() {
+            got.push(n.text());
+        }
+        assert_eq!(got, ["one ", "two ", "three ", "four"]);
+        // "gone"/"away" were never visited (pruned); "half" was (counted, not returned)
+        assert_eq!(ws.seen, 5);
+    }
+
+    #[test]
+    fn seek_starts_at_the_clicked_word_and_reads_on_in_document_order() {
+        let mut ws = words(screen(), 100);
+        let first = seek(&mut ws, 70.0, 10.0, far()).map(|n| n.text());
+        assert_eq!(first.as_deref(), Some("two "));
+        assert_eq!(texts(ws), ["three ", "four"]);
+    }
+
+    #[test]
+    fn seek_without_a_hit_starts_at_the_first_word_below_or_after_the_point() {
+        // between the lines: the next line's first word
+        let mut ws = words(screen(), 100);
+        assert_eq!(seek(&mut ws, 200.0, 35.0, far()).map(|n| n.text()).as_deref(), Some("three "));
+        assert_eq!(texts(ws), ["four"]);
+        // in the gap between two words of a line: the word after it
+        let mut ws = words(screen(), 100);
+        assert_eq!(seek(&mut ws, 55.0, 10.0, far()).map(|n| n.text()).as_deref(), Some("two "));
+        assert_eq!(texts(ws), ["three ", "four"]);
+        // below everything: nothing to read
+        let mut ws = words(screen(), 100);
+        assert!(seek(&mut ws, 10.0, 500.0, far()).is_none());
+    }
+
+    #[test]
+    fn seek_gives_up_at_the_deadline() {
+        let mut ws = words(screen(), 100);
+        assert!(seek(&mut ws, 70.0, 10.0, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn after_point_is_below_or_right_on_the_same_line() {
+        let b = Rect { x: 100.0, y: 100.0, w: 50.0, h: 20.0 };
+        assert!(after_point(&b, 0.0, 50.0), "below the point");
+        assert!(after_point(&b, 90.0, 110.0), "same line, to the right");
+        assert!(!after_point(&b, 160.0, 110.0), "same line, to the left");
+        assert!(!after_point(&b, 0.0, 130.0), "above the point");
+    }
+
+    #[test]
+    fn hover_finds_the_word_box_or_says_none_is_there() {
+        let b = |x, y| hover_rects(&mut words(screen(), 100), x, y, far());
+        assert_eq!(b(70.0, 10.0), Some(vec![Rect { x: 60.0, y: 0.0, w: 50.0, h: 20.0 }]));
+        assert_eq!(b(200.0, 35.0), Some(vec![]), "no word there");
+        assert_eq!(hover_rects(&mut words(screen(), 100), 70.0, 10.0, Instant::now()), None, "out of time");
+    }
+
+    #[test]
+    fn the_page_view_under_the_point_is_chosen() {
+        let rc = |x, w| Rect { x, y: 0.0, w, h: 100.0 };
+        // split view: two visible page views side by side, plus a hidden tab's view
+        let c = [(1, true, rc(0.0, 100.0)), (2, true, rc(100.0, 100.0)), (3, false, rc(0.0, 300.0))];
+        assert_eq!(page_view_for(&c, 150.0, 50.0), Some(2));
+        assert_eq!(page_view_for(&c, 50.0, 50.0), Some(1));
+        assert_eq!(page_view_for(&c, 250.0, 50.0), None, "only the hidden view is there");
+        assert_eq!(page_view_for(&c, 50.0, 500.0), None, "outside every view");
+    }
+
+    #[test]
+    fn acrobat_images_are_recognised() {
+        assert!(is_acrobat_image(r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe"));
+        assert!(is_acrobat_image(r"C:\Program Files (x86)\Adobe\Reader\AcroRd32.exe"));
+        assert!(is_acrobat_image("acrobat.EXE"));
+        assert!(!is_acrobat_image(r"C:\Windows\notepad.exe"));
+        assert!(!is_acrobat_image(r"C:\x\NotAcrobat.exe"));
+        assert!(!is_acrobat_image(""));
+    }
+
+    /// An untagged page: one Text node holding every word of the page.
+    fn big_page(n: usize) -> F {
+        let ws = (0..n)
+            .map(|i| w("w ", r(10.0 * i as f64, 0.0, 8.0, 10.0)))
+            .collect();
+        F(DOC, "", r(0.0, 0.0, 10.0 * n as f64, 10.0), vec![F(TEXT, "", r(0.0, 0.0, 10.0 * n as f64, 10.0), ws)])
+    }
+
+    #[test]
+    fn children_are_fetched_one_at_a_time() {
+        let before = fetches();
+        let mut ws = words(big_page(500), MAX_WORDS);
+        assert!(ws.next().is_some());
+        // Doc -> Text -> first word: two fetches, not 500
+        assert_eq!(fetches() - before, 2);
+        let before = fetches();
+        let mut ws = words(big_page(500), MAX_WORDS);
+        assert!(seek(&mut ws, 25.0, 5.0, far()).is_some()); // 3rd word
+        assert_eq!(fetches() - before, 4);
+    }
+
+    #[test]
+    fn hover_skips_containers_whose_box_misses_the_point() {
+        // two paragraphs on screen; the point is in the second one
+        let para = |y: f64, t: &'static str| {
+            F(TEXT, "", r(0.0, y, 100.0, 10.0), (0..50).map(|i| w(t, r(2.0 * i as f64, y, 2.0, 10.0))).collect())
+        };
+        let doc = F(DOC, "", r(0.0, 0.0, 100.0, 40.0), vec![para(0.0, "a "), para(30.0, "b ")]);
+        let before = fetches();
+        let got = hover_rects(&mut words(doc, MAX_WORDS), 1.0, 35.0, far());
+        assert_eq!(got, Some(vec![Rect { x: 0.0, y: 30.0, w: 2.0, h: 10.0 }]));
+        // both paragraphs fetched, plus one word of the second; none of the first's words
+        assert_eq!(fetches() - before, 3);
+    }
+
+    #[test]
+    fn com_bindings_match_the_idl() {
+        use std::mem::{offset_of, size_of};
+        use windows::Win32::System::Com::IDispatch_Vtbl;
+        let ptr = size_of::<usize>();
+        let base = size_of::<IDispatch_Vtbl>();
+        assert_eq!(base, 7 * ptr, "IDispatch = IUnknown(3) + 4");
+        // IDispatch's slots sit where IDispatch_Vtbl has them
+        assert_eq!(offset_of!(com::IPDDomNode_Vtbl, GetTypeInfoCount), offset_of!(IDispatch_Vtbl, GetTypeInfoCount));
+        assert_eq!(offset_of!(com::IPDDomNode_Vtbl, Invoke), offset_of!(IDispatch_Vtbl, Invoke));
+        // every IPDDomNode method, in IDL order, at its slot
+        let mut slots = Vec::new();
+        macro_rules! slots {
+            ($($m:ident),*) => {$(
+                slots.push((stringify!($m), (offset_of!(com::IPDDomNode_Vtbl, $m) - base) / ptr));
+            )*};
+        }
+        slots!(
+            GetParent, GetType, GetChildCount, GetChild, GetName, GetValue, IsSame,
+            GetTextContent, GetLocation, GetFontInfo, GetFromID, GetIAccessible, ScrollTo,
+            GetTextInLines
+        );
+        let names: Vec<&str> = slots.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, IPDDOMNODE_METHODS);
+        for (i, (name, slot)) in slots.iter().enumerate() {
+            assert_eq!(*slot, i, "{name}");
+        }
+        assert_eq!(IPDDOMNODE_METHODS.len(), 14);
+        assert_eq!(size_of::<com::IPDDomNode_Vtbl>(), base + 14 * ptr);
+        // IUnknown-based ones
+        let unk = size_of::<IUnknown_Vtbl>();
+        assert_eq!(offset_of!(com::IGetPDDomNode_Vtbl, get_PDDomNode), unk);
+        assert_eq!(size_of::<com::IGetPDDomNode_Vtbl>(), unk + ptr);
+        assert_eq!(offset_of!(com::IPDDomNodeExt_Vtbl, GetPageNum), unk + 4 * ptr);
+        assert_eq!(size_of::<com::IPDDomNodeExt_Vtbl>(), unk + 8 * ptr);
+        // GUIDs
+        assert_eq!(format!("{:?}", IPDDomNode::IID), "5007373A-20D7-458F-9FFB-ABC900E3A831");
+        assert_eq!(format!("{:?}", IGetPDDomNode::IID), "F9F2FE81-F764-4BD0-AFA5-5DE841DDB625");
+        assert_eq!(format!("{:?}", com::IPDDomNodeExt::IID), "4A894040-247E-4AFF-BB08-3489E9905235");
+        assert_eq!(format!("{:?}", SID_GET_PD_DOM_NODE), "C0A1D5E9-1142-4CF3-B607-82FC3B96A4DF");
+    }
+}
+
+/// Manual check against a real Acrobat (spec 3.6). Launches Acrobat on a generated PDF
+/// only when no Acrobat / Reader is running, never sends input, and closes only the
+/// process tree it started. Run: cargo test acro_live -- --ignored --nocapture
+#[cfg(test)]
+mod live {
+    use super::*;
+    use std::process::{Child, Command};
+    use windows::Win32::Foundation::WPARAM;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+    use windows::Win32::UI::HiDpi::{
+        SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, IsIconic, PostMessageW, SetWindowPos, ShowWindow, HWND_TOPMOST,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WM_CLOSE,
+    };
+
+    const ACROBAT: &str = r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe";
+
+    fn running(image: &str) -> bool {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {image}"), "/FO", "CSV", "/NH"])
+            .output()
+            .expect("tasklist");
+        String::from_utf8_lossy(&out.stdout)
+            .to_ascii_lowercase()
+            .contains(&image.to_ascii_lowercase())
+    }
+
+    /// Visible Acrobat frames. No Acrobat ran before the launch (checked), so these
+    /// belong to the process tree this test started.
+    fn acrobat_frames() -> Vec<HWND> {
+        unsafe extern "system" fn cb(h: HWND, l: LPARAM) -> BOOL {
+            let v = &mut *(l.0 as *mut Vec<HWND>);
+            if IsWindowVisible(h).as_bool() && class_of(h) == "AcrobatSDIWindow" {
+                v.push(h);
+            }
+            BOOL(1)
+        }
+        let mut v: Vec<HWND> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(cb), LPARAM(&mut v as *mut Vec<HWND> as isize));
+        }
+        v
+    }
+
+    /// Closes what the test launched: WM_CLOSE to our frame, and if the launched
+    /// process has not exited 3 s later (e.g. the "close all tabs?" prompt), kill its
+    /// process tree. Never touches any other process. Deletes the PDF.
+    struct Launched {
+        child: Child,
+        frame: Option<HWND>,
+        pdf: std::path::PathBuf,
+    }
+    impl Drop for Launched {
+        fn drop(&mut self) {
+            if let Some(f) = self.frame {
+                unsafe {
+                    let _ = PostMessageW(f, WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+            let t0 = Instant::now();
+            let mut exited = false;
+            while t0.elapsed() < Duration::from_secs(3) {
+                if matches!(self.child.try_wait(), Ok(Some(_))) {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if exited {
+                println!("Acrobat closed on WM_CLOSE");
+            } else {
+                let pid = self.child.id().to_string();
+                let r = Command::new("taskkill").args(["/PID", &pid, "/T", "/F"]).output();
+                println!("closed by taskkill /T of pid {pid}: {:?}", r.map(|o| o.status));
+                let _ = self.child.wait();
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            let _ = std::fs::remove_file(&self.pdf);
+        }
+    }
+
+    fn center(r: &Rect) -> (i32, i32) {
+        ((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32)
+    }
+
+    #[test]
+    #[ignore]
+    fn acro_live() {
+        if running("Acrobat.exe") || running("AcroRd32.exe") {
+            println!("skipped: Acrobat already running");
+            return;
+        }
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let pdf = std::env::temp_dir().join(format!("ra_acro_live_{}.pdf", std::process::id()));
+        let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("tools")
+            .join("read-aloud")
+            .join("mkpdf.py");
+        // RA_ACRO_UNTAGGED=1 runs the same checks on an untagged PDF.
+        let mut py = Command::new("py");
+        py.arg(&tool).arg(&pdf);
+        if std::env::var_os("RA_ACRO_UNTAGGED").is_some() {
+            py.arg("--untagged");
+        }
+        let made = py.output().expect("run py mkpdf.py");
+        assert!(made.status.success() && pdf.exists(), "mkpdf failed: {made:?}");
+
+        let child = Command::new(ACROBAT).arg(&pdf).spawn().expect("launch Acrobat");
+        let mut guard = Launched { child, frame: None, pdf: pdf.clone() };
+        let t0 = Instant::now();
+        let (frame, pv) = loop {
+            let found = acrobat_frames().into_iter().find_map(|f| {
+                let v: Vec<(isize, bool, i64)> = page_views(f)
+                    .iter()
+                    .map(|(h, vis, r)| (*h, *vis, (r.w * r.h) as i64))
+                    .collect();
+                Some((f, visible_page_view(&v)?))
+            });
+            if let Some(x) = found {
+                break x;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no AVL_AVView page view in 40 s");
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        guard.frame = Some(frame);
+        println!("page view after {} ms", t0.elapsed().as_millis());
+        // Our own window only: restore it if it came up minimised, and keep it on top
+        // without activating it (no focus change, no input). Re-applied while waiting:
+        // Acrobat re-orders its frame while it starts up.
+        let raise = || unsafe {
+            if IsIconic(frame).as_bool() {
+                let _ = ShowWindow(frame, SW_SHOWNOACTIVATE);
+            }
+            let r = SetWindowPos(
+                frame,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            if let Err(e) = r {
+                println!("SetWindowPos: {e}");
+            }
+        };
+        // The 3rd on-screen word. The document may still be loading (or the first
+        // view may be the start page), so re-find the page view and retry for 40 s.
+        let (pv, word, wr) = loop {
+            raise();
+            std::thread::sleep(Duration::from_millis(300));
+            let pv = page_views(frame)
+                .into_iter()
+                .filter(|(_, vis, r)| *vis && r.w > 0.0 && r.h > 0.0)
+                .map(|(h, _, _)| h)
+                .next()
+                .unwrap_or(pv);
+            let found = dom_root(pv).ok().and_then(|root| {
+                let mut ws = words(root, MAX_WORDS);
+                (0..3).filter_map(|_| ws.on_screen_word()).nth(2)
+            });
+            if let Some((n, r)) = found {
+                break (pv, n.text(), r);
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no on-screen word in 40 s");
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        println!("document ready after {} ms", t0.elapsed().as_millis());
+        let (cx, cy) = center(&wr);
+        println!("target word {word:?} at {wr:?}");
+        assert!(is_acrobat_view(pv), "is_acrobat_view(page view)");
+
+        // Acrobat ignores HWND_TOPMOST, so a foreground window of the user's (never
+        // touched) may cover it. Uncovered: the full point-based path. Covered: the
+        // same code after the window lookup, and the point-based pick must refuse
+        // (it never reads text hidden under another window).
+        let covered = root_at(cx, cy) != Some(frame);
+
+        // Timing breakdown: attaching to the DOM, then seeking the word (on-screen walk).
+        for _ in 0..3 {
+            let t = Instant::now();
+            let root = dom_root(pv).expect("DOM root");
+            let attach = t.elapsed().as_secs_f64() * 1000.0;
+            let mut ws = words(root, MAX_WORDS);
+            let found = seek(&mut ws, cx as f64, cy as f64, Instant::now() + CALL_BUDGET);
+            assert_eq!(found.map(|n| n.text()), Some(word.clone()));
+            let total = t.elapsed().as_secs_f64() * 1000.0;
+            println!("attach {attach:.1} ms, seek {:.1} ms", total - attach);
+        }
+        // Hover has a 50 ms budget; `None` (no answer in time) is allowed by its contract
+        // (Acrobat stalls now and then, mostly right after loading), so take 10 tries
+        // and record every time.
+        let mut hover_ms = Vec::new();
+        let mut answers = Vec::new();
+        for _ in 0..10 {
+            let t = Instant::now();
+            let hv = if covered {
+                hover_in(pv, cx, cy, Instant::now() + HOVER_BUDGET)
+            } else {
+                hover(cx, cy)
+            };
+            hover_ms.push(format!("{:.0}", t.elapsed().as_secs_f64() * 1000.0));
+            answers.push(hv);
+        }
+        let hits = answers.iter().filter(|a| a.as_ref() == Some(&vec![wr.clone()])).count();
+        let misses = answers.iter().filter(|a| a.is_none()).count();
+        assert_eq!(hits + misses, 10, "every answer is the word's box or no answer");
+        assert!(hits >= 5, "hover answered in time at least half the time: {hover_ms:?}");
+        let hover_ms = format!("{} / 10 in time, ms {}", hits, hover_ms.join(" "));
+        let gap = hover_in(pv, cx, cy - 200, Instant::now() + Duration::from_secs(1));
+        assert_eq!(gap, Some(vec![]), "no word 200 px above the first line");
+
+        let t = Instant::now();
+        let picked = if covered {
+            println!("NOTE: the word is covered by another window; window lookup skipped");
+            assert!(AcroRead::pick(cx, cy).is_err(), "a covered point is not read");
+            AcroRead::pick_in(frame, pv, cx, cy)
+        } else {
+            let under = unsafe { WindowFromPoint(POINT { x: cx, y: cy }) };
+            assert!(is_acrobat_view(under.0 as isize), "is_acrobat_view(point)");
+            AcroRead::pick(cx, cy)
+        };
+        let (mut rd, toks) = picked.expect("pick");
+        let pick_ms = t.elapsed().as_secs_f64() * 1000.0;
+        // once more, warm (the first pick follows the document load)
+        let t = Instant::now();
+        let again = if covered {
+            AcroRead::pick_in(frame, pv, cx, cy)
+        } else {
+            AcroRead::pick(cx, cy)
+        };
+        let pick2_ms = t.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(again.map(|(_, t)| t), Ok(toks.clone()), "same tokens again");
+        assert_eq!(toks.first(), Some(&word), "first token is the clicked word");
+        assert_eq!(rd.hwnd(), frame.0 as isize);
+        println!("pick: {} tokens: {:?}...", toks.len(), &toks[..toks.len().min(8)]);
+
+        let n = toks.len().min(20);
+        let t = Instant::now();
+        for i in 0..n {
+            assert!(rd.rects(&[i]).is_some(), "rects({i}) answered");
+        }
+        let rect_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+
+        // read on to page 3's marker word
+        if toks.len() < FIRST_BATCH {
+            // the whole test document fits in the first batch: more() says "end"
+            assert_eq!(rd.more(), Ok(vec![]), "end of document");
+        }
+        let mut all = toks.clone();
+        let t = Instant::now();
+        let idx = loop {
+            if let Some(i) = all.iter().position(|s| s.contains("ZEBRAFINCH")) {
+                break i;
+            }
+            let more = rd.more().expect("more");
+            assert!(!more.is_empty(), "document ended before ZEBRAFINCH");
+            all.extend(more);
+        };
+        let more_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let page = page_of(&rd.nodes[idx]);
+        let before = rd.rects(&[idx]);
+        println!(
+            "ZEBRAFINCH = token {idx} of {}, page {page:?}, rects before scroll {before:?}",
+            all.len()
+        );
+        assert_eq!(before, Some(vec![]), "the page 3 word starts off screen");
+
+        let t = Instant::now();
+        rd.scroll_to(idx);
+        let scroll_call_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let on = loop {
+            match rd.rects(&[idx]) {
+                Some(v) if !v.is_empty() => break Some(v),
+                _ if t.elapsed() > Duration::from_secs(1) => break None,
+                _ => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        let scroll_ms = t.elapsed().as_secs_f64() * 1000.0;
+        println!("after scroll_to: {on:?}");
+        assert!(on.is_some(), "ScrollTo brought the word on screen within 1 s");
+        assert_eq!(rd.rects(&[0]), Some(vec![]), "the page 1 word scrolled off screen");
+
+        println!(
+            "TIMINGS: hover {hover_ms}, pick {pick_ms:.1} ms (again {pick2_ms:.1} ms; {} tokens), \
+             rects {rect_ms:.2} ms/word, more to page 3 {more_ms:.1} ms, \
+             ScrollTo call {scroll_call_ms:.1} ms, on screen after {scroll_ms:.0} ms",
+            toks.len()
+        );
+        drop(guard);
+    }
+}

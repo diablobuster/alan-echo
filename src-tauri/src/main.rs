@@ -15,6 +15,8 @@ mod ra_hook;
 mod ra_uia;
 #[cfg(target_os = "windows")]
 mod ra_ocr;
+#[cfg(target_os = "windows")]
+mod ra_acro;
 mod settings;
 mod text_cleanup;
 mod trial;

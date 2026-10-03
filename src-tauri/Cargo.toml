@@ -59,6 +59,7 @@ windows = { version = "0.58", features = [
     "Media_Ocr",
     "Storage_Streams",
 ] }
+windows-core = "0.58"
 ort = { version = "=2.0.0-rc.13", features = ["directml"] }
 misaki-rs = { version = "0.6", default-features = false }
 flate2 = "1"

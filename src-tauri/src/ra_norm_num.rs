@@ -221,6 +221,10 @@ struct Ctx {
     date_hint: bool,
     /// An AI-size noun follows (`405B parameters`): a K/M/B/T suffix is a scale word.
     ai_scale: bool,
+    /// A month name, a year or a date word is near: `5/10` stays a date, not a rating.
+    near_date: bool,
+    /// Blood pressure (`120/80 mmHg`, "blood pressure was 90/60"): `a/b` reads "a over b".
+    pressure: bool,
 }
 
 fn plain() -> Ctx {
@@ -303,7 +307,19 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
             | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"
     );
     let ai_scale = in_sorted(&AI_NOUNS, &next);
-    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale }
+    let lo = i.saturating_sub(4);
+    let hi = (i + 5).min(words.len());
+    let near_date = (lo..hi).any(|k| {
+        let c = split_punct(words[k]).1;
+        k != i
+            && (month_of(c).is_some()
+                || is_year_num(c)
+                || matches!(c.to_lowercase().as_str(), "year" | "years" | "date" | "dated" | "day"))
+    });
+    let pressure = next == "mmhg"
+        || (next == "blood" && next2 == "pressure")
+        || (i.saturating_sub(3)..i).any(|k| matches!(lc_core(words[k]).as_str(), "pressure" | "bp"));
+    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure }
 }
 
 // ---- currency ----
@@ -563,7 +579,8 @@ fn fraction_words(num: u64, den: u64) -> String {
     format!("{} {den_word}", cardinal(num))
 }
 
-/// `1/2`, `3/14`, `3/14/2025`, `24/7`.
+/// `1/2`, `3/14`, `3/14/2025`, `24/7`; ratings (`9/10` -> "nine out of ten") and
+/// blood pressure (`120/80` -> "one hundred twenty over eighty").
 fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
     let parts: Vec<&str> = core.split('/').collect();
     if parts.len() < 2 || !parts.iter().all(|p| all_digits(p)) {
@@ -573,8 +590,23 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
     if parts.len() == 2 {
         let (a, b) = (n[0], n[1]);
         let short = parts[0].len() <= 2 && parts[1].len() <= 2;
+        // 120/80, 90/60: two 2-3 digit numbers, the first larger
+        let pressure_shape = (2..=3).contains(&parts[0].len()) && (2..=3).contains(&parts[1].len()) && a > b;
+        let over = || format!("{} over {}", integer(parts[0]), integer(parts[1]));
+        if ctx.pressure && pressure_shape {
+            return Some(over());
+        }
         if ctx.date_hint && short {
             if let Some(d) = date_words(a, b, None) {
+                return Some(d);
+            }
+        }
+        // a rating: 9/10, 10/10, 4/5 (a month or a year nearby keeps the date)
+        if matches!(b, 5 | 10) && a <= b {
+            if !ctx.near_date {
+                return Some(format!("{} out of {}", integer(parts[0]), integer(parts[1])));
+            }
+            if let Some(d) = date_words(a, b, None).filter(|_| short) {
                 return Some(d);
             }
         }
@@ -585,6 +617,9 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
             if let Some(d) = date_words(a, b, None) {
                 return Some(d);
             }
+        }
+        if pressure_shape {
+            return Some(over());
         }
         if a == b || (a == 24 && b == 7) {
             return Some(format!("{} {}", integer(parts[0]), integer(parts[1])));
@@ -1392,6 +1427,36 @@ mod tests {
         assert_eq!(one("1/2"), "one half");
         assert_eq!(one("3/4"), "three quarters");
         assert_eq!(one("2/3"), "two thirds");
+    }
+
+    #[test]
+    fn ratings_out_of_ten_or_five() {
+        assert_eq!(one("10/10"), "ten out of ten");
+        assert_eq!(one("9/10"), "nine out of ten");
+        assert_eq!(at("I give it 10/10 honestly", 3), (4, "ten out of ten".to_string()));
+        assert_eq!(at("rated 4/5 by critics", 1), (2, "four out of five".to_string()));
+        assert_eq!(at("a solid 5/5.", 2), (3, "five out of five.".to_string()));
+        // a date context keeps the date
+        assert_eq!(at("on 10/10 we met", 1), (2, "October tenth".to_string()));
+        assert_eq!(at("due 5/10 in 2024 at noon", 1), (2, "May tenth".to_string()));
+        assert_eq!(at("the March 4/5 sessions", 2), (3, "April fifth".to_string()));
+        // other fractions and dates are unchanged
+        assert_eq!(one("3/14"), "March fourteenth");
+        assert_eq!(one("1/2"), "one half");
+        assert_eq!(one("2/3"), "two thirds");
+        assert_eq!(one("12/10"), "December tenth");
+    }
+
+    #[test]
+    fn blood_pressure_reads_over() {
+        assert_eq!(at("BP was 120/80 mmHg today", 2), (3, "one hundred twenty over eighty".to_string()));
+        assert_eq!(at("a 140/90 blood pressure", 1), (2, "one hundred forty over ninety".to_string()));
+        assert_eq!(at("his blood pressure was 90/60 at rest", 4), (5, "ninety over sixty".to_string()));
+        assert_eq!(one("120/80"), "one hundred twenty over eighty");
+        // a short pair that is a real date stays a date
+        assert_eq!(one("11/5"), "November fifth");
+        // first number smaller: not a reading
+        assert_eq!(one("80/120"), "eighty slash one hundred twenty");
     }
 
     #[test]

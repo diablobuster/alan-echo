@@ -2,6 +2,7 @@
 //! Order: hand list (names_fix.tsv) -> CMUdict (BSD-2) -> optional letter-to-sound
 //! model -> spelled letters. Never panics; the misaki fallback is always Ok.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
@@ -164,9 +165,9 @@ impl Names {
     /// Hand-list pronunciation of `word` (any case, optional possessive 's), or None.
     /// Hand-list words override misaki's own reading (e.g. Xi, Nguyen).
     pub fn hand(&self, word: &str) -> Option<String> {
-        let lower = word.to_lowercase();
-        if self.hand.contains(&lower) {
-            return self.map.get(&lower).cloned();
+        let lower = lower(word);
+        if self.hand.contains(lower.as_ref()) {
+            return self.map.get(lower.as_ref()).cloned();
         }
         let stem = lower.strip_suffix("'s").or_else(|| lower.strip_suffix("\u{2019}s"))?;
         if !self.hand.contains(stem) {
@@ -176,8 +177,8 @@ impl Names {
     }
 
     pub fn lookup(&self, word: &str) -> Option<String> {
-        let lower = word.to_lowercase();
-        if let Some(v) = self.map.get(&lower) {
+        let lower = lower(word);
+        if let Some(v) = self.map.get(lower.as_ref()) {
             return Some(v.clone());
         }
         let stem = lower.strip_suffix("'s").or_else(|| lower.strip_suffix("\u{2019}s"))?;
@@ -189,6 +190,16 @@ impl Names {
     /// ALL-CAPS acronym stays spelled. No allocation (the acronym set is built at load).
     pub fn knows(&self, word_lower: &str) -> bool {
         self.map.contains_key(word_lower) && !self.acronyms.contains(word_lower)
+    }
+}
+
+/// `word` lowercased, without allocating when it has no uppercase letter (the
+/// common case: `g2p_words` asks the hand list about every word of every chunk).
+fn lower(word: &str) -> Cow<'_, str> {
+    if word.chars().any(char::is_uppercase) {
+        Cow::Owned(word.to_lowercase())
+    } else {
+        Cow::Borrowed(word)
     }
 }
 
@@ -217,17 +228,34 @@ impl Fallback for NameFallback {
             return Ok(p);
         }
         if let Some(lts) = &self.0.lts {
-            if word.chars().count() <= 40 && word.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') {
-                if let Some(a) = lts.arpabet(&word.to_lowercase()) {
+            if let Some((key, poss)) = lts_key(word) {
+                if let Some(a) = lts.arpabet(&key) {
                     let p = arpa_to_misaki(&a);
                     if !p.is_empty() {
-                        return Ok(p);
+                        return Ok(if poss { format!("{p}{}", possessive(&p)) } else { p });
                     }
                 }
             }
         }
         Ok(spell(word))
     }
+}
+
+/// What the letter-to-sound model is asked for `word`: its lowercase a-z form with a
+/// possessive `'s` / `’s` removed (true when one was), accented letters folded to
+/// ASCII (é -> e, ñ -> n). `None` when any other character is left (digits, an inner
+/// apostrophe, CJK, ß) or the stem is empty or longer than 40 letters.
+fn lts_key(word: &str) -> Option<(String, bool)> {
+    let low = lower(word);
+    let (stem, poss) = match low.strip_suffix("'s").or_else(|| low.strip_suffix("\u{2019}s")) {
+        Some(s) => (s, true),
+        None => (low.as_ref(), false),
+    };
+    if stem.is_empty() || stem.chars().count() > 40 {
+        return None;
+    }
+    let key = stem.chars().map(fold).collect::<Option<String>>()?;
+    Some((key, poss))
 }
 
 #[cfg(test)]
@@ -333,6 +361,85 @@ mod tests {
         assert_eq!(f.phonemize("Zorblat").unwrap(), "zˈɔɹblæt");
         assert_eq!(f.phonemize("Qzxv").unwrap(), spell("Qzxv"));
         for w in ["🙂", "東京", "", "x'", &"q".repeat(60)] { assert!(f.phonemize(w).is_ok()); }
+    }
+
+    struct NameLts;
+    impl Lts for NameLts {
+        fn arpabet(&self, w: &str) -> Option<String> {
+            match w {
+                "mamdani" => Some("M AA0 M D AA1 N IY0".into()),
+                "pena" => Some("P EY1 N Y AH0".into()),
+                "nunez" => Some("N UW1 N EH0 Z".into()),
+                _ => None,
+            }
+        }
+    }
+
+    /// Only the letter-to-sound model knows these names (no dictionary entries).
+    fn lts_only() -> NameFallback {
+        NameFallback(Arc::new(Names {
+            map: HashMap::new(),
+            hand: HashSet::new(),
+            acronyms: HashSet::new(),
+            lts: Some(Box::new(NameLts)),
+        }))
+    }
+
+    #[test]
+    fn possessive_names_only_the_lts_model_knows_are_said_not_spelled() {
+        use misaki_rs::fallback::Fallback;
+        let f = lts_only();
+        let base = arpa_to_misaki("M AA0 M D AA1 N IY0");
+        assert_eq!(f.phonemize("Mamdani").unwrap(), base);
+        assert_eq!(f.phonemize("Mamdani's").unwrap(), format!("{base}z"));
+        assert_eq!(f.phonemize("Mamdani\u{2019}s").unwrap(), format!("{base}z"));
+        assert_eq!(f.phonemize("MAMDANI'S").unwrap(), format!("{base}z"));
+        // an unknown stem with 's is still spelled (whole word), never panics
+        assert_eq!(f.phonemize("Qzxv's").unwrap(), spell("Qzxv's"));
+        for w in ["'s", "\u{2019}s", "'", "s'", "o'neil"] {
+            assert!(f.phonemize(w).is_ok(), "{w}");
+        }
+    }
+
+    #[test]
+    fn accented_names_fold_to_ascii_for_the_lts_model() {
+        use misaki_rs::fallback::Fallback;
+        let f = lts_only();
+        assert_eq!(f.phonemize("Peña").unwrap(), arpa_to_misaki("P EY1 N Y AH0"));
+        assert_eq!(f.phonemize("Núñez").unwrap(), arpa_to_misaki("N UW1 N EH0 Z"));
+        assert_eq!(f.phonemize("Peña's").unwrap(), format!("{}z", arpa_to_misaki("P EY1 N Y AH0")));
+        // no obvious fold (CJK, ß): spelled / Ok, not sent to the model
+        for w in ["東京", "Straße", "🙂"] {
+            assert!(f.phonemize(w).is_ok(), "{w}");
+        }
+    }
+
+    #[test]
+    fn real_lts_says_mamdanis_and_pena() {
+        use misaki_rs::fallback::Fallback;
+        let lts = crate::ra_g2pen::G2pEn::load().map(|g| Box::new(g) as Box<dyn Lts>);
+        assert!(lts.is_some(), "embedded g2p_en loads");
+        let f = NameFallback(Arc::new(Names::load(lts)));
+        let plain = f.phonemize("Mamdani").unwrap();
+        assert_ne!(plain, spell("Mamdani"), "Mamdani is said, not spelled");
+        for w in ["Mamdani's", "Mamdani\u{2019}s"] {
+            let p = f.phonemize(w).unwrap();
+            assert_ne!(p, spell(w), "{w} is said, not spelled");
+            assert_eq!(p, format!("{plain}{}", possessive(&plain)), "{w}");
+        }
+        let pena = f.phonemize("Peña").unwrap();
+        assert_ne!(pena, spell("Peña"), "Peña is said, not spelled: {pena}");
+    }
+
+    #[test]
+    fn lowercase_words_are_not_reallocated() {
+        assert!(matches!(lower("xi"), std::borrow::Cow::Borrowed("xi")));
+        assert!(matches!(lower("ozempic\u{2019}s"), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(lower("XI's"), "xi's");
+        assert_eq!(lower("Peña"), "peña");
+        let n = Names::load(None);
+        assert_eq!(n.hand("xi").as_deref(), Some("ʃˈi"));
+        assert_eq!(n.hand("XI").as_deref(), Some("ʃˈi"));
     }
 
     #[test]

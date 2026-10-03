@@ -259,6 +259,25 @@ mod tests {
         }
     }
 
+    /// Round 1: mmHg is said, not spelled, and the reading stays "over".
+    #[test]
+    fn mmhg_is_millimeters_of_mercury() {
+        let s = spans(&["was", "120/80", "mmHg."]);
+        assert_eq!(s, vec![span(1, 2, "one hundred twenty over eighty"), span(2, 3, "millimeters of mercury.")]);
+    }
+
+    /// Round 1: "3 p.m. ET" has no sentence period after "p m"; the zone is spelled
+    /// by the caps rule. A clock time at a real sentence end keeps its period.
+    #[test]
+    fn clock_time_before_a_zone_has_no_period() {
+        let s = spans(&["at", "3", "p.m.", "ET", "on", "Monday."]);
+        assert!(s.iter().all(|x| !x.spoken.ends_with('.')), "{s:?}");
+        let s = spans(&["at", "9:30", "a.m.", "PT,", "or", "noon."]);
+        assert!(s.iter().all(|x| !x.spoken.ends_with('.')), "{s:?}");
+        let s = spans(&["We", "left", "at", "5", "p.m."]);
+        assert!(s.iter().any(|x| x.spoken.ends_with('.')), "{s:?}");
+    }
+
     /// A short month + day + year in one chunk (the chunker keeps them together).
     #[test]
     fn short_month_dates_read_as_dates() {

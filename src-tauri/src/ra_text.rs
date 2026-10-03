@@ -223,6 +223,22 @@ fn month_before_number(w: &str, next: Option<&Word>) -> bool {
     SHORT_MONTHS.contains(&w) && next.is_some_and(|n| n.text.starts_with(|c: char| c.is_ascii_digit()))
 }
 
+/// `a.m.` / `p.m.` before a time-zone abbreviation ("3 p.m. ET") is one phrase,
+/// never a sentence end: a cut there read the zone as a new sentence.
+fn clock_before_zone(w: &str, next: Option<&Word>) -> bool {
+    let clock = matches!(w.to_ascii_lowercase().as_str(), "a.m." | "p.m.") || w.ends_with("a.m.") || w.ends_with("p.m.");
+    clock && next.is_some_and(|n| is_time_zone(&n.text))
+}
+
+/// A time-zone abbreviation (`ET`, `PST`, `UTC`), trailing punctuation ignored.
+pub(crate) fn is_time_zone(w: &str) -> bool {
+    const ZONES: &[&str] = &[
+        "ET", "PT", "CT", "MT", "EST", "EDT", "PST", "PDT", "CST", "CDT", "MST", "MDT", "AKST", "AKDT", "HST", "UTC",
+        "GMT", "BST", "CET", "CEST", "EET", "EEST", "WET", "IST", "JST", "KST", "AEST", "AEDT", "SGT", "HKT",
+    ];
+    ZONES.contains(&w.trim_end_matches(|c: char| !c.is_alphanumeric()))
+}
+
 /// Conjunctions, prepositions and relatives a phrase can start with: a chunk cut
 /// just before one sounds like a natural breath.
 fn joins_phrase(w: &str) -> bool {
@@ -269,7 +285,10 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
             sentences.push(start..i);
             start = i;
         }
-        if ends_sentence(&w.text) && !month_before_number(&w.text, words.get(i + 1)) {
+        if ends_sentence(&w.text)
+            && !month_before_number(&w.text, words.get(i + 1))
+            && !clock_before_zone(&w.text, words.get(i + 1))
+        {
             sentences.push(start..i + 1);
             start = i + 1;
         }
@@ -658,6 +677,22 @@ mod tests {
         assert_eq!(chunk(&words("I met Jan. She said hi."), 12, 50), vec![0..3, 3..6]);
         // a month at a real sentence end, before a word
         assert_eq!(chunk(&words("It shipped in Nov. Then it sold."), 12, 50), vec![0..4, 4..7]);
+    }
+
+    /// Round 1: "3 p.m. ET" is one phrase; a cut after "p.m." read the zone as a
+    /// new sentence with a falling tone before it.
+    #[test]
+    fn clock_time_before_a_time_zone_never_ends_a_sentence() {
+        assert_eq!(chunk(&words("The meeting starts at 3 p.m. ET on Monday."), 12, 50), vec![0..9]);
+        assert_eq!(chunk(&words("Markets open at 9:30 a.m. EST and close."), 12, 50), vec![0..8]);
+        for z in ["ET", "PT", "CT", "MT", "EST", "EDT", "PST", "PDT", "CST", "CDT", "UTC", "GMT", "BST", "CET", "JST"] {
+            let s = format!("It airs at 8 p.m. {z} tonight.");
+            assert_eq!(chunk(&words(&s), 12, 50), vec![0..7], "{z}");
+        }
+        // a real sentence end after a time
+        assert_eq!(chunk(&words("We left at 5 p.m. Then it rained."), 12, 50), vec![0..5, 5..8]);
+        // the zone at the very end still ends the sentence
+        assert_eq!(chunk(&words("It ends at 4 p.m. EST. Then it rained."), 12, 50), vec![0..6, 6..9]);
     }
 
     #[test]

@@ -215,6 +215,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("mins", "minutes", "minutes", true),
     ("ml", "milliliter", "milliliters", true),
     ("mm", "millimeter", "millimeters", true),
+    ("mmHg", "millimeter of mercury", "millimeters of mercury", true),
     ("mpg", "mile per gallon", "miles per gallon", true),
     ("mph", "mile per hour", "miles per hour", true),
     ("ms", "millisecond", "milliseconds", true),
@@ -273,10 +274,15 @@ static SYMBOLS: &[(&str, &str)] = &[
     ("§§", "sections"),
     ("°", "degrees"),
     ("±", "plus or minus"),
+    ("¼", "one quarter"),
+    ("½", "one half"),
+    ("¾", "three quarters"),
     ("×", "times"),
     ("÷", "divided by"),
     ("€", "euros"),
     ("₹", "rupees"),
+    ("⅓", "one third"),
+    ("⅔", "two thirds"),
     ("→", "to"),
     ("∆", "delta"),
     ("−", "minus"),
@@ -1907,6 +1913,16 @@ mod tests {
         assert_eq!(render("is 5.9 Gbit/s now"), "is 5.9 gigabits per second now");
         assert_eq!(render("at 100 Mbit/s and"), "at 100 megabits per second and");
         assert_eq!(render("a 10 Gbit link"), "a 10 gigabits link");
+    }
+
+    /// Round 1: a lone vulgar fraction is said ("½ cup" was silent).
+    #[test]
+    fn lone_fractions_are_said() {
+        assert_eq!(render("Pour in ½ cup of milk."), "Pour in one half cup of milk.");
+        assert_eq!(render("add ¼ tsp"), "add one quarter teaspoons");
+        assert_eq!(render("about ¾ of them"), "about three quarters of them");
+        assert_eq!(render("⅓ of voters"), "one third of voters");
+        assert_eq!(render("⅔ majority"), "two thirds majority");
     }
 
     /// Round 1 (Alex): every unit is plural after any number but exactly 1 (decimals,

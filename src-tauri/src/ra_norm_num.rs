@@ -1186,7 +1186,9 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
                     .get(i + 2)
                     .and_then(|w| split_punct(w).1.chars().next())
                     .is_some_and(|c| c.is_lowercase());
-                let t2 = if next_lower { t2.strip_prefix('.').unwrap_or(t2) } else { t2 };
+                // "3 p.m. ET": a time zone carries on the phrase
+                let zone = words.get(i + 2).is_some_and(|w| crate::ra_text::is_time_zone(w));
+                let t2 = if next_lower || zone { t2.strip_prefix('.').unwrap_or(t2) } else { t2 };
                 return Some((i + 2, format!("{lead}{t}{t2}")));
             }
         }

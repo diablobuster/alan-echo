@@ -6,7 +6,7 @@ import csv, json, os, re, sys
 from collections import Counter, defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NOT_GLITCH = ("GRU", "INFO_INITIALISM_SPELLED", "INFO_ALNUM_LETTERS", "INFO_EMOJI_SILENT", "INFO_QUOTE_UNK")
+NOT_GLITCH = ("GRU", "INFO_INITIALISM_SPELLED", "INFO_ALNUM_LETTERS", "INFO_EMOJI_SILENT", "INFO_QUOTE_UNK", "INFO_CASHTAG")
 
 def cause_static(flag, cat, word, phon):
     f = flag.split("(")[0]

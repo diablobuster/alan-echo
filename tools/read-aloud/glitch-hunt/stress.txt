@@ -796,3 +796,125 @@ stress:final_review	I met Jan. She said hi.
 stress:final_review	Critics gave it 10/10 and readers gave it 4/5.
 stress:final_review	His blood pressure was 120/80 mmHg at rest.
 stress:final_review	A 60/40 portfolio is common.
+stress:round1	The students took the SAT, ACT and AP exams in the same month.
+stress:round1	She was rushed to the ER, moved to the ICU and later treated at the VA.
+stress:round1	The pilot gave an ETA of noon, and the ERA debate resumed after lunch.
+stress:round1	Her IRAs, the ISS's budget, the CEO and the CFO were all on the agenda.
+stress:round1	The FBI, the DOJ and the DHS briefed the GOP leaders on Tuesday.
+stress:round1	The EPA and the FDA signed a pact with the USDA and the CDC.
+stress:round1	The SEC fined the LLC after the IPO filing missed the deadline.
+stress:round1	The IMF and the WTO met with the ECB and the BOJ in Geneva.
+stress:round1	The FAA grounded the jets while the NTSB checked the data.
+stress:round1	The NIH and the CDC said the HIV and RSV cases rose in the fall.
+stress:round1	An MRI, a CT scan and an EKG were ordered by the MD on call.
+stress:round1	The patient with ADHD and PTSD was seen by an RN and an EMT.
+stress:round1	The NBA, the NFL and the NHL each signed TV deals with ESPN and NBC.
+stress:round1	The MVP of the NCAA final was drafted by an MLB team.
+stress:round1	The PGA and the LPGA agreed to share a tour with the ATP.
+stress:round1	The CPU, GPU and SSD prices fell as the AI boom cooled.
+stress:round1	The API returned a JSON error, so the SDK logged a URL and a DNS fault.
+stress:round1	AWS and GCP both cut prices for their LLM and GPU rentals.
+stress:round1	The VPN blocked the SSH port, so the IT team opened a TCP route.
+stress:round1	The CPI and the PPI rose, and the PCE index followed in May.
+stress:round1	The FOMC held rates while the ECB and the BOE cut theirs.
+stress:round1	Her 401(k) and IRA both beat the S&P 500 and the DJIA this year.
+stress:round1	The ETF tracks the NYSE and the NASDAQ, with an APR near 5%.
+stress:round1	The ACLU and the AARP sued the HHS over the new rule.
+stress:round1	The DMV, the IRS and the SSA all closed early on Friday.
+stress:round1	The UN, the EU and the WHO issued a joint statement on AIDS and COVID.
+stress:round1	The NATO summit and the OPEC meeting fell on the same day.
+stress:round1	FEMA and NOAA warned of a hurricane while NASA delayed the launch.
+stress:round1	The UAW and GM reached a deal before the UAW deadline.
+stress:round1	The OLED and LCD panels were both made by LG in the UK.
+stress:round1	This is NOT okay.
+stress:round1	It was HUGE, and the crowd went WILD.
+stress:round1	That was a BIG deal for the whole town.
+stress:round1	I'm SORRY, but the answer is still NO.
+stress:round1	Did you see the NEWS today?
+stress:round1	Follow the MONEY and you will find the truth.
+stress:round1	We are DONE with this project.
+stress:round1	I am SO tired of the FAKE reviews.
+stress:round1	He was LATE again, and the boss was NOT happy.
+stress:round1	It is HARD to say, but I'm SURE it was a CRAZY week.
+stress:round1	I HATE the new layout, it looks AWFUL.
+stress:round1	The bus was BACK, but the NEXT one was EVEN later.
+stress:round1	We have to try AGAIN, and this time it WILL work.
+stress:round1	Why would you EVER do that?
+stress:round1	The BUS left without us, OKAY?
+stress:round1	BREAKING: SENATE PASSES NEW TAX LAW
+stress:round1	FDA APPROVES NEW DRUG FOR RARE DISEASE
+stress:round1	FED HOLDS RATES AS INFLATION COOLS
+stress:round1	STOCKS RALLY AFTER JOBS REPORT BEATS FORECASTS
+stress:round1	NASA DELAYS MOON LAUNCH AGAIN
+stress:round1	HOUSE VOTES TO AVERT SHUTDOWN
+stress:round1	WHO DECLARES END OF HEALTH EMERGENCY
+stress:round1	APPLE UNVEILS NEW IPHONE AT FALL EVENT
+stress:round1	JUDGE BLOCKS TRUMP ORDER ON TARIFFS
+stress:round1	STORM KNOCKS OUT POWER TO 2 MILLION HOMES
+stress:round1	The lake covers 59,000 km² of the basin.
+stress:round1	The farm is 1 km² in size, and the park is 1.5 km² larger.
+stress:round1	She ran 1 km on Monday and 2.5 km on Tuesday.
+stress:round1	The bag weighed 1.0 kg, and the box weighed 0.5 kg.
+stress:round1	The car hit 65 mph before it slowed to 1 mph near the gate.
+stress:round1	It was 1 °C at dawn and 21 °C by noon.
+stress:round1	The roof is 1 m² of glass and 12.5 m² of steel.
+stress:round1	Add 1 tsp of salt and 1.5 tbsp of sugar.
+stress:round1	The cable was 1 ft long, but the next one was 3.5 ft long.
+stress:round1	Pour in ½ cup of milk and 1½ L of water.
+stress:round1	The drive is 1 TB, and the backup holds 2.5 TB.
+stress:round1	The chip runs at 1 GHz idle and 3.2 GHz under load.
+stress:round1	The well is 1 mi away and the river is 0.75 mi past it.
+stress:round1	The plot is 1 ha, and the reserve is 40,000 ha.
+stress:round1	They used 1 kWh in an hour and 0 kWh overnight.
+stress:round1	A 60/40 portfolio is the classic mix.
+stress:round1	The vote split 70/30 in favour of the plan.
+stress:round1	Most experts call it a 50/50 race.
+stress:round1	The deal is an 80/20 split between the two firms.
+stress:round1	Critics rated it 9/10, and his blood pressure was 120/80 mmHg.
+stress:round1	She scored 4/5 on the quiz and 3/4 on the lab.
+stress:round1	Shares of $AAPL rose 2% while $MSFT slipped.
+stress:round1	NASDAQ: TSLA fell after the delivery report.
+stress:round1	NYSE: F and NYSE: GM both gained on the news.
+stress:round1	Traders sold $NVDA and bought $AMD at the open.
+stress:round1	The $SPY fund and the $QQQ fund both closed higher.
+stress:round1	Buy $META, hold $GOOGL, and sell $AMZN, the note said.
+stress:round1	TSX: SHOP rose 5% in Toronto on Friday.
+stress:round1	The fund added AAPL, NVDA and TSLA to its top ten.
+stress:round1	The price of $BTC passed $70,000 while ETH lagged.
+stress:round1	She bought 0.5 BTC and 3 ETH last spring.
+stress:round1	The $ETH and $SOL tokens both fell 4% overnight.
+stress:round1	Bitcoin (BTC) and Ether (ETH) led the crypto rally.
+stress:round1	The USDC and USDT stablecoins held their peg.
+stress:round1	He sold 1 BTC at the top and kept 2.5 ETH.
+stress:round1	Update to iOS 17.2 to fix the bug.
+stress:round1	The script needs Python 3.12 or later.
+stress:round1	The phone ships with Android 14 and Chrome 120.
+stress:round1	Windows 11 23H2 broke the driver on old laptops.
+stress:round1	Node 20.11 and npm 10.2 are the minimum versions.
+stress:round1	macOS 14.3 adds a new widget and fixes Wi-Fi.
+stress:round1	Under § 230, platforms are not liable for user posts.
+stress:round1	Art. 5 of the treaty covers collective defence.
+stress:round1	See 17 U.S.C. § 107 for the fair use rule.
+stress:round1	The court cited §§ 1983 and 1988 in its ruling.
+stress:round1	Section 8 of the act and Art. 21 of the charter both apply.
+stress:round1	The case turned on Rule 12(b)(6) and § 1331.
+stress:round1	The Chiefs beat the Bills 27-24 in overtime.
+stress:round1	Final score: Lakers 112, Celtics 108.
+stress:round1	Arsenal won 2-1 at home and drew 0-0 away.
+stress:round1	The Yankees lost 5-3 after leading 3-1.
+stress:round1	She won the set 6-4 and the match 6-4, 3-6, 7-5.
+stress:round1	The team went 10-2 and finished 8-4 in the league.
+stress:round1	It was 98.6 °F at noon and 72°F by dusk.
+stress:round1	Water boils at 100 °C and freezes at 0 °C.
+stress:round1	The low was -5 °C, and the high was 1 °C.
+stress:round1	The oven was set to 350°F for 45 minutes.
+stress:round1	Temperatures hit 40°C in Madrid on Sunday.
+stress:round1	The forecast calls for 1°F of warming per decade.
+stress:round1	The meeting starts at 3 p.m. ET on Monday.
+stress:round1	The launch is set for 9:30 a.m. PT, or 12:30 p.m. ET.
+stress:round1	The call is at 10 a.m. CST and lasts an hour.
+stress:round1	Markets open at 9:30 a.m. EST and close at 4 p.m. EST.
+stress:round1	The show airs at 8 p.m. ET / 7 p.m. CT.
+stress:round1	The update rolls out at 2 a.m. UTC on Friday.
+stress:round1	The flight lands at 6:45 p.m. GMT in London.
+stress:round1	The webinar begins at noon PT and ends at 1 p.m. PT.

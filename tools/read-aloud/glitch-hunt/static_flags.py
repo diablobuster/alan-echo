@@ -206,6 +206,9 @@ def main():
                 flags = list(dict.fromkeys(flags))
                 # letters inside codes (10-K, H100, 3D) are read as letter names: correct
                 flags = ["INFO_ALNUM_LETTERS" if f == "ALNUM_LETTERS" and cat == "alnum_code" else f for f in flags]
+                # a cashtag ($AAPL, $BTC) is the ticker: the $ is silent on purpose, no "dollars"
+                if re.fullmatch(r"\W*\$[A-Z]{1,5}\W*", w):
+                    flags = ["INFO_CASHTAG" if f in ("SYMBOL_DROPPED($)", "CURRENCY_UNIT_MISSING") else f for f in flags]
                 # emoji have no reading; silence is acceptable
                 if "UNK" in flags and all(unicodedata.category(t[0]).startswith("So") or t in ("️",)
                                           for _, t, ph, _, _ in tl if "❓" in ph):
@@ -221,7 +224,7 @@ def main():
         wr.writeheader()
         wr.writerows(out)
     flag_base = Counter(re.sub(r"\(.*", "", o["flag"]) for o in out)
-    NOT_GLITCH = ("GRU", "INFO_INITIALISM_SPELLED", "INFO_ALNUM_LETTERS", "INFO_EMOJI_SILENT", "INFO_QUOTE_UNK")
+    NOT_GLITCH = ("GRU", "INFO_INITIALISM_SPELLED", "INFO_ALNUM_LETTERS", "INFO_EMOJI_SILENT", "INFO_QUOTE_UNK", "INFO_CASHTAG")
     glitch_words = {(o["id"], o["word"], o["context"]) for o in out if o["flag"] not in NOT_GLITCH}
     summ = dict(total_words=total_words, sentences=len(sent_words), flagged_rows=len(out), flags=flag_base,
                 glitch_words=len(glitch_words), static_rate_per_1k=round(1000 * len(glitch_words) / total_words, 2),

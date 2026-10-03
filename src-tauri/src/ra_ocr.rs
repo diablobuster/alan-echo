@@ -17,8 +17,8 @@ use windows::Storage::Streams::DataWriter;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-    GetDC, GetDIBits, ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, COLORONCOLOR, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
+    GetDC, GetDIBits, ReleaseDC, SelectObject, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetSystemMetrics, IsIconic, IsWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
@@ -35,8 +35,11 @@ const MORE_BATCH: usize = 400;
 const STALE_EVERY: Duration = Duration::from_millis(500);
 /// Tiles overlap by this much so a word cut by one tile edge is whole in the next.
 const OVERLAP: u32 = 64;
-/// The staleness thumbnail is THUMB x THUMB samples of the capture region.
+/// `thumb_sum` samples a THUMB x THUMB grid.
 const THUMB: u32 = 64;
+/// Width of the fingerprint column. Every GDI screen read costs ~7 ms whatever its
+/// size, so the fingerprint is ONE BitBlt: a full-height column through the text.
+const STRIP_W: u32 = 32;
 
 /// OCR words in reading order: lines as given, words left->right in each line.
 pub(crate) struct OcrWord {
@@ -55,6 +58,8 @@ pub struct OcrRead {
     at_end: bool,
     /// (client rect in screen px, thumbnail checksum) when the OCR ran.
     orig: (Rect, u64),
+    /// Fingerprint column (x offset into the capture region, width).
+    strip: (u32, u32),
     made: Instant,
     /// Last staleness answer and when it was computed.
     memo: Cell<Option<(Instant, bool)>>,
@@ -133,8 +138,7 @@ impl OcrRead {
         let engine = OcrEngine::TryCreateFromUserProfileLanguages()
             .map_err(|_| "Windows OCR unavailable".to_string())?;
         let max = OcrEngine::MaxImageDimension().unwrap_or(2600);
-        let bgra = grab(&reg, reg.w, reg.h).ok_or("screen capture failed")?;
-        let thumb = thumb_of(&reg).unwrap_or(0);
+        let bgra = grab(&reg).ok_or("screen capture failed")?;
         let mut words = Vec::new();
         let mut line_tile = Vec::new();
         let tl = tiles(reg.w, reg.h, max);
@@ -144,7 +148,17 @@ impl OcrRead {
             } else {
                 recognize(&engine, &crop(&bgra, reg.w, t), t.2, t.3)
             };
-            let lines = lines.map_err(|e| format!("OCR failed: {e}"))?;
+            let lines = match lines {
+                Ok(l) => l,
+                Err(e) => {
+                    // keep an empty read (cached like "no words") so hover does not
+                    // re-OCR on every mouse move
+                    log::warn!("read-aloud: OCR failed: {e}");
+                    words.clear();
+                    line_tile.clear();
+                    break;
+                }
+            };
             for line in lines {
                 let id = line_tile.len();
                 line_tile.push(ti);
@@ -162,6 +176,11 @@ impl OcrRead {
                 }
             }
         }
+        // the fingerprint comes from the OCR'd pixels themselves (no extra screen read)
+        let strip = strip_of(&words, reg.x as f64, reg.w);
+        let col = crop(&bgra, reg.w, (strip.0, 0, strip.1, reg.h));
+        let thumb = thumb_sum(&col, strip.1, reg.h);
+        drop(col);
         drop(bgra); // the pixels are not kept past OCR
         let mut words = dedupe_tiles(words);
         if tl.len() > 1 {
@@ -176,56 +195,122 @@ impl OcrRead {
             next: 0,
             at_end: false,
             orig: (win, thumb),
+            strip,
             made: Instant::now(),
             memo: Cell::new(None),
         })
     }
 
     /// The window moved, resized, closed, or its pixels changed since the OCR.
-    /// Re-captures only a 64x64 thumbnail, at most every 500 ms.
+    /// The rect is checked first (free); only then is the fingerprint column re-read
+    /// (one BitBlt). At most every 500 ms.
     fn stale(&self) -> bool {
         if let Some((at, v)) = self.memo.get() {
             if at.elapsed() < STALE_EVERY {
                 return v;
             }
         }
-        let now = client_rect(HWND(self.hwnd as *mut _)).and_then(|win| {
-            let reg = clip_to_screen(&win)?;
-            Some((win, thumb_of(&reg)?))
-        });
-        let v = match now {
-            Some(now) => is_stale(self.orig.clone(), now),
-            None => true,
+        let v = match client_rect(HWND(self.hwnd as *mut _)) {
+            Some(win) if win == self.orig.0 => match clip_to_screen(&win).and_then(|r| self.strip_sum(&r)) {
+                Some(sum) => is_stale(self.orig.clone(), (win, sum)),
+                None => {
+                    log::warn!("read-aloud: OCR fingerprint capture failed; hiding boxes");
+                    true
+                }
+            },
+            _ => true,
         };
         self.memo.set(Some((Instant::now(), v)));
         v
     }
+
+    /// `thumb_sum` of the fingerprint column, read from the screen with one BitBlt.
+    fn strip_sum(&self, reg: &Region) -> Option<u64> {
+        let (x0, sw) = self.strip;
+        if sw == 0 || x0.checked_add(sw)? > reg.w {
+            return None;
+        }
+        let col = Region { x: reg.x + x0 as i32, y: reg.y, w: sw, h: reg.h };
+        capture(&col, &[(reg.y, reg.h)]).map(|b| thumb_sum(&b, sw, reg.h))
+    }
+}
+
+/// The fingerprint column (x offset into the region, width): STRIP_W wide, centred
+/// on the median word centre so a scroll moves text through it; the region centre
+/// when there are no words. Clamped inside the region.
+pub(crate) fn strip_of(words: &[OcrWord], reg_x: f64, reg_w: u32) -> (u32, u32) {
+    let sw = STRIP_W.min(reg_w);
+    let mut cx: Vec<f64> = words.iter().map(|w| w.rect.x + w.rect.w / 2.0 - reg_x).collect();
+    cx.sort_by(|a, b| a.total_cmp(b));
+    let mid = cx.get(cx.len() / 2).copied().unwrap_or(reg_w as f64 / 2.0);
+    let x0 = (mid - sw as f64 / 2.0).round().clamp(0.0, (reg_w - sw) as f64);
+    (x0 as u32, sw)
+}
+
+/// What hover does with the cache.
+#[derive(Debug, PartialEq)]
+pub(crate) enum HoverPlan {
+    /// The cached OCR is current: look the point up in it.
+    Use,
+    /// Stale, but re-OCR'd less than 500 ms ago: no box for now.
+    NoBox,
+    /// Another window, no cache, or stale and old enough: OCR again.
+    Rebuild,
+}
+
+/// Hover's cache decision. `stale` is only asked when the cache is for this window.
+pub(crate) fn hover_plan(same_window: bool, stale: impl FnOnce() -> bool, age: Duration) -> HoverPlan {
+    if !same_window {
+        HoverPlan::Rebuild
+    } else if !stale() {
+        HoverPlan::Use
+    } else if age < STALE_EVERY {
+        HoverPlan::NoBox
+    } else {
+        HoverPlan::Rebuild
+    }
+}
+
+impl OcrRead {
+    /// A read with no words that is always stale (its rect is empty), so a failed
+    /// OCR is cached and retried at most every 500 ms instead of on every move.
+    fn failed(hwnd: isize) -> OcrRead {
+        OcrRead {
+            hwnd,
+            words: Vec::new(),
+            toks: Vec::new(),
+            start: 0,
+            next: 0,
+            at_end: false,
+            orig: (Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, 0),
+            strip: (0, 0),
+            made: Instant::now(),
+            memo: Cell::new(None),
+        }
+    }
 }
 
 /// Hover in pick mode: the box of the OCR word under the point. OCRs once per window;
-/// a stale cache is re-OCR'd at most every 500 ms (until then: no box). `None` when
-/// OCR is not possible.
+/// a stale cache is re-OCR'd at most every 500 ms (until then: no box). A failed OCR
+/// is cached too (as an empty read: `None` now, then no box until it is retried).
 pub fn hover_cached(cache: &mut Option<OcrRead>, hwnd: isize, x: i32, y: i32) -> Option<Vec<Rect>> {
-    let reuse = match cache.as_ref() {
-        Some(c) if c.hwnd == hwnd => {
-            if !c.stale() {
-                true
-            } else if c.made.elapsed() < STALE_EVERY {
-                return Some(Vec::new());
-            } else {
-                false
-            }
-        }
-        _ => false,
+    let plan = match cache.as_ref() {
+        Some(c) => hover_plan(c.hwnd == hwnd, || c.stale(), c.made.elapsed()),
+        None => HoverPlan::Rebuild,
     };
-    if !reuse {
-        *cache = None;
-        match OcrRead::build(hwnd) {
-            Ok(r) => *cache = Some(r),
-            Err(e) => {
-                log::info!("read-aloud: OCR hover: {e}");
-                return None;
-            }
+    match plan {
+        HoverPlan::NoBox => return Some(Vec::new()),
+        HoverPlan::Use => {}
+        HoverPlan::Rebuild => {
+            *cache = None;
+            *cache = Some(match OcrRead::build(hwnd) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::info!("read-aloud: OCR hover: {e}");
+                    *cache = Some(OcrRead::failed(hwnd));
+                    return None;
+                }
+            });
         }
     }
     let c = cache.as_ref()?;
@@ -542,13 +627,15 @@ impl Drop for Selected {
     }
 }
 
-/// The region from the screen as top-down BGRA (alpha forced to 255), scaled to
-/// out_w x out_h (COLORONCOLOR sampling when it differs from the region size).
-fn grab(reg: &Region, out_w: u32, out_h: u32) -> Option<Vec<u8>> {
-    if out_w == 0 || out_h == 0 || out_w > i32::MAX as u32 || out_h > i32::MAX as u32 {
+/// Screen rows of the region, stacked top-down as BGRA (alpha forced to 255): each
+/// band is (screen y, height), all `reg.w` wide. One band of the whole region is the
+/// OCR capture; a one-band column is the staleness fingerprint.
+fn capture(reg: &Region, bands: &[(i32, u32)]) -> Option<Vec<u8>> {
+    let total: u32 = bands.iter().try_fold(0u32, |a, b| a.checked_add(b.1))?;
+    if reg.w == 0 || total == 0 || reg.w > i32::MAX as u32 || total > i32::MAX as u32 {
         return None;
     }
-    let (ow, oh) = (out_w as i32, out_h as i32);
+    let (ow, oh) = (reg.w as i32, total as i32);
     unsafe {
         let screen = ScreenDc(GetDC(HWND::default()));
         if screen.0.is_invalid() {
@@ -568,15 +655,10 @@ fn grab(reg: &Region, out_w: u32, out_h: u32) -> Option<Vec<u8>> {
                 return None;
             }
             let _sel = Selected(mem.0, old);
-            let ok = if out_w == reg.w && out_h == reg.h {
-                BitBlt(mem.0, 0, 0, ow, oh, screen.0, reg.x, reg.y, SRCCOPY).is_ok()
-            } else {
-                SetStretchBltMode(mem.0, COLORONCOLOR);
-                StretchBlt(mem.0, 0, 0, ow, oh, screen.0, reg.x, reg.y, reg.w as i32, reg.h as i32, SRCCOPY)
-                    .as_bool()
-            };
-            if !ok {
-                return None;
+            let mut dy = 0i32;
+            for &(sy, bh) in bands {
+                BitBlt(mem.0, 0, dy, ow, bh as i32, screen.0, reg.x, sy, SRCCOPY).ok()?;
+                dy += bh as i32;
             }
         } // deselected: GetDIBits needs the bitmap out of any DC
         let mut bi = BITMAPINFO {
@@ -591,9 +673,9 @@ fn grab(reg: &Region, out_w: u32, out_h: u32) -> Option<Vec<u8>> {
             },
             ..Default::default()
         };
-        let len = (out_w as usize).checked_mul(out_h as usize)?.checked_mul(4)?;
+        let len = (reg.w as usize).checked_mul(total as usize)?.checked_mul(4)?;
         let mut buf = vec![0u8; len];
-        let got = GetDIBits(mem.0, bmp.0, 0, out_h, Some(buf.as_mut_ptr().cast()), &mut bi, DIB_RGB_COLORS);
+        let got = GetDIBits(mem.0, bmp.0, 0, total, Some(buf.as_mut_ptr().cast()), &mut bi, DIB_RGB_COLORS);
         if got != oh {
             return None;
         }
@@ -602,9 +684,9 @@ fn grab(reg: &Region, out_w: u32, out_h: u32) -> Option<Vec<u8>> {
     }
 }
 
-/// Checksum of a 64x64 thumbnail of the region (the staleness fingerprint).
-fn thumb_of(reg: &Region) -> Option<u64> {
-    grab(reg, THUMB, THUMB).map(|b| thumb_sum(&b, THUMB, THUMB))
+/// The whole region (for OCR).
+fn grab(reg: &Region) -> Option<Vec<u8>> {
+    capture(reg, &[(reg.y, reg.h)])
 }
 
 /// Copy one tile out of a w-wide BGRA image.
@@ -819,6 +901,41 @@ mod tests {
     }
 
     #[test]
+    fn hover_plan_decisions() {
+        let young = Duration::from_millis(100);
+        let old = Duration::from_millis(600);
+        assert_eq!(hover_plan(false, || panic!("not asked"), young), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(true, || false, old), HoverPlan::Use);
+        assert_eq!(hover_plan(true, || true, young), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, old), HoverPlan::Rebuild);
+    }
+
+    #[test]
+    fn failed_read_is_cached_and_throttled() {
+        // a failed OCR is kept (hover returns early without re-OCR) until 500 ms pass
+        let f = OcrRead::failed(12345);
+        assert!(f.words.is_empty() && f.toks.is_empty());
+        assert_eq!(hover_plan(f.hwnd == 12345, || true, f.made.elapsed()), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, Duration::from_millis(501)), HoverPlan::Rebuild);
+    }
+
+    #[test]
+    fn strip_follows_the_text_and_stays_inside() {
+        // words centred around x = 1000 (screen), region starts at 100
+        let words = vec![
+            wd("a", 0, r(900.0, 0.0, 40.0, 20.0)),
+            wd("b", 0, r(980.0, 0.0, 40.0, 20.0)),
+            wd("c", 0, r(1060.0, 0.0, 40.0, 20.0)),
+        ];
+        assert_eq!(strip_of(&words, 100.0, 1920), (900 - 16, 32));
+        assert_eq!(strip_of(&[], 0.0, 1920), (960 - 16, 32), "no words: centre");
+        let edge = vec![wd("z", 0, r(1910.0, 0.0, 10.0, 10.0))];
+        assert_eq!(strip_of(&edge, 0.0, 1920), (1888, 32), "clamped right");
+        assert_eq!(strip_of(&words, 5000.0, 1920).0, 0, "clamped left");
+        assert_eq!(strip_of(&[], 0.0, 10), (0, 10), "narrow region");
+    }
+
+    #[test]
     fn tokens_empty() {
         assert!(tokens(&[]).is_empty());
     }
@@ -857,6 +974,8 @@ mod tests {
     const LIVE_FONT_PX: i32 = 56;
     const LIVE_LINE_PX: i32 = 90;
     const LIVE_MARGIN: i32 = 60;
+    /// Vertical paint offset of the test text ("scroll" it to make the read stale).
+    static LIVE_SCROLL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
     unsafe extern "system" fn live_wndproc(
         h: windows::Win32::Foundation::HWND,
@@ -881,7 +1000,9 @@ mod tests {
                 SetBkMode(dc, TRANSPARENT);
                 for (i, line) in LIVE_LINES.iter().enumerate() {
                     let mut t: Vec<u16> = line.encode_utf16().collect();
-                    let top = LIVE_MARGIN + i as i32 * LIVE_LINE_PX;
+                    let top = LIVE_MARGIN
+                        + i as i32 * LIVE_LINE_PX
+                        + LIVE_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
                     let mut r = windows::Win32::Foundation::RECT {
                         left: LIVE_MARGIN,
                         top,
@@ -954,9 +1075,10 @@ mod tests {
             let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        // a 1080p-sized window (or the screen, if smaller)
-        let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-        let (wd, ht) = (1920.min(sw), 1080.min(sh));
+        // a 4K-sized window, clipped to the virtual screen (the capture is clipped too)
+        let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)) };
+        let (vx, vy) = unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)) };
+        let (wd, ht) = (3840.min(sw), 2160.min(sh));
         let (htx, hrx) = mpsc::channel::<isize>();
         let win = std::thread::spawn(move || unsafe {
             let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -971,8 +1093,8 @@ mod tests {
                 w!("RaOcrLiveTestWnd"),
                 w!("ra_ocr live test"),
                 WS_POPUP | WS_VISIBLE,
-                0,
-                0,
+                vx,
+                vy,
                 wd,
                 ht,
                 None,
@@ -992,8 +1114,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(700)); // painted and composed
 
         // click in the middle of "brown" (line 0, after "The quick ")
-        let x = LIVE_MARGIN + live_text_width("The quick ") + live_text_width("brown") / 2;
-        let y = LIVE_MARGIN + LIVE_FONT_PX / 2 + 8;
+        let x = vx + LIVE_MARGIN + live_text_width("The quick ") + live_text_width("brown") / 2;
+        let y = vy + LIVE_MARGIN + LIVE_FONT_PX / 2 + 8;
         let t0 = Instant::now();
         let picked = OcrRead::pick(h, x, y);
         let pick_ms = t0.elapsed().as_millis();
@@ -1013,6 +1135,15 @@ mod tests {
             all.extend(m);
         }
         let first_rect = read.rects(&[0]);
+        // the warm-cache staleness recheck (memo expired): fingerprint + compare
+        let mut recheck = Vec::new();
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(520));
+            let t = Instant::now();
+            let r = read.rects(&[0]);
+            recheck.push(t.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(r.map(|v| v.len()), Some(1), "unchanged window is not stale");
+        }
         let mut cache = None;
         let t1 = Instant::now();
         let hov = hover_cached(&mut cache, h, x, y);
@@ -1020,6 +1151,17 @@ mod tests {
         let t2 = Instant::now();
         let hov2 = hover_cached(&mut cache, h, x, y);
         let hover2_ms = t2.elapsed().as_millis();
+        // "scroll" the content by 30 px: the read must go stale (no boxes)
+        LIVE_SCROLL.store(30, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                windows::Win32::Foundation::HWND(h as *mut _),
+                None,
+                true,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(600)); // repainted, past the memo
+        let after_scroll = read.rects(&[0]);
         close_live(h, win);
         std::thread::sleep(Duration::from_millis(600)); // past the staleness memo
         let after_close = read.rects(&[0]);
@@ -1027,6 +1169,8 @@ mod tests {
         println!("ocr_live: window {wd}x{ht}, pick {pick_ms} ms, click ({x},{y})");
         println!("ocr_live: tokens {all:?}");
         println!("ocr_live: first rect {first_rect:?}; hover {hover_ms} ms then {hover2_ms} ms (cached)");
+        println!("ocr_live: staleness recheck ms {recheck:.2?}");
+        println!("ocr_live: {} paragraphs", all.iter().filter(|t| t.ends_with('\n')).count());
         let expected: Vec<&str> = LIVE_LINES
             .iter()
             .flat_map(|l| l.split(' '))
@@ -1041,7 +1185,11 @@ mod tests {
         assert!(crate::ra_uia::contains(&[r], x as f64, y as f64), "box of the clicked word holds the click");
         assert_eq!(hov.map(|v| v.len()), Some(1), "hover finds the word");
         assert_eq!(hov2.map(|v| v.len()), Some(1), "cached hover finds the word");
+        assert_eq!(after_scroll, Some(Vec::new()), "scrolled content -> stale -> no boxes");
         assert_eq!(after_close, Some(Vec::new()), "closed window -> stale -> no boxes");
+        // one GDI screen read costs ~7 ms whatever its size (DWM readback); 25 ms is
+        // half the hover timeout and leaves room for a loaded machine
+        assert!(recheck.iter().all(|&ms| ms < 25.0), "staleness recheck well under the hover timeout");
     }
 
     fn close_live(h: isize, win: std::thread::JoinHandle<()>) {

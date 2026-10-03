@@ -62,13 +62,71 @@ fn letter_name(c: char) -> Option<&'static str> {
     })
 }
 
-/// The lowercase ASCII letters `c` spells: itself for a-z / A-Z, its Latin accent fold
-/// otherwise (`ğ` -> "g", `Ł` -> "l", `Æ` -> "ae"). Empty for anything else.
-fn letters_of(c: char, out: &mut String) {
+/// Russian Cyrillic (33 letters, BGN/PCGN-style) plus Ukrainian і ї є ґ, as
+/// lowercase Latin: "Путин" -> "putin", "Хрущёв" -> "khrushchyov". The hard and soft
+/// signs are silent (""). `None` for anything that is not Cyrillic.
+fn cyrillic(c: char) -> Option<&'static str> {
+    let lc = c.to_lowercase().next()?;
+    Some(match lc {
+        'а' => "a",
+        'б' => "b",
+        'в' => "v",
+        'г' => "g",
+        'д' => "d",
+        'е' => "e",
+        'ё' => "yo",
+        'ж' => "zh",
+        'з' => "z",
+        'и' => "i",
+        'й' => "y",
+        'к' => "k",
+        'л' => "l",
+        'м' => "m",
+        'н' => "n",
+        'о' => "o",
+        'п' => "p",
+        'р' => "r",
+        'с' => "s",
+        'т' => "t",
+        'у' => "u",
+        'ф' => "f",
+        'х' => "kh",
+        'ц' => "ts",
+        'ч' => "ch",
+        'ш' => "sh",
+        'щ' => "shch",
+        'ъ' | 'ь' => "",
+        'ы' => "y",
+        'э' => "e",
+        'ю' => "yu",
+        'я' => "ya",
+        'і' => "i",
+        'ї' => "yi",
+        'є' => "ye",
+        'ґ' => "g",
+        _ => return None,
+    })
+}
+
+/// The lowercase ASCII letters for a non-ASCII letter: Latin accent fold (`ğ` -> "g",
+/// `Ł` -> "l", `Æ` -> "ae") or Cyrillic transliteration. `None` for anything else.
+fn latin_of(c: char) -> Option<&'static str> {
+    crate::ra_norm::fold(c).or_else(|| cyrillic(c))
+}
+
+/// Appends the lowercase ASCII letters `c` spells: itself for a-z / A-Z, `latin_of`
+/// otherwise. False when `c` is not a letter we can say (digits, symbols, CJK).
+fn letters_of(c: char, out: &mut String) -> bool {
     if c.is_ascii_alphabetic() {
         out.push(c.to_ascii_lowercase());
-    } else if let Some(f) = crate::ra_norm::fold(c) {
-        out.extend(f.chars().map(|x| x.to_ascii_lowercase()));
+        return true;
+    }
+    match latin_of(c) {
+        Some(f) => {
+            out.extend(f.chars().map(|x| x.to_ascii_lowercase()));
+            true
+        }
+        None => false,
     }
 }
 
@@ -206,16 +264,17 @@ impl Names {
     }
 }
 
-/// `word` lowercased with Latin accents folded (`Erdoğan` -> "erdogan", `Æ` -> "ae"),
+/// `word` lowercased with Latin accents folded (`Erdoğan` -> "erdogan", `Æ` -> "ae")
+/// and Cyrillic transliterated ("Путин" -> "putin"),
 /// without allocating when there is nothing to change (the common case: `g2p_words`
 /// asks the hand list about every word of every chunk).
 fn lower(word: &str) -> Cow<'_, str> {
-    if !word.chars().any(|c| c.is_uppercase() || (!c.is_ascii() && crate::ra_norm::fold(c).is_some())) {
+    if !word.chars().any(|c| c.is_uppercase() || (!c.is_ascii() && latin_of(c).is_some())) {
         return Cow::Borrowed(word);
     }
     let mut out = String::with_capacity(word.len());
     for c in word.chars().flat_map(char::to_lowercase) {
-        match crate::ra_norm::fold(c) {
+        match latin_of(c) {
             Some(f) => out.extend(f.chars().map(|x| x.to_ascii_lowercase())),
             None => out.push(c),
         }
@@ -269,7 +328,7 @@ impl NameFallback {
         if let Some(p) = n.lts_say(word) {
             return (p, "gru");
         }
-        if !word.chars().any(|c| c.is_ascii_digit() || symbol_word(c).is_some()) {
+        if !word.chars().any(|c| c.is_ascii_digit() || symbol_word(c).is_some() || quiet_symbol(c)) {
             let s = spell(word);
             if !s.is_empty() {
                 return (s, "spell");
@@ -320,7 +379,7 @@ impl Lex<'static> {
 /// misaki's gold lexicon says SEC as "sec"; CMUdict has AWS-like and FYI ("for your
 /// information") readings. Decisions per word are in the phase 3 task 3 report.
 pub const SPELLED: &[&str] = &[
-    "API", "AWS", "COO", "CPU", "DOE", "ESG", "ETF", "FYI", "GPU", "IPO", "LED", "ROI", "SAP", "SEC", "UPS",
+    "API", "AWS", "COO", "CPU", "DOE", "ESG", "ETF", "FYI", "GPU", "IPO", "ROI", "SAP", "SEC", "UPS",
 ];
 
 /// Two-letter acronyms whose lowercase is a word (ra_text's KEEP_CAPS): spelled when
@@ -424,13 +483,19 @@ fn symbol_word(c: char) -> Option<&'static str> {
         '¾' => "three quarters",
         '©' => "copyright",
         '®' => "registered",
-        '™' => "trademark",
         'α' | 'Α' => "alpha",
         'β' | 'Β' => "beta",
         'γ' | 'Γ' => "gamma",
         'δ' | 'Δ' => "delta",
         'ε' | 'Ε' => "epsilon",
+        'ζ' | 'Ζ' => "zeta",
+        'η' | 'Η' => "eta",
         'θ' | 'Θ' => "theta",
+        'ι' | 'Ι' => "iota",
+        'ν' | 'Ν' => "nu",
+        'ξ' | 'Ξ' => "xi",
+        'ο' | 'Ο' => "omicron",
+        'υ' | 'Υ' => "upsilon",
         'κ' | 'Κ' => "kappa",
         'λ' | 'Λ' => "lambda",
         'μ' | 'Μ' | 'µ' => "mu",
@@ -444,6 +509,13 @@ fn symbol_word(c: char) -> Option<&'static str> {
         'ω' | 'Ω' => "omega",
         _ => return None,
     })
+}
+
+/// Symbols with no word of their own: `→` and `•` are a pause (","), `~` says
+/// "about" before a number, `* ^ | ™` are silent. Listed so a token holding one is
+/// read character by character (`Acme™` -> "acme") rather than spelled.
+fn quiet_symbol(c: char) -> bool {
+    matches!(c, '→' | '•' | '~' | '*' | '^' | '|' | '™')
 }
 
 /// Compounds are only looked for in words up to this long (bounds the O(n²) search).
@@ -461,7 +533,8 @@ impl Names {
     ///   go through CamelCase: My|SQL, No|SQL.)
     /// The suffix follows the last letter's sound (`z` / `s` / `ɪz`).
     pub fn acronym(&self, core: &str, lex: &Lex) -> Option<String> {
-        let (stem, suf) = suffix_split(core);
+        // a word that ends in s is not a plural (VIRUS, BUS, STATUS)
+        let (stem, suf) = if self.says_as_word(core, lex) { (core, false) } else { suffix_split(core) };
         let n = stem.len();
         if !(2..=12).contains(&n) || !stem.bytes().all(|b| b.is_ascii_alphabetic()) {
             return None;
@@ -582,6 +655,9 @@ impl Names {
     /// (autos|leep vs auto|sleep). At most ~2n² lookups; runs only on a dictionary miss.
     fn segment(&self, w: &str, lex: &Lex) -> Option<String> {
         let n = w.len();
+        if n < 6 {
+            return None; // also keeps the n - 6 / n - 2 bounds below from underflowing
+        }
         let say = |p: &str| (lex.knows)(p).then(|| (lex.phonemes)(p)).flatten().or_else(|| self.lookup(p));
         let join = |ps: &[&str]| ps.iter().map(|p| say(p)).collect::<Option<String>>();
         let curated = |p: &str| (lex.knows)(p);
@@ -647,22 +723,29 @@ impl Names {
                 continue;
             }
             let mut letters = String::new();
-            while i < chars.len() && symbol_word(chars[i]).is_none() {
-                let before = letters.len();
-                letters_of(chars[i], &mut letters);
-                if letters.len() == before {
-                    break;
-                }
+            while i < chars.len() && symbol_word(chars[i]).is_none() && letters_of(chars[i], &mut letters) {
                 i += 1;
             }
-            if !letters.is_empty() {
-                out.push(self.say_run(&letters));
+            if i > start {
+                // one letter is its name ("A→B"), CMUdict would say "a" as "uh"
+                match letters.len() {
+                    0 => {}
+                    1 => out.push(spell_tight(&letters)),
+                    _ => out.push(self.say_run(&letters)),
+                }
                 continue;
             }
-            let between_digits = i > 0 && chars.get(i + 1).is_some_and(char::is_ascii_digit) && chars[i - 1].is_ascii_digit();
+            let next_digit = chars.get(i + 1).is_some_and(char::is_ascii_digit);
+            let between_digits = i > 0 && next_digit && chars[i - 1].is_ascii_digit();
             if c == '.' && between_digits {
                 out.push(self.say_run("point"));
                 after_point = true;
+            } else if matches!(c, '→' | '•') {
+                out.push(",".to_string());
+            } else if matches!(c, 'ξ' | 'Ξ') {
+                out.push("ksˈI".to_string()); // Greek xi; the hand list's "xi" is the name Xi
+            } else if c == '~' && next_digit {
+                out.push(self.say_run("about"));
             } else if let Some(w) = symbol_word(c) {
                 out.push(self.say_words(w));
             }
@@ -1113,24 +1196,126 @@ mod tests {
         assert_eq!(n.compound("pullup", &lex), Some("<pull><up>".to_string()));
     }
 
-    #[test]
-    fn compound_search_is_cheap_on_a_long_miss() {
-        let n = Names::load(None);
-        let none = Lex::none();
-        let calls = std::cell::Cell::new(0usize);
-        let knows = |_: &str| {
+    /// A 30-letter miss whose first and middle parts are all "known" and whose last
+    /// parts never are: both 2-way and 3-way loops run to the end (worst case).
+    fn worst_case_segment(n: &Names, calls: &std::cell::Cell<usize>) -> Option<String> {
+        let w = format!("{}z", "a".repeat(COMPOUND_MAX - 1));
+        let knows = |p: &str| {
             calls.set(calls.get() + 1);
-            false
+            !p.ends_with('z')
         };
         let lex = Lex { knows: &knows, phonemes: &|_| None };
-        let w = "qzxvbnmlkjhgfdsapoiuytrewqzxcvbnmlkjhgfd"; // 40 letters
-        assert_eq!(n.compound(w, &lex), None);
-        assert!(calls.get() <= w.len() * w.len(), "{} lookups", calls.get());
+        n.compound(&w, &lex)
+    }
+
+    #[test]
+    fn compound_search_runs_both_loops_and_stays_quadratic() {
+        let n = Names::load(None);
+        let calls = std::cell::Cell::new(0usize);
+        assert_eq!(worst_case_segment(&n, &calls), None);
+        let len = COMPOUND_MAX;
+        // the 3-way loop ran (far more lookups than the 2-way loop alone) ...
+        assert!(calls.get() > 4 * len, "{} lookups: the 3-way loop did not run", calls.get());
+        // ... and stayed O(n²)
+        assert!(calls.get() <= 4 * len * len, "{} lookups", calls.get());
+        // generous bound, debug build
         let t = std::time::Instant::now();
-        for _ in 0..1000 {
-            let _ = n.compound(w, &none);
+        for _ in 0..20 {
+            let _ = worst_case_segment(&n, &std::cell::Cell::new(0));
         }
-        assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    /// Release timing (cargo test --release compound_search_release -- --ignored).
+    #[test]
+    #[ignore]
+    fn compound_search_release_under_50ms() {
+        let n = Names::load(None);
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            let _ = worst_case_segment(&n, &std::cell::Cell::new(0));
+        }
+        assert!(t.elapsed() < std::time::Duration::from_millis(50), "{:?} for 100 worst-case words", t.elapsed());
+    }
+
+    #[test]
+    fn segment_guards_short_words_itself() {
+        let n = Names::load(None);
+        let none = Lex::none();
+        for w in ["", "a", "ab", "abcde", "techr"] {
+            assert_eq!(n.segment(w, &none), None, "{w:?}");
+        }
+    }
+
+    #[test]
+    fn caps_words_ending_in_s_are_not_plurals() {
+        use misaki_rs::fallback::Fallback;
+        let n = Names::load(None);
+        let f = cmu_fallback();
+        for w in ["VIRUS", "STATUS", "CRISIS", "BUS", "Virus", "BONUS"] {
+            assert_eq!(n.acronym(w, &Lex::none()), None, "{w}");
+            assert_eq!(f.phonemize(w).unwrap(), n.lookup(w).unwrap(), "{w}");
+        }
+        // LED is mostly the verb in headlines; UPS stays spelled
+        assert_eq!(n.acronym("LED", &Lex::none()), None);
+        assert_eq!(n.acronym("UPS", &Lex::none()), Some(spell_tight("UPS")));
+    }
+
+    #[test]
+    fn cyrillic_is_transliterated() {
+        use misaki_rs::fallback::Fallback;
+        let n = Names::load(None);
+        let f = cmu_fallback();
+        assert_eq!(f.phonemize("Путин").unwrap(), n.lookup("putin").unwrap());
+        assert_eq!(f.phonemize("ПУТИН").unwrap(), n.lookup("putin").unwrap());
+        assert_eq!(f.phonemize("Путин's").unwrap(), n.lookup("putin's").unwrap());
+        assert_eq!(lower("Москва"), "moskva");
+        assert_eq!(lower("Щука"), "shchuka");
+        assert_eq!(lower("Ольга"), "olga", "soft sign is silent");
+        assert_eq!(lower("Хрущёв"), "khrushchyov");
+        assert_eq!(lower("Цой"), "tsoy");
+        assert_eq!(lower("Юлия"), "yuliya");
+        assert_eq!(spell("Жук"), spell("zhuk"));
+        // every letter of the 33-letter alphabet (but the two signs) is said
+        for c in "абвгдеёжзийклмнопрстуфхцчшщыэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЫЭЮЯ".chars() {
+            let w = c.to_string();
+            assert!(!f.phonemize(&w).unwrap().trim().is_empty(), "{c}");
+        }
+        for w in ["ъ", "ь", "Ъ"] {
+            assert!(f.phonemize(w).is_ok());
+        }
+    }
+
+    #[test]
+    fn greek_letters_are_never_silent() {
+        use misaki_rs::fallback::Fallback;
+        let f = cmu_fallback();
+        for c in "αβγδεζηθικλμνξοπρσςτυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ".chars() {
+            assert!(!f.phonemize(&c.to_string()).unwrap().trim().is_empty(), "{c}");
+        }
+    }
+
+    #[test]
+    fn extra_symbols_read_only_where_it_helps() {
+        use misaki_rs::fallback::Fallback;
+        let n = Names::load(None);
+        let f = cmu_fallback();
+        let cmu = |w: &str| n.lookup(w).unwrap();
+        // pauses, not words
+        assert_eq!(f.phonemize("→").unwrap(), ",");
+        assert_eq!(f.phonemize("•").unwrap(), ",");
+        assert_eq!(f.phonemize("A→B").unwrap(), format!("{} , {}", spell_tight("a"), spell_tight("b")));
+        // words
+        assert!(f.phonemize("©").unwrap().contains(&cmu("copyright")));
+        assert_eq!(f.phonemize("~5").unwrap(), format!("{} {}", cmu("about"), cmu("five")));
+        assert!(f.phonemize("20°").unwrap().ends_with(&cmu("degrees")));
+        // silent: the word around them is still read as a word
+        assert_eq!(f.phonemize("Acme™").unwrap(), cmu("acme"));
+        assert_eq!(f.phonemize("~x").unwrap(), spell_tight("x"));
+        for w in ["*", "^", "|", "™", "**"] {
+            assert!(f.phonemize(w).is_ok(), "{w}");
+        }
+        assert_eq!(f.phonemize("x^2").unwrap(), format!("{} {}", spell_tight("x"), cmu("two")));
     }
 
     #[test]

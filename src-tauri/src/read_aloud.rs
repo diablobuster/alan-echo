@@ -16,8 +16,8 @@ use crate::{
     ra_hook::PickHook,
     ra_player::Player,
     ra_text::{self, Word},
-    ra_tts::{ChunkAudio, Device, Engine},
-    ra_uia::{Rect, Uia},
+    ra_tts::{self, ChunkAudio, Device, Engine},
+    ra_uia::{self, Rect, Uia},
 };
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
@@ -30,7 +30,16 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Phase {
     Idle,
-    Picking { reading: bool },
+    /// Pick mode. `resume` = the phase a cancelled pick returns to (`None`: no read).
+    Picking { resume: Option<Resume> },
+    Warming,
+    Reading,
+    Paused,
+}
+
+/// Where a cancelled jump (Esc, the hotkey again, or the pick timeout) goes back to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Resume {
     Warming,
     Reading,
     Paused,
@@ -68,15 +77,24 @@ pub fn step(p: &Phase, ev: Ev) -> (Phase, Vec<Act>) {
     match (p, ev) {
         (Idle, Ev::Error | Ev::Stop) => (Idle, vec![]),
         (_, Ev::Error | Ev::Stop) => (Idle, vec![Teardown]),
-        (Idle, Ev::Hotkey) => (Picking { reading: false }, vec![EnterPick]),
-        (Reading | Paused | Warming, Ev::Hotkey) => (Picking { reading: true }, vec![EnterPick]),
+        (Idle, Ev::Hotkey) => (Picking { resume: None }, vec![EnterPick]),
+        (Warming, Ev::Hotkey) => (Picking { resume: Some(Resume::Warming) }, vec![EnterPick]),
+        (Reading, Ev::Hotkey) => (Picking { resume: Some(Resume::Reading) }, vec![EnterPick]),
+        (Paused, Ev::Hotkey) => (Picking { resume: Some(Resume::Paused) }, vec![EnterPick]),
         (Picking { .. }, Ev::Click) => (Warming, vec![ExitPick, BumpGen, StartRead, ShowWarming]),
         (Picking { .. }, Ev::ClickRejected) => (*p, vec![]),
+        // the first audio of a read that was still warming when the jump began: it plays on
+        (Picking { resume: Some(Resume::Warming) }, Ev::FirstAudio) => {
+            (Picking { resume: Some(Resume::Reading) }, vec![ShowReading])
+        }
         // Esc, the hotkey again, or the pick timeout cancel pick mode (the hotkey is the
-        // fallback when Esc could not be reserved).
-        (Picking { reading: false }, Ev::Esc | Ev::Hotkey) => (Idle, vec![ExitPick, Teardown]),
-        // reading carries on (playback never stopped during pick); the pill shows it again
-        (Picking { reading: true }, Ev::Esc | Ev::Hotkey) => (Reading, vec![ExitPick, ShowReading]),
+        // fallback when Esc could not be reserved) and go back to the phase before it.
+        (Picking { resume: None }, Ev::Esc | Ev::Hotkey) => (Idle, vec![ExitPick, Teardown]),
+        (Picking { resume: Some(r) }, Ev::Esc | Ev::Hotkey) => match r {
+            Resume::Warming => (Warming, vec![ExitPick, ShowWarming]),
+            Resume::Reading => (Reading, vec![ExitPick, ShowReading]),
+            Resume::Paused => (Paused, vec![ExitPick, ShowPaused]),
+        },
         (Warming, Ev::FirstAudio) => (Reading, vec![ShowReading]),
         (Reading, Ev::PlayPause) => (Paused, vec![ShowPaused]),
         (Paused, Ev::PlayPause) => (Reading, vec![ShowReading]),
@@ -127,6 +145,12 @@ pub struct Session {
     /// End sample of each pushed chunk (since the last clear).
     chunk_ends: Vec<u64>,
     pushed: u64,
+    /// Chunk index `chunk_ends[0]` belongs to (the chunk of the last seek).
+    base: usize,
+    /// The source window closed: no more text, and playback ends at this sample (the end
+    /// of the chunk being spoken) even if later chunks were already pushed.
+    closed: bool,
+    stop_at: Option<u64>,
     gen: Arc<AtomicU64>,
 }
 
@@ -145,6 +169,9 @@ impl Session {
             timeline: Vec::new(),
             chunk_ends: Vec::new(),
             pushed: 0,
+            base: 0,
+            closed: false,
+            stop_at: None,
             gen,
         }
     }
@@ -159,6 +186,7 @@ impl Session {
         self.words = words;
         self.raw_len = raw_len;
         self.doc_ended = doc_ended;
+        self.closed = false;
         self.read_id += 1;
         self.seek(0);
     }
@@ -173,6 +201,7 @@ impl Session {
         self.chunks.clear();
         self.raw_len = 0;
         self.doc_ended = true;
+        self.closed = false;
     }
 
     /// Restart synthesis + playback bookkeeping at chunk `idx` under a new generation:
@@ -186,6 +215,46 @@ impl Session {
         self.timeline.clear();
         self.chunk_ends.clear();
         self.pushed = 0;
+        self.base = idx;
+        self.stop_at = None;
+    }
+
+    /// Re-queue from word `wi` (a speed change): the chunk holding it is split at `wi`
+    /// so the new speed is heard from the current word, not the sentence start.
+    /// The caller clears the player.
+    pub fn seek_word(&mut self, wi: usize) {
+        let Some(c) = self.chunk_of(wi) else { return self.seek(self.next_push.min(self.chunks.len())) };
+        let r = self.chunks[c].clone();
+        if wi > r.start {
+            self.chunks[c] = r.start..wi;
+            self.chunks.insert(c + 1, wi..r.end);
+            self.seek(c + 1);
+        } else {
+            self.seek(c);
+        }
+    }
+
+    /// The source window closed (spec §9): finish the chunk being spoken, then end.
+    /// No more text is fetched; later chunks are dropped (queued jobs go stale, and
+    /// audio already pushed past the current chunk is cut by `stop_at`).
+    pub fn source_closed(&mut self, cur_word: Option<usize>) {
+        self.doc_ended = true;
+        self.closed = true;
+        let c = self.current_chunk(cur_word);
+        if c < self.next_push {
+            // the current chunk is playing: everything after it can go
+            self.chunks.truncate(c + 1);
+            self.next_chunk = self.next_chunk.min(c + 1);
+            self.gen.fetch_add(1, Ordering::SeqCst);
+            self.inflight = 0;
+            self.pending.clear();
+            self.stop_at = c.checked_sub(self.base).and_then(|k| self.chunk_ends.get(k)).copied();
+        } else {
+            // nothing of it pushed yet (still warming): keep it and its in-flight job
+            self.chunks.truncate(c + 1);
+            self.next_chunk = self.next_chunk.min(c + 1);
+            self.pending.retain(|&k, _| k <= c);
+        }
     }
 
     fn unplayed(&self, pos: u64) -> usize {
@@ -227,6 +296,9 @@ impl Session {
     /// far; unsubmitted chunks are re-chunked so a sentence cut at the batch edge joins up.
     /// Only an empty batch ends the document.
     pub fn append_more(&mut self, raw: &[String]) {
+        if self.closed {
+            return; // the source window closed: a late batch must not extend the read
+        }
         if raw.is_empty() {
             self.doc_ended = true;
             return;
@@ -259,7 +331,12 @@ impl Session {
     /// earlier chunk. A chunk the engine only partly covered (510-id limit) is split
     /// and its unspoken tail queued right after it.
     pub fn on_chunk(&mut self, g: u64, idx: usize, a: ChunkAudio) -> (Vec<Vec<f32>>, usize) {
-        if g != self.gen() || idx < self.next_push || idx >= self.chunks.len() {
+        if g != self.gen() || idx < self.next_push {
+            return (Vec::new(), 0);
+        }
+        if idx >= self.chunks.len() {
+            // a chunk dropped by `source_closed` while its job was in flight
+            self.inflight = self.inflight.saturating_sub(1);
             return (Vec::new(), 0);
         }
         self.inflight = self.inflight.saturating_sub(1);
@@ -291,6 +368,14 @@ impl Session {
         (out, n)
     }
 
+    /// A chunk whose synthesis failed (non-DirectML error): skip it as silence so the
+    /// read goes on with the next one. Same return as `on_chunk`.
+    pub fn skip_failed(&mut self, g: u64, idx: usize) -> (Vec<Vec<f32>>, usize) {
+        let n = self.chunks.get(idx).map_or(0, |r| r.len());
+        let silent = ChunkAudio { pcm: Vec::new(), words: Vec::new(), device: Device::Cpu, covered: n };
+        self.on_chunk(g, idx, silent)
+    }
+
     /// Global index of the word being spoken at player position `pos`.
     pub fn word_at(&self, pos: u64) -> Option<usize> {
         let k = self.timeline.partition_point(|&(s, _)| s <= pos);
@@ -309,6 +394,9 @@ impl Session {
 
     /// Everything synthesized, pushed and played, and the document has no more text.
     pub fn finished(&self, pos: u64) -> bool {
+        if let Some(end) = self.stop_at {
+            return pos >= end;
+        }
         self.doc_ended
             && self.next_chunk >= self.chunks.len()
             && self.next_push >= self.chunks.len()
@@ -378,6 +466,15 @@ const PICK_TIMEOUT: Duration = Duration::from_secs(30);
 /// many in a row the text is treated as ended (e.g. the source window closed).
 const MORE_MAX_FAILS: u32 = 5;
 const HICCUP_MSG: &str = "Voice engine hiccup — using CPU";
+const NOTHING_MSG: &str = "Nothing readable here";
+const MISSING_MSG: &str = "Voice files missing — run tools/read-aloud/prepare_model.py";
+/// Non-DirectML synth failures in a row before the read ends (one bad chunk is skipped).
+const SYNTH_MAX_FAILS: u32 = 3;
+
+/// A run of non-DirectML synth failures this long ends the read.
+pub fn synth_gives_up(fails_in_a_row: u32) -> bool {
+    fails_in_a_row >= SYNTH_MAX_FAILS
+}
 
 /// Wait before retrying `more()` after `fails` failures in a row; `None` = give up.
 pub fn more_backoff(fails: u32) -> Option<Duration> {
@@ -521,7 +618,8 @@ mod win {
         GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, GA_ROOT,
+        GetAncestor, GetCursorPos, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint,
+        GA_ROOT,
     };
 
     fn hwnd(h: isize) -> HWND {
@@ -580,21 +678,37 @@ mod win {
         pid == std::process::id()
     }
 
-    /// The source window is on screen and the one the user is looking at:
-    /// it exists, is not minimized, and is (the root of) the foreground window.
-    pub fn source_visible(src: isize) -> bool {
+    /// The window still exists (closing the source ends the read, spec §9).
+    pub fn window_exists(h: isize) -> bool {
+        h != 0 && unsafe { IsWindow(hwnd(h)) }.as_bool()
+    }
+
+    /// The source window exists, is shown, and is not minimized.
+    pub fn window_shown(src: isize) -> bool {
         if src == 0 {
             return false;
         }
-        unsafe {
-            let s = hwnd(src);
-            if !IsWindow(s).as_bool() || IsIconic(s).as_bool() {
-                return false;
-            }
-            let fg = GetForegroundWindow();
-            !fg.is_invalid() && GetAncestor(fg, GA_ROOT) == s
-        }
+        let s = hwnd(src);
+        unsafe { IsWindow(s).as_bool() && IsWindowVisible(s).as_bool() && !IsIconic(s).as_bool() }
     }
+
+    /// The word whose centre is at (x, y) is really visible: the top-level window under
+    /// that point is the source (another window on top hides it). Works on any monitor
+    /// and whether or not the source has focus. Our own windows (the click-through
+    /// overlay is skipped by hit-testing anyway; the pill may sit on top) do not hide it.
+    pub fn word_visible(src: isize, x: i32, y: i32) -> bool {
+        if !window_shown(src) {
+            return false;
+        }
+        let w = unsafe { WindowFromPoint(POINT { x, y }) };
+        let root = if w.is_invalid() { 0 } else { unsafe { GetAncestor(w, GA_ROOT) }.0 as isize };
+        super::covers_word(src, root, is_own(root))
+    }
+}
+
+/// Visibility rule for the highlight: `root` = top-level window under the word's centre.
+fn covers_word(src: isize, root: isize, root_is_ours: bool) -> bool {
+    root != 0 && (root == src || root_is_ours)
 }
 
 struct Controller {
@@ -644,6 +758,12 @@ struct Controller {
     more_inflight: bool,
     more_fails: u32,
     more_retry_at: Option<Instant>,
+    /// Non-DirectML synth failures in a row (the read ends at SYNTH_MAX_FAILS).
+    synth_fails: u32,
+    /// The source window was closed during this read (handled once).
+    source_gone: bool,
+    /// Re-read the word rects on the next tick (after a resume).
+    rects_due: bool,
 }
 
 impl Controller {
@@ -687,12 +807,15 @@ impl Controller {
             more_inflight: false,
             more_fails: 0,
             more_retry_at: None,
+            synth_fails: 0,
+            source_gone: false,
+            rects_due: false,
         }
     }
 
     /// Audio is (or may be) playing: drive the timeline / queue.
     fn ticking(&self) -> bool {
-        matches!(self.phase, Phase::Reading | Phase::Picking { reading: true })
+        matches!(self.phase, Phase::Reading | Phase::Picking { resume: Some(Resume::Reading) })
     }
 
     fn run(mut self, rx: mpsc::Receiver<Msg>) {
@@ -797,8 +920,13 @@ impl Controller {
                 }
             }
             Msg::Speed(s) => {
-                self.speed = clamp_speed(s);
+                let new = clamp_speed(s);
+                let changed = new != self.speed;
+                self.speed = new;
                 if self.phase != Phase::Idle {
+                    if changed {
+                        self.requeue_at_speed();
+                    }
                     self.emit_state();
                 }
             }
@@ -875,8 +1003,14 @@ impl Controller {
             }
             Act::StartRead => self.start_read(),
             Act::ShowWarming => self.show("warming"),
-            Act::ShowReading => self.show("reading"),
-            Act::ShowPaused => self.show("paused"),
+            Act::ShowReading => {
+                self.show("reading");
+                self.rects_due = true; // redraw the highlight on the next tick
+            }
+            Act::ShowPaused => {
+                self.show("paused");
+                self.emit_word(Vec::new()); // no highlight box while paused
+            }
             Act::Teardown => self.teardown(),
             Act::Toast(msg) => self.toast(msg),
         }
@@ -940,7 +1074,8 @@ impl Controller {
 
     fn on_hover(&mut self, x: i32, y: i32) {
         let Some(u) = &self.uia else { return };
-        let rects = u.hover(x, y).unwrap_or_default();
+        // None = the lookup timed out (or was superseded): keep the last outline
+        let Some(rects) = u.hover(x, y) else { return };
         if !rects.is_empty() {
             if let Some(m) = win::monitor_of_point(x, y) {
                 if Some(m) != self.overlay {
@@ -962,20 +1097,21 @@ impl Controller {
                 let words = ra_text::normalize(&raw);
                 if words.is_empty() {
                     log::info!("read-aloud: pick had no speakable words");
-                    return self.reject();
+                    return self.reject(Some(NOTHING_MSG));
                 }
                 self.picked = Some((words, raw.len()));
                 self.feed(Ev::Click);
             }
             Err(e) => {
                 log::info!("read-aloud: pick rejected: {e}");
-                self.reject();
+                self.reject((e == ra_uia::NO_TEXT).then_some(NOTHING_MSG));
             }
         }
     }
 
-    fn reject(&mut self) {
-        self.emit_overlay("ra-pick-rejected", serde_json::json!({}));
+    /// A rejected pick: the hint shakes, and shows `msg` for a moment when given.
+    fn reject(&mut self, msg: Option<&str>) {
+        self.emit_overlay("ra-pick-rejected", serde_json::json!({ "message": msg }));
         self.feed(Ev::ClickRejected);
     }
 
@@ -998,6 +1134,8 @@ impl Controller {
             }
         }
         self.used_cpu_retry = false;
+        self.synth_fails = 0;
+        self.source_gone = false;
         self.more_fails = 0;
         self.more_retry_at = None;
         self.device_lost = false;
@@ -1087,46 +1225,52 @@ impl Controller {
     }
 
     fn on_chunk(&mut self, g: u64, idx: usize, r: Result<ChunkAudio, String>) {
-        if self.phase == Phase::Idle {
-            return;
+        if self.phase == Phase::Idle || g != self.s.gen() {
+            return; // stale: a jump / skip since the job was queued
         }
-        match r {
+        let (pcm, n) = match r {
+            Ok(a) => {
+                self.synth_fails = 0;
+                self.s.on_chunk(g, idx, a)
+            }
             Err(e) => {
-                if !self.s.on_error(g) {
-                    return;
-                }
                 log::warn!("read-aloud: synth chunk {idx}: {e}");
+                if e.starts_with(ra_tts::MISSING) {
+                    return self.fail(MISSING_MSG);
+                }
                 if e.starts_with("dml") && !self.used_cpu_retry {
+                    self.s.on_error(g);
                     self.used_cpu_retry = true;
                     self.engine.reset_to_cpu(&self.voice);
                     self.message = Some(HICCUP_MSG.into());
                     self.emit_state();
                     let job = self.s.retry(idx, self.speed);
-                    self.submit(job.into_iter().collect());
-                } else {
-                    self.fail("Voice engine failed");
+                    return self.submit(job.into_iter().collect());
+                }
+                self.synth_fails += 1;
+                if synth_gives_up(self.synth_fails) {
+                    return self.fail("Voice engine failed");
+                }
+                log::warn!("read-aloud: skipping chunk {idx} ({} failure(s) in a row)", self.synth_fails);
+                self.s.skip_failed(g, idx)
+            }
+        };
+        if let Some(p) = &self.player {
+            for buf in &pcm {
+                for piece in buf.chunks(PUSH_PIECE) {
+                    p.push(piece);
                 }
             }
-            Ok(a) => {
-                let (pcm, n) = self.s.on_chunk(g, idx, a);
-                if let Some(p) = &self.player {
-                    for buf in &pcm {
-                        for piece in buf.chunks(PUSH_PIECE) {
-                            p.push(piece);
-                        }
-                    }
-                }
-                if n > 0 && self.message.as_deref() == Some(HICCUP_MSG) {
-                    self.message = None;
-                    self.emit_state();
-                }
-                if n > 0 && self.phase == Phase::Warming {
-                    self.feed(Ev::FirstAudio);
-                }
-                if self.phase != Phase::Idle {
-                    self.pump();
-                }
-            }
+        }
+        if n > 0 && self.message.as_deref() == Some(HICCUP_MSG) {
+            self.message = None;
+            self.emit_state();
+        }
+        if n > 0 && matches!(self.phase, Phase::Warming | Phase::Picking { resume: Some(Resume::Warming) }) {
+            self.feed(Ev::FirstAudio);
+        }
+        if self.phase != Phase::Idle {
+            self.pump();
         }
     }
 
@@ -1139,6 +1283,17 @@ impl Controller {
                 self.feed(Ev::PlayPause);
             }
             return;
+        }
+        if !self.source_gone {
+            let src = self.uia.as_ref().map_or(self.source_hwnd, |u| u.source_hwnd());
+            if src != 0 && !win::window_exists(src) {
+                // spec §9: finish the sentence being spoken, then stop
+                log::info!("read-aloud: source window closed; finishing the current sentence");
+                self.source_gone = true;
+                self.s.source_closed(self.cur_word);
+                self.more_retry_at = None;
+                self.emit_word(Vec::new());
+            }
         }
         self.pump();
         if self.phase != Phase::Reading {
@@ -1161,42 +1316,81 @@ impl Controller {
     }
 
     fn update_word_rects(&mut self, changed: bool) {
-        if !changed && !self.rects_retry && self.rects_at.elapsed() < RECTS_REFRESH {
+        let due = std::mem::take(&mut self.rects_due);
+        if !changed && !due && !self.rects_retry && self.rects_at.elapsed() < RECTS_REFRESH {
             return;
         }
         self.rects_at = Instant::now();
         let retrying = self.rects_retry && !changed;
         self.rects_retry = false;
+        if self.source_gone {
+            return;
+        }
         let Some(src) = self.cur_word.and_then(|w| self.s.words.get(w)).map(|w| w.src.clone()) else { return };
         let Some(u) = &self.uia else { return };
         let source = u.source_hwnd();
-        let mut css = Vec::new();
-        if self.style != "off" && win::source_visible(source) {
-            let rects = u.rects(src.clone());
-            if rects.is_empty() {
-                if changed {
-                    // off screen: scroll it into view, look again next tick
-                    if let Some(&first) = src.first() {
-                        u.scroll_to(first);
-                    }
-                    self.rects_retry = true;
-                } else if retrying {
-                    log::debug!("read-aloud: word still has no rects after scrolling");
+        if self.style == "off" || !win::window_shown(source) {
+            return self.emit_word(Vec::new());
+        }
+        // None = UIA timed out / errored: keep what is drawn, never scroll on it
+        let Some(rects) = u.rects(src.clone()) else { return };
+        if rects.is_empty() {
+            if changed {
+                // off screen: scroll it into view, look again next tick
+                if let Some(&first) = src.first() {
+                    u.scroll_to(first);
                 }
-            } else {
-                let (cx, cy) = (rects[0].x + rects[0].w / 2.0, rects[0].y + rects[0].h / 2.0);
-                if let Some(m) = win::monitor_of_point(cx as i32, cy as i32) {
-                    if Some(m) != self.overlay {
-                        self.show_overlay(m);
-                    }
-                }
-                css = self.to_css(&rects);
+                self.rects_retry = true;
+            } else if retrying {
+                log::debug!("read-aloud: word still has no rects after scrolling");
+            }
+            return self.emit_word(Vec::new());
+        }
+        let (cx, cy) = ((rects[0].x + rects[0].w / 2.0) as i32, (rects[0].y + rects[0].h / 2.0) as i32);
+        // hidden behind another window (or off every monitor): no box
+        if !win::word_visible(source, cx, cy) {
+            return self.emit_word(Vec::new());
+        }
+        if let Some(m) = win::monitor_of_point(cx, cy) {
+            if Some(m) != self.overlay {
+                self.show_overlay(m);
             }
         }
+        let css = self.to_css(&rects);
+        self.emit_word(css);
+    }
+
+    /// Word highlight rects, only when they changed.
+    fn emit_word(&mut self, css: Vec<Rect>) {
         if self.last_word.as_ref() != Some(&css) {
             self.emit_overlay("ra-rects", serde_json::json!({ "kind": "word", "rects": css, "style": self.style }));
             self.last_word = Some(css);
         }
+    }
+
+    /// The speed changed mid-read: re-queue from the current word under a new
+    /// generation so the new speed is heard within about one chunk's synthesis.
+    fn requeue_at_speed(&mut self) {
+        let reading = matches!(self.phase, Phase::Reading | Phase::Paused | Phase::Warming | Phase::Picking { resume: Some(_) });
+        if !reading || self.s.chunks.is_empty() || self.player.is_none() {
+            return;
+        }
+        let pos = self.player.as_ref().map_or(0, |p| p.position());
+        if self.s.finished(pos) {
+            return;
+        }
+        if let Some(p) = &self.player {
+            p.clear();
+        }
+        match self.cur_word {
+            Some(wi) => self.s.seek_word(wi),
+            None => {
+                let at = self.s.next_push.saturating_sub(usize::from(self.s.next_push > self.s.base));
+                self.s.seek(at.min(self.s.chunks.len()));
+            }
+        }
+        self.cur_word = None;
+        self.pump();
     }
 
     fn skip(&mut self, dir: i32) {
@@ -1472,16 +1666,21 @@ mod tests {
     use super::*;
     use Phase::*;
 
+    const FRESH: Phase = Picking { resume: None };
+    const JUMP_R: Phase = Picking { resume: Some(Resume::Reading) };
+    const JUMP_P: Phase = Picking { resume: Some(Resume::Paused) };
+    const JUMP_W: Phase = Picking { resume: Some(Resume::Warming) };
+
     #[test]
     fn hotkey_from_idle_enters_pick() {
         let (p, a) = step(&Idle, Ev::Hotkey);
-        assert_eq!(p, Picking { reading: false });
+        assert_eq!(p, FRESH);
         assert!(a.contains(&Act::EnterPick));
     }
 
     #[test]
     fn picking_click_while_loading_goes_to_warming() {
-        let (p, a) = step(&Picking { reading: false }, Ev::Click);
+        let (p, a) = step(&FRESH, Ev::Click);
         assert_eq!(p, Warming);
         assert!(a.contains(&Act::StartRead) && a.contains(&Act::ShowWarming) && a.contains(&Act::ExitPick));
         let (p2, a2) = step(&p, Ev::FirstAudio);
@@ -1491,23 +1690,65 @@ mod tests {
 
     #[test]
     fn rejected_click_stays_in_pick() {
-        let (p, a) = step(&Picking { reading: false }, Ev::ClickRejected);
-        assert_eq!(p, Picking { reading: false });
-        assert!(a.is_empty());
+        for p in [FRESH, JUMP_R, JUMP_P, JUMP_W] {
+            let (n, a) = step(&p, Ev::ClickRejected);
+            assert_eq!(n, p);
+            assert!(a.is_empty());
+        }
     }
 
     #[test]
     fn esc_in_pick_returns_to_previous() {
-        assert_eq!(step(&Picking { reading: false }, Ev::Esc).0, Idle);
-        assert_eq!(step(&Picking { reading: true }, Ev::Esc).0, Reading);
+        assert_eq!(step(&FRESH, Ev::Esc).0, Idle);
+        assert_eq!(step(&JUMP_R, Ev::Esc).0, Reading);
+        assert_eq!(step(&JUMP_P, Ev::Esc).0, Paused);
+        assert_eq!(step(&JUMP_W, Ev::Esc).0, Warming);
+    }
+
+    #[test]
+    fn jump_remembers_the_phase_it_came_from() {
+        assert_eq!(step(&Reading, Ev::Hotkey).0, JUMP_R);
+        assert_eq!(step(&Paused, Ev::Hotkey).0, JUMP_P);
+        assert_eq!(step(&Warming, Ev::Hotkey).0, JUMP_W);
+    }
+
+    #[test]
+    fn cancelled_jump_from_paused_stays_paused() {
+        // Esc, the hotkey and the 30 s timeout (fed as Esc) must not resume the audio
+        for ev in [Ev::Esc, Ev::Hotkey] {
+            let (p, a) = step(&JUMP_P, ev);
+            assert_eq!(p, Paused);
+            assert_eq!(a, vec![Act::ExitPick, Act::ShowPaused]);
+        }
+    }
+
+    #[test]
+    fn cancelled_jump_from_warming_stays_warming() {
+        for ev in [Ev::Esc, Ev::Hotkey] {
+            let (p, a) = step(&JUMP_W, ev);
+            assert_eq!(p, Warming);
+            assert_eq!(a, vec![Act::ExitPick, Act::ShowWarming]);
+        }
+    }
+
+    #[test]
+    fn first_audio_during_a_jump_from_warming_resumes_reading() {
+        let (p, a) = step(&JUMP_W, Ev::FirstAudio);
+        assert_eq!(p, JUMP_R);
+        assert_eq!(a, vec![Act::ShowReading]);
+        assert_eq!(step(&p, Ev::Esc).0, Reading);
+        // other pick phases ignore it
+        assert_eq!(step(&JUMP_P, Ev::FirstAudio), (JUMP_P, vec![]));
     }
 
     #[test]
     fn jump_bumps_generation() {
-        let (p, _) = step(&Reading, Ev::Hotkey);
-        assert_eq!(p, Picking { reading: true });
-        let (_, a) = step(&p, Ev::Click);
-        assert!(a.contains(&Act::BumpGen));
+        for from in [Reading, Paused, Warming] {
+            let (p, _) = step(&from, Ev::Hotkey);
+            let (n, a) = step(&p, Ev::Click);
+            assert_eq!(n, Warming);
+            assert!(a.contains(&Act::BumpGen));
+        }
     }
 
     #[test]
@@ -1518,7 +1759,7 @@ mod tests {
 
     #[test]
     fn every_error_ends_idle() {
-        for p in [Picking { reading: false }, Picking { reading: true }, Warming, Reading, Paused] {
+        for p in [FRESH, JUMP_R, JUMP_P, JUMP_W, Warming, Reading, Paused] {
             let (n, a) = step(&p, Ev::Error);
             assert_eq!(n, Idle, "{p:?}");
             assert!(a.contains(&Act::Teardown));
@@ -1544,19 +1785,19 @@ mod tests {
 
     #[test]
     fn esc_while_reading_resumes_and_shows_reading() {
-        let (p, a) = step(&Picking { reading: true }, Ev::Esc);
+        let (p, a) = step(&JUMP_R, Ev::Esc);
         assert_eq!(p, Reading);
         assert_eq!(a, vec![Act::ExitPick, Act::ShowReading]);
-        let (_, a) = step(&Picking { reading: false }, Ev::Esc);
+        let (_, a) = step(&FRESH, Ev::Esc);
         assert_eq!(a, vec![Act::ExitPick, Act::Teardown]);
     }
 
     #[test]
     fn hotkey_in_pick_cancels_like_esc() {
-        assert_eq!(step(&Picking { reading: false }, Ev::Hotkey), (Idle, vec![Act::ExitPick, Act::Teardown]));
-        assert_eq!(step(&Picking { reading: true }, Ev::Hotkey), (Reading, vec![Act::ExitPick, Act::ShowReading]));
+        assert_eq!(step(&FRESH, Ev::Hotkey), (Idle, vec![Act::ExitPick, Act::Teardown]));
+        assert_eq!(step(&JUMP_R, Ev::Hotkey), (Reading, vec![Act::ExitPick, Act::ShowReading]));
         // and a second press starts a new pick
-        assert_eq!(step(&Idle, Ev::Hotkey).0, Picking { reading: false });
+        assert_eq!(step(&Idle, Ev::Hotkey).0, FRESH);
     }
 }
 
@@ -1697,6 +1938,101 @@ mod session_tests {
         assert!(!s.finished(u64::MAX));
         s.append_more(&[]);
         assert!(!s.wants_more(), "an empty batch ends the document");
+    }
+
+    #[test]
+    fn source_closed_finishes_the_current_chunk_then_ends() {
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(words(40, 5), 40, false); // more text would follow
+        let g = s.gen();
+        s.jobs(0, 2.2); // 0, 1
+        s.on_chunk(g, 0, audio(5, 5));
+        s.on_chunk(g, 1, audio(5, 5));
+        s.jobs(5 * PER_WORD, 2.2); // 2 in flight
+        // speaking word 6 (chunk 1); chunk 2 is still being synthesized
+        s.source_closed(Some(6));
+        assert_eq!(s.chunks.len(), 2, "chunks after the current one are dropped");
+        assert!(!s.wants_more(), "no more text is fetched");
+        assert_ne!(s.gen(), g, "queued jobs beyond it go stale");
+        assert_eq!(s.on_chunk(g, 2, audio(5, 5)).1, 0);
+        assert!(s.jobs(6 * PER_WORD, 2.2).is_empty());
+        assert!(!s.finished(9 * PER_WORD), "the current sentence finishes");
+        assert!(s.finished(10 * PER_WORD));
+        s.append_more(&["late ".to_string()]);
+        assert_eq!(s.words.len(), 40, "a late more() batch is ignored");
+    }
+
+    #[test]
+    fn source_closed_cuts_audio_already_pushed_past_the_current_chunk() {
+        let mut s = session(40, 5);
+        let g = s.gen();
+        s.jobs(0, 2.2);
+        s.on_chunk(g, 0, audio(5, 5));
+        s.on_chunk(g, 1, audio(5, 5)); // chunk 1 pushed but not yet playing
+        s.source_closed(Some(2)); // speaking chunk 0
+        assert!(!s.finished(4 * PER_WORD));
+        assert!(s.finished(5 * PER_WORD), "ends at the current chunk's end");
+    }
+
+    #[test]
+    fn source_closed_while_warming_keeps_the_first_chunk() {
+        let mut s = session(40, 5);
+        let g = s.gen();
+        s.jobs(0, 2.2); // 0 and 1 in flight, nothing pushed
+        s.source_closed(None);
+        assert_eq!(s.chunks.len(), 1);
+        assert_eq!(s.gen(), g, "the first chunk's job is still wanted");
+        assert_eq!(s.on_chunk(g, 1, audio(5, 5)).1, 0, "dropped chunk's late result");
+        assert_eq!(s.on_chunk(g, 0, audio(5, 5)).1, 1);
+        assert!(s.finished(5 * PER_WORD), "in-flight count settles, so the read can end");
+    }
+
+    #[test]
+    fn failed_chunk_is_skipped_as_silence() {
+        let mut s = session(20, 5);
+        let g = s.gen();
+        s.jobs(0, 2.2);
+        let (pcm, n) = s.skip_failed(g, 0);
+        assert_eq!(n, 1);
+        assert!(pcm.iter().all(|b| b.is_empty()));
+        let (_, n) = s.on_chunk(g, 1, audio(5, 5));
+        assert_eq!(n, 1, "the next chunk plays");
+        assert_eq!(s.word_at(0), Some(5));
+    }
+
+    #[test]
+    fn speed_change_requeues_from_the_current_word() {
+        let mut s = session(40, 40); // chunks 0..12, 12..40
+        let g = s.gen();
+        s.jobs(0, 2.2);
+        s.seek_word(16);
+        assert_ne!(s.gen(), g);
+        assert_eq!(s.chunks[1], 12..16);
+        assert_eq!(s.chunks[2], 16..40);
+        let j = s.jobs(0, 3.0);
+        assert_eq!(j[0].idx, 2);
+        assert_eq!(j[0].words[0], "w16");
+        assert_eq!(j[0].rate, 3.0);
+        // at a chunk start: no split
+        let n = s.chunks.len();
+        s.seek_word(16);
+        assert_eq!(s.chunks.len(), n);
+        assert_eq!(s.jobs(0, 3.0)[0].idx, 2);
+    }
+
+    #[test]
+    fn highlight_shows_only_when_the_source_is_on_top_at_the_word() {
+        assert!(covers_word(10, 10, false), "source on top (focused or not, any monitor)");
+        assert!(!covers_word(10, 20, false), "another app covers the word");
+        assert!(covers_word(10, 20, true), "our own pill/overlay does not hide it");
+        assert!(!covers_word(10, 0, false), "nothing under the point");
+    }
+
+    #[test]
+    fn one_bad_chunk_is_skipped_three_in_a_row_end_the_read() {
+        assert!(!synth_gives_up(1));
+        assert!(!synth_gives_up(2));
+        assert!(synth_gives_up(3));
     }
 
     #[test]

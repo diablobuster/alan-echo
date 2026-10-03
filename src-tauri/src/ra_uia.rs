@@ -45,10 +45,10 @@ pub fn contains(rects: &[Rect], x: f64, y: f64) -> bool {
 }
 
 enum Req {
-    Hover(i32, i32, Sender<Option<Vec<Rect>>>),
+    Hover(i32, i32, Sender<Vec<Rect>>),
     Pick(i32, i32, Sender<Result<Vec<String>, String>>),
     More(Sender<Result<Vec<String>, String>>),
-    Rects(Vec<usize>, Sender<Vec<Rect>>),
+    Rects(Vec<usize>, Sender<Option<Vec<Rect>>>),
     Scroll(usize),
 }
 
@@ -66,7 +66,7 @@ const MORE_BATCH: usize = 400;
 /// Max ancestors walked from the point element looking for a TextPattern.
 const MAX_ANCESTORS: usize = 30;
 /// Error text for "nothing with a TextPattern here" — the only pick error that is retried.
-const NO_TEXT: &str = "no TextPattern under the point";
+pub const NO_TEXT: &str = "no TextPattern under the point";
 
 impl Uia {
     /// Spawn the worker and start warming the UIA connection to `hwnd` (the foreground
@@ -90,12 +90,13 @@ impl Uia {
         self.source.load(Ordering::Acquire)
     }
 
-    /// Word rects under the point, or `None` (no word, not a text element, our own
-    /// window, or > 50 ms).
+    /// Word rects under the point; empty when there is no word there (not a text
+    /// element, our own window). `None` = no answer: the lookup took > 50 ms or was
+    /// superseded by a newer hover (the caller keeps what it shows).
     pub fn hover(&self, x: i32, y: i32) -> Option<Vec<Rect>> {
         let (t, r) = mpsc::channel();
         self.tx.send(Req::Hover(x, y, t)).ok()?;
-        r.recv_timeout(Duration::from_millis(50)).ok().flatten()
+        r.recv_timeout(Duration::from_millis(50)).ok()
     }
 
     /// Validate the click (rules 2/3) on whatever window is under the point and return
@@ -127,13 +128,12 @@ impl Uia {
     }
 
     /// Fresh screen rects for the given source indices (rule 9: never cached).
-    pub fn rects(&self, src: Vec<usize>) -> Vec<Rect> {
+    /// `Some(empty)` = the word is off screen; `None` = no answer (timed out after
+    /// 100 ms, superseded by a newer request, or a UIA error): not "off screen".
+    pub fn rects(&self, src: Vec<usize>) -> Option<Vec<Rect>> {
         let (t, r) = mpsc::channel();
-        if self.tx.send(Req::Rects(src, t)).is_err() {
-            return Vec::new();
-        }
-        r.recv_timeout(Duration::from_millis(100))
-            .unwrap_or_default()
+        self.tx.send(Req::Rects(src, t)).ok()?;
+        r.recv_timeout(Duration::from_millis(100)).ok().flatten()
     }
 
     /// Scroll the source so token `src_idx` is visible (rule 4). Fire-and-forget.
@@ -260,10 +260,10 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
             Req::Hover(x, y, t) => {
                 // Coalesce: a newer hover is queued, so this one is stale. Dropping `t`
                 // makes the (already timed-out) caller see `None`.
-                if pending.iter().any(|r| matches!(r, Req::Hover(..))) {
+                if superseded(&pending, |r| matches!(r, Req::Hover(..))) {
                     continue;
                 }
-                let _ = t.send(word_at(&mut st, x, y).ok().map(|(_, r)| r));
+                let _ = t.send(word_at(&mut st, x, y).map(|(_, r)| r).unwrap_or_default());
             }
             // If the caller already timed out (reply undeliverable), roll the read back so
             // source indices stay aligned with the tokens the caller actually has.
@@ -286,12 +286,12 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
                 }
             }
             Req::Rects(src, t) => {
-                let v = src
-                    .iter()
-                    .filter_map(|&i| st.read.ranges.get(i))
-                    .flat_map(rects_of)
-                    .collect();
-                let _ = t.send(v);
+                // Coalesce like hovers: only the newest request is answered.
+                if superseded(&pending, |r| matches!(r, Req::Rects(..))) {
+                    let _ = t.send(None);
+                    continue;
+                }
+                let _ = t.send(word_rects(&st.read, &src));
             }
             Req::Scroll(i) => {
                 if let Some(r) = st.read.ranges.get(i) {
@@ -300,6 +300,21 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
             }
         }
     }
+}
+
+/// A newer request of the same kind is queued, so this one is stale.
+fn superseded(pending: &VecDeque<Req>, same_kind: impl Fn(&Req) -> bool) -> bool {
+    pending.iter().any(same_kind)
+}
+
+/// Rects of the words at source indices `src`; `None` if a range is unknown or UIA
+/// errors (so the caller never mistakes a failure for "off screen").
+fn word_rects(read: &Read, src: &[usize]) -> Option<Vec<Rect>> {
+    let mut out = Vec::new();
+    for &i in src {
+        out.extend(rects_of(read.ranges.get(i)?)?);
+    }
+    Some(out)
 }
 
 /// Rule 1: touch the window's tree so Chromium builds its accessibility tree now
@@ -472,7 +487,7 @@ fn word_at(st: &mut State, x: i32, y: i32) -> Result<(IUIAutomationTextRange, Ve
     }
     let r = unsafe { tp.RangeFromPoint(POINT { x, y }) }.map_err(|e| e.to_string())?;
     unsafe { r.ExpandToEnclosingUnit(TextUnit_Word) }.map_err(|e| e.to_string())?;
-    let rects = rects_of(&r);
+    let rects = rects_of(&r).unwrap_or_default();
     // Rule 2: UIA snaps to the nearest word; accept only a click on the word itself.
     if !contains(&rects, x as f64, y as f64) {
         return Err("click is not on a word".into());
@@ -544,27 +559,28 @@ fn read_forward(read: &mut Read, n: usize) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Bounding rects of a range (empty when off-screen). Never cached (rule 9).
-fn rects_of(r: &IUIAutomationTextRange) -> Vec<Rect> {
-    let Ok(sa) = (unsafe { r.GetBoundingRectangles() }) else {
-        return Vec::new();
-    };
+/// Bounding rects of a range (empty when off-screen; `None` on a UIA error).
+/// Never cached (rule 9).
+fn rects_of(r: &IUIAutomationTextRange) -> Option<Vec<Rect>> {
+    let sa = unsafe { r.GetBoundingRectangles() }.ok()?;
     if sa.is_null() {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let nums = unsafe { read_f64_array(sa) };
     unsafe {
         let _ = SafeArrayDestroy(sa);
     }
-    nums.chunks_exact(4)
-        .filter(|c| c[2] > 0.0 && c[3] > 0.0)
-        .map(|c| Rect {
-            x: c[0],
-            y: c[1],
-            w: c[2],
-            h: c[3],
-        })
-        .collect()
+    Some(
+        nums.chunks_exact(4)
+            .filter(|c| c[2] > 0.0 && c[3] > 0.0)
+            .map(|c| Rect {
+                x: c[0],
+                y: c[1],
+                w: c[2],
+                h: c[3],
+            })
+            .collect(),
+    )
 }
 
 /// Read a 1-D SAFEARRAY of VT_R8. Caller still owns (and destroys) `sa`.
@@ -653,6 +669,24 @@ mod tests {
         assert!(contains(&r, 2.0, 32.0));
         assert!(!contains(&r, 15.0, 25.0));
         assert!(!contains(&[], 0.0, 0.0));
+    }
+
+    #[test]
+    fn newer_request_of_the_same_kind_supersedes() {
+        let (t, _r) = mpsc::channel();
+        let (h, _r2) = mpsc::channel();
+        let q: VecDeque<Req> = [Req::Hover(1, 1, h), Req::Scroll(3)].into_iter().collect();
+        assert!(superseded(&q, |r| matches!(r, Req::Hover(..))));
+        assert!(!superseded(&q, |r| matches!(r, Req::Rects(..))));
+        let q: VecDeque<Req> = [Req::Rects(vec![0], t)].into_iter().collect();
+        assert!(superseded(&q, |r| matches!(r, Req::Rects(..))));
+    }
+
+    #[test]
+    fn rects_of_an_unknown_word_is_no_answer_not_off_screen() {
+        let read = Read::default();
+        assert_eq!(word_rects(&read, &[0]), None);
+        assert_eq!(word_rects(&read, &[]), Some(vec![]));
     }
 }
 

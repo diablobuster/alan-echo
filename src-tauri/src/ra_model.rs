@@ -24,7 +24,8 @@ pub fn files(data_dir: &Path) -> Files {
 
 pub fn is_installed(data_dir: &Path) -> bool {
     let f = files(data_dir);
-    f.q8_dml.exists() && f.tokenizer.exists() && f.voices_dir.join("af_heart.bin").exists()
+    // fp32 is the default (CPU) model and the GPU fallback, so it is required too
+    f.q8_dml.exists() && f.fp32.exists() && f.tokenizer.exists() && f.voices_dir.join("af_heart.bin").exists()
 }
 
 #[cfg(test)]
@@ -36,6 +37,20 @@ mod tests {
         let f = files(Path::new("C:/x"));
         assert!(f.q8_dml.ends_with("models/kokoro/model_q8_dml.onnx"));
         assert!(f.voices_dir.ends_with("models/kokoro/voices"));
+    }
+
+    #[test]
+    fn not_installed_without_the_cpu_model() {
+        let d = std::env::temp_dir().join(format!("ra-nofp32-{}", std::process::id()));
+        let f = files(&d);
+        std::fs::create_dir_all(&f.voices_dir).unwrap();
+        for p in [&f.q8_dml, &f.tokenizer, &f.voices_dir.join("af_heart.bin")] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert!(!is_installed(&d), "fp32 (default CPU model) missing");
+        std::fs::write(&f.fp32, b"x").unwrap();
+        assert!(is_installed(&d));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

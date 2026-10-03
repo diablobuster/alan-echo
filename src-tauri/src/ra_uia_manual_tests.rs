@@ -265,7 +265,7 @@ fn nth_word(tp: &IUIAutomationTextPattern, n: i32) -> (String, Vec<Rect>) {
         .unwrap();
         r.Move(TextUnit_Word, n).unwrap();
         r.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
-        (r.GetText(-1).unwrap().to_string(), rects_of(&r))
+        (r.GetText(-1).unwrap().to_string(), rects_of(&r).unwrap_or_default())
     }
 }
 
@@ -282,8 +282,8 @@ fn window_rect(h: HWND) -> Rect {
 }
 
 fn hover_retry(ra: &Uia, x: i32, y: i32) -> Option<Vec<Rect>> {
-    // 50 ms budget; the first call may be cold.
-    (0..5).find_map(|_| ra.hover(x, y))
+    // 50 ms budget; the first call may be cold (None = no answer in time).
+    (0..5).find_map(|_| ra.hover(x, y).filter(|v| !v.is_empty()))
 }
 
 #[test]
@@ -348,15 +348,23 @@ fn uia_notepad_manual() {
     );
     assert_eq!(ra.source_hwnd(), hwnd.0 as isize);
 
-    let r0 = ra.rects(vec![0]);
+    let r0 = ra.rects(vec![0]).expect("rects(0) answered");
     println!("rects(0) = {r0:?}");
     assert!(
         !r0.is_empty() && contains(&r0, cx as f64, cy as f64),
         "rects(0) must cover the click"
     );
-    let multi = ra.rects(vec![0, 1, 2]);
+    let multi = ra.rects(vec![0, 1, 2]).expect("rects answered");
     assert!(multi.len() >= 3, "3 words -> >= 3 rects, got {multi:?}");
-    assert!(ra.rects(vec![999_999]).is_empty());
+    assert_eq!(ra.rects(vec![999_999]), None, "unknown index: no answer, not 'off screen'");
+    // I-4: a burst of rects requests is coalesced; only the newest is answered, and an
+    // answered request is never an empty "off screen" result for an on-screen word.
+    let burst: Vec<_> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..8).map(|_| sc.spawn(|| ra.rects(vec![0]))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    println!("rects burst: {:?}", burst.iter().map(|r| r.as_ref().map(|v| v.len())).collect::<Vec<_>>());
+    assert!(burst.iter().flatten().all(|v| !v.is_empty()), "no spurious empty rects");
 
     let more = ra.more().expect("more()");
     println!("more() -> {} tokens", more.len());
@@ -378,7 +386,7 @@ fn uia_notepad_manual() {
         res.is_err(),
         "click below the last line must be rejected (rule 2)"
     );
-    assert!(ra.hover(blank.0, blank.1).is_none());
+    assert!(ra.hover(blank.0, blank.1).is_none_or(|v| v.is_empty()));
     // Rule 3: above the text element (Notepad's tab strip / menu) is rejected.
     let above = (el_rect.x as i32 + 40, el_rect.y as i32 - 40);
     let res = ra.pick(above.0, above.1);
@@ -390,7 +398,7 @@ fn uia_notepad_manual() {
 
     ra.scroll_to(0); // non-Chromium path: must not hang the worker
     assert!(
-        !ra.rects(vec![0]).is_empty(),
+        !ra.rects(vec![0]).unwrap_or_default().is_empty(),
         "worker still alive after scroll_to; old read kept"
     );
     assert_eq!(
@@ -504,7 +512,7 @@ fn uia_two_notepads_manual() {
                 return false;
             };
             let _ = r.ExpandToEnclosingUnit(TextUnit_Word);
-            let rc = rects_of(&r);
+            let rc = rects_of(&r).unwrap_or_default();
             contains(&rc, x as f64, y as f64)
                 && contains(std::slice::from_ref(&ra_rect), x as f64, y as f64)
         })
@@ -515,7 +523,7 @@ fn uia_two_notepads_manual() {
         res.is_err(),
         "text hidden under the top window must not be read"
     );
-    assert!(ra.hover(covered.0, covered.1).is_none());
+    assert!(ra.hover(covered.0, covered.1).is_none_or(|v| v.is_empty()));
     assert_eq!(
         ra.source_hwnd(),
         wb.0 as isize,
@@ -672,7 +680,7 @@ fn uia_browser_manual() {
             if let Ok(r) =
                 unsafe { doc.FindText(&windows::core::BSTR::from("Paragraph03"), false, false) }
             {
-                let rc = rects_of(&r);
+                let rc = rects_of(&r).unwrap_or_default();
                 if !rc.is_empty() {
                     target = Some(rc[0].clone());
                     break;
@@ -727,17 +735,18 @@ fn uia_browser_manual() {
     assert!(all.len() > 3000, "the whole page was read");
     assert!(ra.more().expect("more()").is_empty(), "stays empty at the end");
 
-    let r0 = ra.rects(vec![0]);
+    let r0 = ra.rects(vec![0]).unwrap_or_default();
     assert!(
         contains(&r0, cx as f64, cy as f64),
         "rects(0) covers the click: {r0:?}"
     );
     let far = 1500;
     let before = ra.rects(vec![far]);
+    assert_eq!(before.as_deref().map(<[Rect]>::is_empty), Some(true), "far word is off screen: Some(empty)");
     let t = Instant::now();
     ra.scroll_to(far);
     std::thread::sleep(Duration::from_millis(1000));
-    let after = ra.rects(vec![far]);
+    let after = ra.rects(vec![far]).unwrap_or_default();
     println!(
         "token {far} {:?}: rects before scroll {before:?}, after {after:?} (scroll+1s wait {} ms)",
         all[far],

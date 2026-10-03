@@ -7,24 +7,30 @@ export default function ReadAloudOverlay() {
   const [hover, setHover] = useState([])
   const [word, setWord] = useState({ rects: [], style: 'brass' })
   const [shake, setShake] = useState(false)
+  const [note, setNote] = useState(null)
   const shakeTimer = useRef(null)
+  const noteTimer = useRef(null)
 
   useEffect(() => {
     document.documentElement.classList.add('ra-window')
     const offs = [
-      listen('ra-overlay-mode', e => { setMode(e.payload.mode); setHover([]) }),
+      listen('ra-overlay-mode', e => { setMode(e.payload.mode); setHover([]); setNote(null) }),
       listen('ra-rects', e => {
         if (e.payload.kind === 'hover') setHover(e.payload.rects)
         else setWord({ rects: e.payload.rects, style: e.payload.style })
       }),
-      listen('ra-pick-rejected', () => {
+      listen('ra-pick-rejected', e => {
+        const msg = e.payload?.message
+        clearTimeout(noteTimer.current)
+        setNote(msg || null)
+        if (msg) noteTimer.current = setTimeout(() => setNote(null), 2000)
         clearTimeout(shakeTimer.current)
         setShake(false)
         requestAnimationFrame(() => setShake(true))
         shakeTimer.current = setTimeout(() => setShake(false), 320)
       }),
     ]
-    return () => { clearTimeout(shakeTimer.current); offs.forEach(p => p.then(f => f())) }
+    return () => { clearTimeout(shakeTimer.current); clearTimeout(noteTimer.current); offs.forEach(p => p.then(f => f())) }
   }, [])
 
   const box = (r, cls, i) => (
@@ -36,7 +42,7 @@ export default function ReadAloudOverlay() {
       {mode === 'pick' && <div className="ra-dim" />}
       {mode === 'pick' && (
         <div className={`ra-hint${shake ? ' shake' : ''}`} role="status">
-          <span>Click any word to start reading</span>
+          <span>{note || 'Click any word to start reading'}</span>
           <span><kbd>Esc</kbd> cancel</span>
         </div>
       )}

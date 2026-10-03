@@ -1,7 +1,8 @@
 //! Read Aloud — low-level mouse hook, alive only during pick mode.
 //!
 //! Moves pass through to the target app; the left click (down + its up) is
-//! swallowed so the app never sees it. Callbacks run inside the hook proc, which
+//! swallowed so the app never sees it — except over our own windows (the Now Reading
+//! pill), where the click passes through so its buttons keep working. Callbacks run inside the hook proc, which
 //! Windows drops if it takes ~300 ms+, so they must only send to a channel.
 //! Only one `PickHook` may be alive at a time (callbacks live in statics); a second
 //! `install` while one is alive returns an inactive no-op hook.
@@ -11,12 +12,13 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, HHOOK, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_USER,
+    CallNextHookEx, GetAncestor, GetMessageW, GetWindowThreadProcessId, PeekMessageW,
+    PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK,
+    MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_QUIT, WM_USER,
 };
 
 type Cb = Box<dyn Fn(i32, i32) + Send>;
@@ -27,6 +29,25 @@ static CLICK: OnceLock<Mutex<Option<Cb>>> = OnceLock::new();
 static SWALLOW_UP: AtomicBool = AtomicBool::new(false);
 /// True while a `PickHook` owns the statics above.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Test hook: when false, clicks over our own windows are swallowed like any other
+/// (the manual test's target window lives in the test process).
+static PASS_OWN: AtomicBool = AtomicBool::new(true);
+
+/// The top-level window under the point belongs to this process (the click-through
+/// overlay is skipped by hit-testing, so this is the pill or another Echo window).
+fn over_own_window(x: i32, y: i32) -> bool {
+    unsafe {
+        let w = WindowFromPoint(POINT { x, y });
+        if w.is_invalid() {
+            return false;
+        }
+        let root = GetAncestor(w, GA_ROOT);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(if root.is_invalid() { w } else { root }, Some(&mut pid));
+        pid == std::process::id()
+    }
+}
 
 /// How long `drop` waits for the up of a swallowed click (so it is swallowed too).
 const UP_WAIT: Duration = Duration::from_millis(500);
@@ -55,6 +76,7 @@ unsafe extern "system" fn hook_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT 
                     cb(x, y);
                 }
             }
+            WM_LBUTTONDOWN if PASS_OWN.load(Ordering::Relaxed) && over_own_window(x, y) => {}
             WM_LBUTTONDOWN => {
                 if let Some(cb) = slot(&CLICK).lock().as_ref() {
                     cb(x, y);
@@ -182,9 +204,11 @@ mod tests {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-        PostMessageW, RegisterClassW, SetCursorPos, TranslateMessage, HMENU, WM_CLOSE, WNDCLASSW,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        PostMessageW, RegisterClassW, SetCursorPos, SetLayeredWindowAttributes, ShowWindow,
+        TranslateMessage, HMENU, LWA_ALPHA, SW_SHOWNOACTIVATE, WM_CLOSE, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
     };
+    use windows::Win32::Foundation::COLORREF;
 
     static DOWNS: AtomicUsize = AtomicUsize::new(0);
     static UPS: AtomicUsize = AtomicUsize::new(0);
@@ -246,7 +270,7 @@ mod tests {
             let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
         let (x, y, wd, ht) = (200, 200, 240, 120);
-        let (htx, hrx) = mpsc::channel::<isize>();
+        let (htx, hrx) = mpsc::channel::<(isize, isize)>();
         let win = std::thread::spawn(move || unsafe {
             let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let wc = WNDCLASSW {
@@ -255,8 +279,9 @@ mod tests {
                 ..Default::default()
             };
             RegisterClassW(&wc);
+            // WS_EX_NOACTIVATE: the test never takes focus from the user's window
             let h = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 w!("RaHookTestWnd"),
                 w!("ra_hook test"),
                 WS_POPUP | WS_VISIBLE,
@@ -270,16 +295,40 @@ mod tests {
                 None,
             )
             .expect("test window");
-            let _ = htx.send(h.0 as isize);
+            // A stand-in for the Read Aloud overlay on top of it: Tauri's
+            // set_ignore_cursor_events(true) = WS_EX_LAYERED | WS_EX_TRANSPARENT.
+            let ov = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                w!("RaHookTestWnd"),
+                w!("ra_hook overlay"),
+                WS_POPUP,
+                x - 20,
+                y - 20,
+                wd + 40,
+                ht + 40,
+                HWND::default(),
+                HMENU::default(),
+                HINSTANCE::default(),
+                None,
+            )
+            .expect("overlay window");
+            let _ = SetLayeredWindowAttributes(ov, COLORREF(0), 128, LWA_ALPHA);
+            let _ = ShowWindow(ov, SW_SHOWNOACTIVATE);
+            let _ = htx.send((h.0 as isize, ov.0 as isize));
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, HWND::default(), 0, 0).0 > 0 {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         });
-        let hwnd = HWND(hrx.recv().unwrap() as *mut _);
+        let (h, ov) = hrx.recv().unwrap();
+        let hwnd = HWND(h as *mut _);
         std::thread::sleep(Duration::from_millis(300));
         let (cx, cy) = (x + wd / 2, y + ht / 2);
+        // I-1 / m5 premise: hit-testing skips the click-through overlay, so
+        // WindowFromPoint finds the window under it.
+        let under = unsafe { GetAncestor(WindowFromPoint(POINT { x: cx, y: cy }), GA_ROOT) }.0 as isize;
+        println!("WindowFromPoint under the click-through overlay: {under:#x} (window {h:#x}, overlay {ov:#x})");
         let mut saved = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut saved);
@@ -287,9 +336,22 @@ mod tests {
 
         // Control: injected clicks reach the window without the hook.
         click_at(cx, cy);
-        let base = counts();
-        println!("control click -> downs/ups {base:?}");
+        println!("control click -> downs/ups {:?}", counts());
 
+        // m5: clicks over our own windows (the pill) pass through and are not reported.
+        let (otx, orx) = mpsc::channel();
+        let own = PickHook::install(|_, _| {}, move |x, y| {
+            let _ = otx.send((x, y));
+        });
+        click_at(cx, cy);
+        let own_click = orx.recv_timeout(Duration::from_millis(300)).ok();
+        let own_counts = counts();
+        drop(own);
+        println!("own window, hooked: reported {own_click:?}, downs/ups {own_counts:?}");
+        let base = own_counts;
+
+        // The rest checks swallowing, using this process's window as the stand-in app.
+        PASS_OWN.store(false, Ordering::Relaxed);
         let (mtx, mrx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel();
         let hook = PickHook::install(
@@ -358,7 +420,10 @@ mod tests {
         }
         let _ = win.join();
 
-        assert_eq!(base, (1, 1), "injected click should reach the test window");
+        PASS_OWN.store(true, Ordering::Relaxed);
+        assert_eq!(under, h, "WindowFromPoint must skip the WS_EX_LAYERED|WS_EX_TRANSPARENT overlay");
+        assert_eq!(base, (2, 2), "control click and the own-window click reach the window");
+        assert_eq!(own_click, None, "a click over our own window is not a pick");
         assert!(mv.is_ok(), "hook reports moves");
         let click = click.expect("hook reports the click");
         assert!(

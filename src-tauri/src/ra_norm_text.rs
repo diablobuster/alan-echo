@@ -40,6 +40,7 @@ static ABBREVS: &[(&str, &str, Rule)] = &[
     // BEGIN SORTED
     ("A.M.", "A M", Rule::Always),
     ("Adm.", "admiral", Rule::Title),
+    ("Amb.", "ambassador", Rule::Title),
     ("Approx.", "approximately", Rule::Always),
     ("Apr.", "april", Rule::Always),
     ("Art.", "article", Rule::Number),
@@ -165,6 +166,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("GW", "gigawatt", "gigawatts", true),
     ("GWh", "gigawatt hour", "gigawatt hours", true),
     ("Gb", "gigabit", "gigabits", true),
+    ("Gbit", "gigabit", "gigabits", true),
     ("Gbps", "gigabit per second", "gigabits per second", true),
     ("Hz", "hertz", "hertz", true),
     ("KB", "kilobyte", "kilobytes", true),
@@ -174,6 +176,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("MW", "megawatt", "megawatts", true),
     ("MWh", "megawatt hour", "megawatt hours", true),
     ("Mb", "megabit", "megabits", true),
+    ("Mbit", "megabit", "megabits", true),
     ("Mbps", "megabit per second", "megabits per second", true),
     ("PB", "petabyte", "petabytes", true),
     ("TB", "terabyte", "terabytes", true),
@@ -195,6 +198,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("kW", "kilowatt", "kilowatts", true),
     ("kWh", "kilowatt hour", "kilowatt hours", true),
     ("kb", "kilobit", "kilobits", true),
+    ("kbit", "kilobit", "kilobits", true),
     ("kbps", "kilobit per second", "kilobits per second", true),
     ("kg", "kilogram", "kilograms", true),
     ("km", "kilometer", "kilometers", true),
@@ -1038,12 +1042,21 @@ fn roman(w: &[&str], i: usize, numeral: &str) -> Option<String> {
         }
         return Some(cardinal(value.into()));
     }
+    // `Apple I,` / `Henry I.`: a lone I after a name that ends the clause is a
+    // numeral (the pronoun almost never ends a clause straight after a name)
+    let i_clause_end = numeral == "I"
+        && tok(w, i).is_some_and(|t| !t.trail.is_empty() || t.core.ends_with('.'))
+        && is_proper(prev.core)
+        && !has(STARTERS, prev.core);
     if has(ROMAN_REGNAL, prev.core) {
         // `Henry I think`: a lone I after a name is the pronoun.
-        if single && !matches!(numeral, "V" | "X") {
+        if single && !matches!(numeral, "V" | "X") && !i_clause_end {
             return None;
         }
         return Some(format!("the {}", ordinal(value.into())));
+    }
+    if i_clause_end {
+        return Some("one".into());
     }
     // `Apollo XIII`, and `Apple II` / `Artemis III` (II and III are never words)
     let long_or_ii = numeral.len() >= 4 || matches!(numeral, "II" | "III");
@@ -1195,6 +1208,19 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
     }
 
     // Abbreviations (the period is part of the abbreviation).
+    // `Sec. Blinken` is the Secretary (`Sec. 12` stays a section); `est. 1967` is
+    // "established" before a year, "estimated" otherwise.
+    if core == "Sec." && next_is_cap(w, i) && !next_is_starter(w, i) {
+        return one("secretary".into(), false);
+    }
+    if core == "est." {
+        let year_next = next_core(w, i).is_some_and(|c| {
+            c.len() == 4 && c.bytes().all(|b| b.is_ascii_digit()) && matches!(c.as_bytes()[0], b'1' | b'2')
+        });
+        if year_next {
+            return one("established".into(), false);
+        }
+    }
     if let Some((said, rule)) = abbrev(core) {
         let said = match rule {
             Rule::Always => Some(said),
@@ -1840,6 +1866,31 @@ mod tests {
         assert_eq!(render("3/4 tsp of salt"), "3/4 teaspoons of salt");
         assert_eq!(render("1 tbsp sugar"), "1 tablespoon sugar");
         assert_eq!(render("a 64 kb DRAM"), "a 64 kilobits DRAM");
+    }
+
+    #[test]
+    fn roman_one_after_a_name_at_a_clause_end() {
+        assert_eq!(render("was the Apple I, designed by"), "was the Apple one, designed by");
+        assert_eq!(render("King Henry I. Then"), "King Henry the first. Then");
+        // the pronoun stays
+        assert_eq!(render("said John I think"), "said John I think");
+        assert_eq!(render("Anna and I, too"), "Anna and I, too");
+        assert_eq!(render("When I, too"), "When I, too");
+    }
+
+    #[test]
+    fn titles_and_est_by_context() {
+        assert_eq!(render("Sec. Blinken and Amb. Thomas-Greenfield spoke"), "secretary Blinken and ambassador Thomas-Greenfield spoke");
+        assert_eq!(render("see Sec. 12 now"), "see section 12 now");
+        assert_eq!(render("a firm est. 1967 in"), "a firm established 1967 in");
+        assert_eq!(render("cost est. 5 million"), "cost estimated 5 million");
+    }
+
+    #[test]
+    fn bit_rate_units() {
+        assert_eq!(render("is 5.9 Gbit/s now"), "is 5.9 gigabits per second now");
+        assert_eq!(render("at 100 Mbit/s and"), "at 100 megabits per second and");
+        assert_eq!(render("a 10 Gbit link"), "a 10 gigabits link");
     }
 
     #[test]

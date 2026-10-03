@@ -193,6 +193,18 @@ fn ends_sentence(w: &str) -> bool {
     !(letters.len() == 1 && letters[0].is_uppercase() && core.len() == 2)
 }
 
+/// Conjunctions, prepositions and relatives a phrase can start with: a chunk cut
+/// just before one sounds like a natural breath.
+fn joins_phrase(w: &str) -> bool {
+    const JOIN: &[&str] = &[
+        "about", "after", "against", "and", "as", "at", "because", "before", "between", "but", "by", "during",
+        "for", "from", "if", "in", "into", "like", "nor", "of", "on", "or", "over", "since", "so", "than",
+        "that", "through", "to", "under", "unless", "until", "when", "where", "whereas", "which", "while",
+        "who", "whose", "with", "within", "without",
+    ];
+    JOIN.contains(&w)
+}
+
 fn has_digit(s: &str) -> bool {
     s.bytes().any(|b| b.is_ascii_digit())
 }
@@ -251,9 +263,16 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
                 .find(|&k| ends_clause(&words[k - 1].text) && !date_comma(words, k))
                 .unwrap_or_else(|| {
                     // no clause end: never part a number from its neighbours
-                    // (`450` | `GeV`, `in` | `1990`) when a cut nearby avoids it
+                    // (`450` | `GeV`, `in` | `1990`) when a cut nearby avoids it,
+                    // and best cut before a joining word (`… references | as most …`)
+                    // so the chunk's falling tone lands at a phrase edge
                     let quiet = |k: usize| !has_digit(&words[k - 1].text) && !has_digit(&words[k].text);
-                    (a + 1 + limit / 2..=hard).rev().find(|&k| quiet(k)).unwrap_or(hard)
+                    let near = a + 1 + limit / 2..=hard;
+                    near.clone()
+                        .rev()
+                        .find(|&k| quiet(k) && joins_phrase(&words[k].text))
+                        .or_else(|| near.rev().find(|&k| quiet(k)))
+                        .unwrap_or(hard)
                 });
             out.push(a..cut);
             a = cut;
@@ -568,7 +587,9 @@ mod tests {
     fn no_clause_cut_between_a_date_and_its_year() {
         let w = words("a b c d e f g on September 2, 2021 the x y z.");
         let c = chunk(&w, 12, 50);
-        assert_eq!(c[0], 0..12);
+        // not after "2,": the hard cut moves before "on", keeping the date whole
+        assert_eq!(c[0], 0..7);
+        assert_eq!(c[1], 7..15);
     }
 
     #[test]
@@ -579,6 +600,18 @@ mod tests {
         // the cut moves back to the nearest gap with no number on either side
         assert_eq!(c[0], 0..10);
         assert_eq!(c[1].start, 10);
+    }
+
+    #[test]
+    fn hard_cut_prefers_the_gap_before_a_joining_word() {
+        // no clause end within 12: cut before "as" / "in" / "with", not mid-phrase
+        let w = words("The current official names and logos have removed those references as most full-featured cables can be used.");
+        assert_eq!(chunk(&w, 12, 50)[0], 0..10);
+        let w = words("Pairing mechanisms changed significantly with the introduction of Secure Simple Pairing in Bluetooth v2.1 today.");
+        assert_eq!(chunk(&w, 12, 50)[0], 0..11);
+        // ... but never next to a number ("iPhone 6 | and")
+        let w = words("Some users experienced bending issues from normal use with the iPhone 6 and 6 Plus, particularly.");
+        assert_eq!(chunk(&w, 12, 50)[0], 0..8);
     }
 
     #[test]

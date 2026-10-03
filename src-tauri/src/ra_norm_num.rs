@@ -719,6 +719,42 @@ fn times_ten(core: &str) -> Option<String> {
     Some(format!("{} times ten to the {sign}{}", decimal(ip, fp), ordinal(n)))
 }
 
+/// `2^10` -> "two to the tenth" (a trailing `=` is said: `2^10=`).
+fn power(core: &str) -> Option<String> {
+    let (base, rest) = core.split_once('^')?;
+    let (exp, eq) = match rest.strip_suffix('=') {
+        Some(e) => (e, " equals"),
+        None => (rest, ""),
+    };
+    let (ip, fp) = number_parts(base)?;
+    if exp.is_empty() || exp.len() > 2 || !all_digits(exp) {
+        return None;
+    }
+    let n: u64 = exp.parse().ok()?;
+    Some(format!("{} to the {}{eq}", decimal(ip, fp), ordinal(n)))
+}
+
+/// `km2`, `m3` (a lost superscript after a length unit) -> "square kilometers".
+fn square_unit(core: &str) -> Option<String> {
+    let (unit, pow) = (core.get(..core.len().checked_sub(1)?)?, core.get(core.len() - 1..)?);
+    let kind = match pow {
+        "2" => "square",
+        "3" => "cubic",
+        _ => return None,
+    };
+    let many = match unit {
+        "km" => "kilometers",
+        "m" => "meters",
+        "cm" => "centimeters",
+        "mm" => "millimeters",
+        "mi" => "miles",
+        "ft" => "feet",
+        "yd" => "yards",
+        _ => return None,
+    };
+    Some(format!("{kind} {many}"))
+}
+
 /// `405B` before "parameters": the K/M/B/T suffix is a scale word. `70B-parameter`
 /// carries its own noun.
 fn model_size(core: &str, ctx: &Ctx) -> Option<String> {
@@ -994,6 +1030,12 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
         return s;
     }
     if let Some(s) = times_ten(core) {
+        return s;
+    }
+    if let Some(s) = power(core) {
+        return s;
+    }
+    if let Some(s) = square_unit(core) {
         return s;
     }
     if let Some(s) = model_size(core, ctx) {
@@ -1634,6 +1676,18 @@ mod tests {
         assert_eq!(one("3×10^8"), "three times ten to the eighth");
         // a plain product stays a product
         assert_eq!(one("3×4"), "three times four");
+    }
+
+    #[test]
+    fn powers_and_square_units() {
+        assert_eq!(one("2^10"), "two to the tenth");
+        assert_eq!(one("2^10="), "two to the tenth equals");
+        assert_eq!(one("10^3"), "ten to the third");
+        assert_eq!(one("km2)"), "square kilometers)");
+        assert_eq!(one("m2"), "square meters");
+        assert_eq!(one("m3"), "cubic meters");
+        // not a unit: a code stays a code
+        assert_eq!(one("A2"), "A two");
     }
 
     /// cargo test --release ra_norm_num::tests::perf -- --ignored --nocapture

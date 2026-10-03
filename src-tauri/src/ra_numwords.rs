@@ -131,7 +131,8 @@ pub(crate) fn integer(s: &str) -> String {
     if d.is_empty() {
         return String::new();
     }
-    if d.len() > 1 && d.starts_with('0') {
+    // leading zeros ("007"), or a long ungrouped run (an ISBN, a DOI, an ID)
+    if (d.len() > 1 && d.starts_with('0')) || (d.len() >= 10 && !s.contains(',')) {
         return digits(&d);
     }
     match d.parse::<u64>() {
@@ -155,6 +156,15 @@ pub fn decimal(int_part: &str, frac: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_plain_digit_runs_are_read_digit_by_digit() {
+        // an ID (ISBN, DOI) is digits; a grouped amount stays a number
+        assert_eq!(integer("9780226821665"), "nine seven eight zero two two six eight two one six six five");
+        assert_eq!(integer("1234567890"), "one two three four five six seven eight nine zero");
+        assert_eq!(integer("123456789"), "one hundred twenty three million four hundred fifty six thousand seven hundred eighty nine");
+        assert!(integer("1,234,567,890").starts_with("one billion"));
+    }
 
     #[test]
     fn cardinal_small_and_tens() {

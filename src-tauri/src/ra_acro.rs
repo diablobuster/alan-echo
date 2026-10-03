@@ -15,9 +15,6 @@
 //! - `GetLocation` is (0,0,0,0) off screen, and a container's box is the union of its
 //!   on-screen parts, so an off-screen container has no on-screen descendants.
 
-// Task 6 wires this module into the worker; until then only tests call it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::time::{Duration, Instant};
 
 use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, BSTR, GUID, HRESULT, VARIANT};
@@ -29,15 +26,24 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Accessibility::{AccessibleChildren, AccessibleObjectFromWindow, IAccessible};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetAncestor, GetClassNameW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, WindowFromPoint, GA_PARENT, GA_ROOT, OBJID_CLIENT,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, WindowFromPoint, GA_PARENT, GA_ROOT,
+    OBJID_CLIENT,
 };
 
 use crate::ra_uia::Rect;
 
 /// Error text when the point is not on an Acrobat word (the caller may try OCR next).
 pub const NO_TEXT_ACRO: &str = "no Acrobat text under the point";
-/// Tokens returned by `pick` (same as the UIA source).
-const FIRST_BATCH: usize = 200;
+/// Error text when `pick` ran out of time before it found the clicked word. Not "no
+/// text": the caller must not fall through to OCR (Acrobat is just slow right now).
+pub const ACRO_TIMEOUT: &str = "Acrobat lookup timed out";
+/// Error text prefix when the DOM could not be reached (the caller may try OCR next).
+pub const NO_DOM: &str = "Acrobat DOM unavailable";
+/// Tokens returned by `pick`. Smaller than the UIA source's 200: Acrobat costs 1.3-4 ms
+/// per word (3 COM calls), so 200 words held speech back by 0.3-0.8 s; 60 still covers
+/// the 12-word first chunk and the next one, and `more` fetches the rest while the
+/// first chunk is synthesised.
+const FIRST_BATCH: usize = 60;
 /// Tokens per `more` call (same as the UIA source).
 const MORE_BATCH: usize = 400;
 /// Words walked per read, in total (seek + reads).
@@ -46,6 +52,8 @@ const MAX_WORDS: usize = 20_000;
 const CALL_BUDGET: Duration = Duration::from_secs(3);
 /// Time budget for one `hover` (the caller waits 50 ms).
 const HOVER_BUDGET: Duration = Duration::from_millis(50);
+/// A page view whose DOM could not be reached is retried for hover at most this often.
+const HOVER_RETRY: Duration = Duration::from_secs(1);
 /// Window class of Acrobat's views; the page view's window text is `AVPageView`.
 const VIEW_CLASS: &str = "AVL_AVView";
 const PAGE_VIEW_TEXT: &str = "AVPageView";
@@ -68,7 +76,8 @@ const SID_GET_PD_DOM_NODE: GUID = GUID::from_u128(0xc0a1d5e9_1142_4cf3_b607_82fc
 pub(crate) const WORD: i32 = 5;
 
 /// IDL method order of `IPDDomNode` (after IDispatch's 7). `com_bindings_match_the_idl`
-/// checks the vtable against it.
+/// checks the vtable against it (test-only: the check is the only reader).
+#[cfg(test)]
 pub(crate) const IPDDOMNODE_METHODS: [&str; 14] = [
     "GetParent",
     "GetType",
@@ -283,6 +292,8 @@ fn hit(r: &Rect, x: f64, y: f64) -> bool {
 }
 
 /// Index (in the iterator's order) of the first word whose location contains (x, y).
+/// Test-only: it pins down the hit rule `seek` uses (`hit`).
+#[cfg(test)]
 pub(crate) fn word_at<N: Node>(ws: &[N], x: f64, y: f64) -> Option<usize> {
     ws.iter()
         .position(|n| n.location().is_some_and(|r| hit(&r, x, y)))
@@ -319,6 +330,62 @@ pub(crate) fn seek<N: Node + Clone>(
     *ws = state;
     ws.seen = seen;
     Some(n)
+}
+
+/// `pick`'s error when `seek` found no word: out of time, or truly nothing there.
+pub(crate) fn seek_error(timed_out: bool) -> &'static str {
+    if timed_out {
+        ACRO_TIMEOUT
+    } else {
+        NO_TEXT_ACRO
+    }
+}
+
+/// Words handed out so far, and the walk that continues after them.
+pub(crate) struct Walk<N: Node> {
+    walk: Words<N>,
+    /// Source index `i` = `nodes[i]`.
+    nodes: Vec<N>,
+    /// The walk reached the end of the document (or the word cap).
+    ended: bool,
+}
+
+/// `Walk::mark`: where the walk was, to undo a batch the caller never got.
+pub(crate) struct WalkMark<N: Node> {
+    walk: Words<N>,
+    len: usize,
+    ended: bool,
+}
+
+impl<N: Node + Clone> Walk<N> {
+    pub(crate) fn new(walk: Words<N>, nodes: Vec<N>) -> Walk<N> {
+        Walk { walk, nodes, ended: false }
+    }
+
+    /// Up to `n` more tokens, stopping early at the deadline or the end.
+    pub(crate) fn take(&mut self, n: usize, deadline: Instant) -> Vec<String> {
+        let mut out = Vec::new();
+        while out.len() < n && !self.ended && Instant::now() < deadline {
+            match self.walk.next() {
+                Some(w) => {
+                    out.push(w.text());
+                    self.nodes.push(w);
+                }
+                None => self.ended = true,
+            }
+        }
+        out
+    }
+
+    pub(crate) fn mark(&self) -> WalkMark<N> {
+        WalkMark { walk: self.walk.clone(), len: self.nodes.len(), ended: self.ended }
+    }
+
+    pub(crate) fn rollback(&mut self, m: WalkMark<N>) {
+        self.walk = m.walk;
+        self.nodes.truncate(m.len);
+        self.ended = m.ended;
+    }
 }
 
 /// Hover answer: `Some([box])` for the on-screen word under the point, `Some([])` when
@@ -570,7 +637,7 @@ fn document_acc(acc: IAccessible) -> IAccessible {
 fn dom_root(page_view: isize) -> Result<IPDDomNode, String> {
     let fail = |what: &str, e: windows::core::Error| {
         log::debug!("read-aloud: acro {what}: {e}");
-        format!("Acrobat DOM unavailable ({what})")
+        format!("{NO_DOM} ({what})")
     };
     unsafe {
         let mut p = std::ptr::null_mut();
@@ -582,7 +649,7 @@ fn dom_root(page_view: isize) -> Result<IPDDomNode, String> {
         )
         .map_err(|e| fail("AccessibleObjectFromWindow", e))?;
         if p.is_null() {
-            return Err("Acrobat DOM unavailable (no MSAA object)".into());
+            return Err(format!("{NO_DOM} (no MSAA object)"));
         }
         let acc = IAccessible::from_raw(p);
         let sp: IServiceProvider = document_acc(acc)
@@ -595,7 +662,7 @@ fn dom_root(page_view: isize) -> Result<IPDDomNode, String> {
         g.get_PDDomNode(VARIANT::from(0i32), &mut root)
             .ok()
             .map_err(|e| fail("get_PDDomNode", e))?;
-        root.ok_or_else(|| "Acrobat DOM unavailable (no root)".into())
+        root.ok_or_else(|| format!("{NO_DOM} (no root)"))
     }
 }
 
@@ -610,16 +677,17 @@ fn view_at(x: i32, y: i32) -> Option<(HWND, isize)> {
 pub struct AcroRead {
     frame: isize,
     /// Lazy document-order walk; continues after the last word handed out.
-    walk: Words<IPDDomNode>,
-    nodes: Vec<IPDDomNode>,
-    /// The walk reached the end of the document (or the word cap).
-    ended: bool,
+    w: Walk<IPDDomNode>,
 }
 
+/// `AcroRead::mark`.
+pub struct AcroMark(WalkMark<IPDDomNode>);
+
 impl AcroRead {
-    /// Tokens (≤ 200) from the word under (x, y) on. No word exactly there: from the
+    /// Tokens (≤ 60) from the word under (x, y) on. No word exactly there: from the
     /// first on-screen word below or after the point. `Err(NO_TEXT_ACRO)` when there is
-    /// no page view or no on-screen word; other `Err`s mean the DOM was unreachable.
+    /// no page view or no on-screen word, `Err(ACRO_TIMEOUT)` when time ran out first,
+    /// and `Err(NO_DOM ...)` when the DOM was unreachable.
     pub fn pick(x: i32, y: i32) -> Result<(AcroRead, Vec<String>), String> {
         let (frame, pv) = view_at(x, y).ok_or(NO_TEXT_ACRO)?;
         Self::pick_in(frame, pv, x, y)
@@ -629,38 +697,31 @@ impl AcroRead {
     fn pick_in(frame: HWND, pv: isize, x: i32, y: i32) -> Result<(AcroRead, Vec<String>), String> {
         let deadline = Instant::now() + CALL_BUDGET;
         let mut walk = words(dom_root(pv)?, MAX_WORDS);
-        let first = seek(&mut walk, x as f64, y as f64, deadline).ok_or(NO_TEXT_ACRO)?;
+        let first = seek(&mut walk, x as f64, y as f64, deadline)
+            .ok_or_else(|| seek_error(Instant::now() >= deadline))?;
         let mut out = vec![first.text()];
         let mut read = AcroRead {
             frame: frame.0 as isize,
-            walk,
-            nodes: vec![first],
-            ended: false,
+            w: Walk::new(walk, vec![first]),
         };
-        out.extend(read.take(FIRST_BATCH - 1, deadline));
+        out.extend(read.w.take(FIRST_BATCH - 1, deadline));
         Ok((read, out))
     }
 
-    /// Up to `n` more tokens, stopping early at the deadline or the end.
-    fn take(&mut self, n: usize, deadline: Instant) -> Vec<String> {
-        let mut out = Vec::new();
-        while out.len() < n && !self.ended && Instant::now() < deadline {
-            match self.walk.next() {
-                Some(w) => {
-                    out.push(w.text());
-                    self.nodes.push(w);
-                }
-                None => self.ended = true,
-            }
-        }
-        out
+    /// Where `more` is now; `rollback` undoes the batches after it.
+    pub fn mark(&self) -> AcroMark {
+        AcroMark(self.w.mark())
+    }
+
+    pub fn rollback(&mut self, m: AcroMark) {
+        self.w.rollback(m.0);
     }
 
     /// Next ≤ 400 tokens; source indices continue. `Ok(empty)` = end of the document
     /// (or the 20 000-word cap); `Err` = the time budget ran out before any word.
     pub fn more(&mut self) -> Result<Vec<String>, String> {
-        let out = self.take(MORE_BATCH, Instant::now() + CALL_BUDGET);
-        if out.is_empty() && !self.ended {
+        let out = self.w.take(MORE_BATCH, Instant::now() + CALL_BUDGET);
+        if out.is_empty() && !self.w.ended {
             return Err("Acrobat read timed out".into());
         }
         Ok(out)
@@ -671,7 +732,7 @@ impl AcroRead {
     pub fn rects(&self, src: &[usize]) -> Option<Vec<Rect>> {
         let mut out = Vec::with_capacity(src.len());
         for &i in src {
-            match location_of(self.nodes.get(i)?) {
+            match location_of(self.w.nodes.get(i)?) {
                 Ok(Some(r)) => out.push(r),
                 Ok(None) => return Some(Vec::new()),
                 Err(e) => {
@@ -685,7 +746,7 @@ impl AcroRead {
 
     /// Scroll Acrobat so word `idx` is on screen (`IPDDomNode::ScrollTo`, no input).
     pub fn scroll_to(&self, idx: usize) {
-        if let Some(n) = self.nodes.get(idx) {
+        if let Some(n) = self.w.nodes.get(idx) {
             if let Err(e) = unsafe { n.ScrollTo() }.ok() {
                 log::debug!("read-aloud: acro ScrollTo {e}");
             }
@@ -698,17 +759,69 @@ impl AcroRead {
     }
 }
 
-/// Box of the on-screen word under the point: `Some(empty)` = no word there, `None` =
-/// no answer (DOM unreachable or over the 50 ms budget).
-pub fn hover(x: i32, y: i32) -> Option<Vec<Rect>> {
-    let deadline = Instant::now() + HOVER_BUDGET;
-    let Some((_, pv)) = view_at(x, y) else {
-        return Some(Vec::new());
-    };
-    hover_in(pv, x, y, deadline)
+/// The DOM root of the page view last hovered, kept between hovers: attaching costs
+/// 4-7 ms, with 270-480 ms spikes right after Acrobat loads, and the worker is blocked
+/// meanwhile. The owner drops it when pick mode ends.
+pub struct HoverView {
+    pv: isize,
+    /// `None`: the DOM could not be reached (retried after `HOVER_RETRY`).
+    root: Option<IPDDomNode>,
+    at: Instant,
 }
 
-/// `hover` on a known page view.
+/// What hover found in an Acrobat window.
+#[derive(Debug, PartialEq)]
+pub enum Hover {
+    /// The word box under the point; empty when there is no word there.
+    Rects(Vec<Rect>),
+    /// Over the 50 ms budget: no answer.
+    NoAnswer,
+    /// The page view's DOM is unreachable (the caller may use OCR instead).
+    NoDom,
+}
+
+/// The cached view still serves a point: same frame under the point, still visible
+/// (a tab switch hides it), and the point is inside it (split view). Pure.
+pub(crate) fn view_still_valid(same_frame: bool, visible: bool, view: &Rect, x: f64, y: f64) -> bool {
+    same_frame && visible && hit(view, x, y)
+}
+
+fn cached_view_serves(c: &HoverView, x: i32, y: i32) -> bool {
+    let pv = HWND(c.pv as *mut _);
+    if !unsafe { IsWindow(pv) }.as_bool() {
+        return false;
+    }
+    let frame = unsafe { GetAncestor(pv, GA_ROOT) };
+    let visible = unsafe { IsWindowVisible(pv) }.as_bool();
+    view_still_valid(root_at(x, y) == Some(frame), visible, &window_rect(pv), x as f64, y as f64)
+}
+
+/// Hover in pick mode: the box of the on-screen word under the point. Re-attaches to
+/// the DOM only when the page view under the point changed.
+pub fn hover_cached(cache: &mut Option<HoverView>, x: i32, y: i32) -> Hover {
+    let deadline = Instant::now() + HOVER_BUDGET;
+    let fresh = match cache.as_ref() {
+        Some(c) if cached_view_serves(c, x, y) => c.root.is_some() || c.at.elapsed() < HOVER_RETRY,
+        _ => false,
+    };
+    if !fresh {
+        *cache = None;
+        let Some((_, pv)) = view_at(x, y) else {
+            return Hover::Rects(Vec::new());
+        };
+        *cache = Some(HoverView { pv, root: dom_root(pv).ok(), at: Instant::now() });
+    }
+    let Some(root) = cache.as_ref().and_then(|c| c.root.clone()) else {
+        return Hover::NoDom;
+    };
+    match hover_rects(&mut words(root, MAX_WORDS), x as f64, y as f64, deadline) {
+        Some(v) => Hover::Rects(v),
+        None => Hover::NoAnswer,
+    }
+}
+
+/// `hover` on a known page view (no cache); manual test only.
+#[cfg(test)]
 fn hover_in(pv: isize, x: i32, y: i32, deadline: Instant) -> Option<Vec<Rect>> {
     let mut ws = words(dom_root(pv).ok()?, MAX_WORDS);
     hover_rects(&mut ws, x as f64, y as f64, deadline)
@@ -908,6 +1021,37 @@ mod tests {
     fn seek_gives_up_at_the_deadline() {
         let mut ws = words(screen(), 100);
         assert!(seek(&mut ws, 70.0, 10.0, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn a_seek_that_ran_out_of_time_is_a_timeout_not_no_text() {
+        // only "no words" may fall through to OCR; a timeout must not (Task 6)
+        assert_eq!(seek_error(true), ACRO_TIMEOUT);
+        assert_eq!(seek_error(false), NO_TEXT_ACRO);
+        assert_ne!(ACRO_TIMEOUT, NO_TEXT_ACRO);
+    }
+
+    #[test]
+    fn a_rolled_back_batch_is_read_again() {
+        let mut rd = Walk::new(words(tree(), 100), Vec::new());
+        assert_eq!(rd.take(2, far()), ["a ", "b "]);
+        let m = rd.mark();
+        assert_eq!(rd.take(10, far()), ["c ", "d ", "e"]);
+        assert!(rd.ended);
+        rd.rollback(m);
+        assert!(!rd.ended, "the end was not delivered");
+        assert_eq!(rd.nodes.len(), 2, "source indices are back where the caller is");
+        assert_eq!(rd.take(10, far()), ["c ", "d ", "e"]);
+        assert_eq!(rd.nodes.len(), 5);
+    }
+
+    #[test]
+    fn hover_cache_is_reused_only_for_the_same_visible_view_under_the_point() {
+        let v = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        assert!(view_still_valid(true, true, &v, 50.0, 50.0));
+        assert!(!view_still_valid(false, true, &v, 50.0, 50.0), "another frame is under the point");
+        assert!(!view_still_valid(true, false, &v, 50.0, 50.0), "the view was hidden (tab switch)");
+        assert!(!view_still_valid(true, true, &v, 150.0, 50.0), "the point left the view (split view)");
     }
 
     #[test]
@@ -1226,12 +1370,19 @@ mod live {
         // and record every time.
         let mut hover_ms = Vec::new();
         let mut answers = Vec::new();
+        let mut cache = None;
         for _ in 0..10 {
             let t = Instant::now();
             let hv = if covered {
                 hover_in(pv, cx, cy, Instant::now() + HOVER_BUDGET)
             } else {
-                hover(cx, cy)
+                match hover_cached(&mut cache, cx, cy) {
+                    Hover::Rects(v) => Some(v),
+                    other => {
+                        println!("hover: {other:?}");
+                        None
+                    }
+                }
             };
             hover_ms.push(format!("{:.0}", t.elapsed().as_secs_f64() * 1000.0));
             answers.push(hv);
@@ -1241,6 +1392,16 @@ mod live {
         assert_eq!(hits + misses, 10, "every answer is the word's box or no answer");
         assert!(hits >= 5, "hover answered in time at least half the time: {hover_ms:?}");
         let hover_ms = format!("{} / 10 in time, ms {}", hits, hover_ms.join(" "));
+        // The worker's cache hit: the page view's DOM root is already attached.
+        let root = dom_root(pv).expect("DOM root");
+        let mut cached = Vec::new();
+        for _ in 0..10 {
+            let t = Instant::now();
+            let hv = hover_rects(&mut words(root.clone(), MAX_WORDS), cx as f64, cy as f64, t + HOVER_BUDGET);
+            cached.push(format!("{:.0}", t.elapsed().as_secs_f64() * 1000.0));
+            assert!(hv.is_none() || hv == Some(vec![wr.clone()]), "cached hover: the word or no answer");
+        }
+        let hover_ms = format!("{hover_ms}; cached root ms {}", cached.join(" "));
         let gap = hover_in(pv, cx, cy - 200, Instant::now() + Duration::from_secs(1));
         assert_eq!(gap, Some(vec![]), "no word 200 px above the first line");
 
@@ -1292,7 +1453,7 @@ mod live {
             all.extend(more);
         };
         let more_ms = t.elapsed().as_secs_f64() * 1000.0;
-        let page = page_of(&rd.nodes[idx]);
+        let page = page_of(&rd.w.nodes[idx]);
         let before = rd.rects(&[idx]);
         println!(
             "ZEBRAFINCH = token {idx} of {}, page {page:?}, rects before scroll {before:?}",

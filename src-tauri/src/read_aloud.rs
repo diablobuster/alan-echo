@@ -561,6 +561,14 @@ const PICK_TIMEOUT: Duration = Duration::from_secs(30);
 const MORE_MAX_FAILS: u32 = 5;
 const HICCUP_MSG: &str = "Voice engine hiccup — using CPU";
 const NOTHING_MSG: &str = "Nothing readable here";
+/// Shown when an OCR read (a scan, an image) ends: it read what was on screen, which is
+/// not necessarily the whole document.
+pub const NOTHING_ON_SCREEN_END: &str = "Read to the end of what's on screen";
+
+/// The notice for the end of a read: only an OCR read says why it stopped. Pure.
+fn end_toast(at_end_of_screen: bool) -> Option<&'static str> {
+    at_end_of_screen.then_some(NOTHING_ON_SCREEN_END)
+}
 const MISSING_MSG: &str = "Voice files missing — run tools/read-aloud/prepare_model.py";
 /// Non-DirectML synth failures in a row before the read ends (one bad chunk is skipped).
 const SYNTH_MAX_FAILS: u32 = 3;
@@ -718,6 +726,16 @@ mod win {
 
     fn hwnd(h: isize) -> HWND {
         HWND(h as *mut _)
+    }
+
+    /// Keep one of our windows out of screen captures, so OCR never reads our own
+    /// highlight or pill and its staleness fingerprint does not flip as the highlight
+    /// moves. Best effort (errors ignored: older Windows draws it as black instead).
+    pub fn exclude_from_capture(h: isize) {
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
+        if let Err(e) = unsafe { SetWindowDisplayAffinity(hwnd(h), WDA_EXCLUDEFROMCAPTURE) } {
+            log::debug!("read-aloud: SetWindowDisplayAffinity: {e}");
+        }
     }
 
     pub fn per_monitor_dpi() {
@@ -1480,7 +1498,12 @@ impl Controller {
             self.update_word_rects(changed);
         }
         if self.s.finished(pos) {
-            return self.feed(Ev::End);
+            let at_end = self.uia.as_ref().is_some_and(|u| u.at_end_of_screen());
+            let (p, mut acts) = step(&self.phase, Ev::End);
+            if let Some(msg) = end_toast(at_end) {
+                acts.insert(0, Act::Toast(msg)); // the pill lingers with it after Teardown
+            }
+            return self.run_acts(p, acts);
         }
         if self.state_at.elapsed() >= STATE_RESEND {
             self.emit_state();
@@ -1905,6 +1928,9 @@ impl Controller {
         };
         // always click-through: the low-level hook captures pick clicks
         let _ = w.set_ignore_cursor_events(true);
+        if let Ok(h) = w.hwnd() {
+            win::exclude_from_capture(h.0 as isize);
+        }
         let _ = w.set_position(tauri::PhysicalPosition::new(mon.x, mon.y));
         let _ = w.set_size(tauri::PhysicalSize::new(mon.w.max(1) as u32, mon.h.max(1) as u32));
         let _ = w.show();
@@ -1948,6 +1974,9 @@ impl Controller {
             .build();
         match built {
             Ok(w) => {
+                if let Ok(h) = w.hwnd() {
+                    win::exclude_from_capture(h.0 as isize);
+                }
                 if let Some((x, y)) = pos {
                     let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
                 }
@@ -2025,6 +2054,13 @@ mod tests {
     const JUMP_R: Phase = Picking { resume: Some(Resume::Reading) };
     const JUMP_P: Phase = Picking { resume: Some(Resume::Paused) };
     const JUMP_W: Phase = Picking { resume: Some(Resume::Warming) };
+
+    #[test]
+    fn the_end_of_an_ocr_screen_is_announced() {
+        assert_eq!(end_toast(true), Some(NOTHING_ON_SCREEN_END));
+        assert_eq!(NOTHING_ON_SCREEN_END, "Read to the end of what's on screen");
+        assert_eq!(end_toast(false), None, "the end of a document is silent");
+    }
 
     #[test]
     fn hotkey_from_idle_enters_pick() {

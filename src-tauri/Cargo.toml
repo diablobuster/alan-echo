@@ -55,6 +55,7 @@ windows = { version = "0.58", features = [
 ] }
 ort = { version = "=2.0.0-rc.13", features = ["directml"] }
 misaki-rs = { version = "0.6", default-features = false }
+flate2 = "1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

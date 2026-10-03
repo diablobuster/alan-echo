@@ -7,13 +7,14 @@
 //! DirectML (q8) is used only for `pref == "gpu"`; if it fails to open or to run,
 //! the engine falls back to CPU by itself.
 use crate::{
-    ra_model,
+    ra_model, ra_text,
     ra_timing::{self, WordTime},
     ra_wsola,
 };
-use misaki_rs::{Language, G2P};
+use misaki_rs::{Language, Lexicon, G2P};
 use ort::{ep, session::Session, value::Tensor};
 use parking_lot::{Condvar, Mutex, MutexGuard};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -499,20 +500,19 @@ impl Engine {
         let device = l.device;
         let rate = effective_rate(rate);
         let empty = || ChunkAudio { pcm: Vec::new(), words: Vec::new(), device, covered: words.len() };
-        let text = words.join(" ");
+        let fed = g2p_words(&l.g2p, words);
+        let fed: Vec<&str> = fed.iter().map(|w| w.as_ref()).collect();
+        let text = fed.join(" ");
         if text.trim().is_empty() {
             return Ok(empty());
         }
         let (_, tokens) = l.g2p.g2p(&text).map_err(|e| format!("g2p: {e:?}"))?;
-        let tok_text: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
-        let owner = ra_timing::align(words, &tok_text);
-        // every token with phonemes feeds the model (punctuation shapes prosody);
-        // only word-owned ones get spans
-        let ph: Vec<(usize, String, bool)> = tokens
-            .iter()
-            .zip(owner.iter())
-            .filter_map(|(t, o)| Some((o.unwrap_or(NO_WORD), t.phonemes.clone()?, !t.whitespace.is_empty())))
-            .collect();
+        let toks: Vec<(&str, Option<&str>, bool)> =
+            tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
+        let tok_text: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        // `fed` keeps the word count and order of `words`, so indices line up
+        let owner = ra_timing::align(&fed, &tok_text);
+        let ph = token_phonemes(&toks, &owner);
         let (ids, spans, covered) = build_ids_with(&ph, &l.vocab, words.len(), map_joined);
         let covered = covered.min(words.len());
         if ids.is_empty() {
@@ -561,10 +561,158 @@ impl Engine {
     }
 }
 
+/// G2P input for a chunk: ALL-CAPS dictionary words lowercased so misaki reads
+/// them as words instead of spelling them (see `ra_text::speakable_caps`).
+fn g2p_words<'a>(g: &G2P, words: &[&'a str]) -> Vec<Cow<'a, str>> {
+    let known = |w: &str| lexicon_knows(&g.lexicon, w);
+    words.iter().map(|w| ra_text::speakable_caps(w, &known)).collect()
+}
+
+/// Uppercase: the lexicon has that exact spelling (NATO, US). Lowercase: a gold
+/// word, a gold stem (+s/es/ies/ed/ing), or a silver word of 4+ letters (short
+/// silver entries are mostly acronyms like fbi, cia).
+fn lexicon_knows(lx: &Lexicon, w: &str) -> bool {
+    if w.chars().any(char::is_uppercase) {
+        return lx.golds.contains_key(w) || lx.silvers.contains_key(w);
+    }
+    if lx.in_gold(w) || (w.chars().count() >= 4 && lx.silvers.contains_key(w)) {
+        return true;
+    }
+    let gold = |s: &str| s.chars().count() >= 2 && lx.in_gold(s);
+    let strip = |suf: &str| w.strip_suffix(suf);
+    strip("ies").is_some_and(|s| gold(&format!("{s}y")))
+        || strip("es").is_some_and(gold)
+        || strip("s").is_some_and(gold)
+        || strip("ed").is_some_and(|s| gold(s) || gold(&format!("{s}e")))
+        || strip("ing").is_some_and(|s| gold(s) || gold(&format!("{s}e")))
+}
+
+fn is_hyphen(s: &str) -> bool {
+    matches!(s, "-" | "\u{2010}" | "\u{2011}")
+}
+
+/// (word or NO_WORD, phonemes, followed-by-whitespace) per G2P token. Every token
+/// with phonemes feeds the model (punctuation shapes prosody), except a hyphen
+/// inside one word ("mid-year"): misaki gives it a space phoneme, which would
+/// add a long pause between the halves.
+fn token_phonemes(toks: &[(&str, Option<&str>, bool)], owner: &[Option<usize>]) -> Vec<(usize, String, bool)> {
+    let own = |i: Option<usize>| i.and_then(|i| owner.get(i).copied().flatten());
+    toks.iter()
+        .zip(owner.iter())
+        .enumerate()
+        .filter(|&(i, ((text, p, _), o))| {
+            let inner = o.is_none()
+                && is_hyphen(text)
+                && p.map_or(true, |p| p.trim().is_empty())
+                && own(i.checked_sub(1)).is_some()
+                && own(i.checked_sub(1)) == own(Some(i + 1));
+            !inner
+        })
+        .filter_map(|(_, ((_, p, ws), o))| Some((o.unwrap_or(NO_WORD), (*p)?.to_string(), *ws)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn joined(ph: &[(usize, String, bool)]) -> String {
+        ph.iter().map(|(_, p, ws)| format!("{p}{}", if *ws { " " } else { "" })).collect()
+    }
+
+    #[test]
+    fn hyphenated_word_has_no_dash_pause() {
+        let words = ["a", "mid-year", "plan"];
+        let toks = [("a", Some("ɐ"), true), ("mid", Some("mˈɪd"), true), ("-", Some(" "), true), ("year", Some("jˈɪɹ"), true), ("plan", Some("plˈæn"), false)];
+        let tt: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        let owner = ra_timing::align(&words, &tt);
+        assert_eq!(owner, vec![Some(0), Some(1), None, Some(1), Some(2)]);
+        let ph = token_phonemes(&toks, &owner);
+        let s = joined(&ph);
+        assert_eq!(s, "ɐ mˈɪd jˈɪɹ plˈæn");
+        assert!(!s.contains("  "), "{s:?}");
+        // the word span covers both halves
+        let v: HashMap<char, i64> = s.chars().filter(|c| *c != ' ').map(|c| (c, 1)).chain([(' ', 16)]).collect();
+        let (_, spans, _) = build_ids(&ph, &v, 3);
+        let w1: Vec<_> = spans.iter().filter(|sp| sp.0 == 1).collect();
+        assert_eq!(w1.first().map(|sp| sp.1), Some(2));
+        assert_eq!(w1.last().map(|sp| sp.2), Some(2 + "mˈɪd jˈɪɹ".chars().count()));
+    }
+
+    #[test]
+    fn spaced_dash_keeps_its_pause() {
+        let words = ["yes", "-", "no"];
+        let toks = [("yes", Some("jˈɛs"), true), ("-", Some(" "), true), ("no", Some("nˈO"), false)];
+        let tt: Vec<&str> = toks.iter().map(|t| t.0).collect();
+        let owner = ra_timing::align(&words, &tt);
+        assert_eq!(joined(&token_phonemes(&toks, &owner)), "jˈɛs   nˈO");
+        // a dash glued to a different-word neighbour (bad align) also keeps it
+        let owner2 = [Some(0), None, Some(2)];
+        assert_eq!(joined(&token_phonemes(&toks, &owner2)), "jˈɛs   nˈO");
+    }
+
+    #[test]
+    fn hyphen_drop_needs_whitespace_only_phonemes() {
+        let toks = [("mid", Some("mˈɪd"), false), ("-", Some("x"), false), ("year", Some("jˈɪɹ"), false)];
+        let owner = [Some(0), None, Some(0)];
+        assert_eq!(joined(&token_phonemes(&toks, &owner)), "mˈɪdxjˈɪɹ");
+        // edge positions never panic
+        assert_eq!(token_phonemes(&[("-", Some(" "), true)], &[None]).len(), 1);
+        assert!(token_phonemes(&[], &[]).is_empty());
+    }
+
+    fn real_g2p() -> &'static G2P {
+        static G: std::sync::OnceLock<G2P> = std::sync::OnceLock::new();
+        G.get_or_init(|| G2P::new(Language::EnglishUS))
+    }
+
+    fn word_phonemes(text_words: &[&str]) -> Vec<(String, String)> {
+        let g = real_g2p();
+        let fed = g2p_words(g, text_words);
+        let fed_refs: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+        let (_, toks) = g.g2p(&fed_refs.join(" ")).expect("g2p");
+        let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        let owner = ra_timing::align(&fed_refs, &tt);
+        let mut out: Vec<(String, String)> = text_words.iter().map(|w| (w.to_string(), String::new())).collect();
+        for (t, o) in toks.iter().zip(owner) {
+            if let (Some(o), Some(p)) = (o, &t.phonemes) {
+                out[o].1.push_str(p);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn all_caps_sentence_reads_words_not_letters() {
+        let s = ["THE", "PRESIDENT", "AND", "THE", "SENATE", "MET", "ON", "TUESDAY", "FOR", "NEW", "TALKS"];
+        let lower: Vec<String> = s.iter().map(|w| w.to_lowercase()).collect();
+        let lower_refs: Vec<&str> = lower.iter().map(|w| w.as_str()).collect();
+        let got = word_phonemes(&s);
+        let want = word_phonemes(&lower_refs);
+        for ((w, p), (_, q)) in got.iter().zip(want.iter()) {
+            assert_eq!(p, q, "{w} spelled differently from its lowercase reading");
+        }
+    }
+
+    #[test]
+    fn all_caps_acronyms_still_spelled() {
+        let g = real_g2p();
+        let words = ["FBI", "GDP", "CEO", "NATO", "NASA", "US", "IT", "WHO", "THE,", "TALKS."];
+        let fed: Vec<String> = g2p_words(g, &words).into_iter().map(|c| c.into_owned()).collect();
+        assert_eq!(fed, vec!["FBI", "GDP", "CEO", "NATO", "NASA", "US", "IT", "WHO", "the,", "talks."]);
+    }
+
+    #[test]
+    fn caps_rewrite_is_cheap() {
+        let g = real_g2p();
+        let words: Vec<&str> = ["THE", "PRESIDENT", "SAID", "FBI", "TALKS", "GDP", "MID-YEAR", "iPhone", "42"].iter().cycle().take(30).copied().collect();
+        let t = Instant::now();
+        for _ in 0..100 {
+            let _ = g2p_words(g, &words);
+        }
+        assert!(t.elapsed() < Duration::from_millis(500), "{:?} for 100 chunks", t.elapsed());
+    }
 
     fn vocab() -> HashMap<char, i64> {
         [('h', 1), ('ə', 2), ('l', 3), ('o', 4), (' ', 16)].into_iter().collect()

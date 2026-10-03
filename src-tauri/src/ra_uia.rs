@@ -156,15 +156,19 @@ pub(crate) enum Src {
 /// order), or the error of the first source (Acro on Acrobat, else UIA): the sources
 /// still worth trying after it. OCR follows only "nothing readable here" (UIA
 /// `NO_TEXT`; Acrobat: no words, or no DOM at all), never a timeout or a rejection
-/// (rules 2/3, a control click). Pure, so it is unit-tested.
-pub(crate) fn choose_source(is_acrobat: bool, first_err: Option<&str>) -> Vec<Src> {
+/// (rules 2/3, a control click). A Chromium window (Edge, Chrome) never falls through
+/// to OCR: its tree may just not be ready yet (cold window), and an OCR read there has
+/// no scroll and no follow; UIA's retry, then "Nothing readable here", is the answer.
+/// Pure, so it is unit-tested.
+pub(crate) fn choose_source(is_acrobat: bool, chromium: bool, first_err: Option<&str>) -> Vec<Src> {
     match (is_acrobat, first_err) {
         (true, None) => vec![Src::Acro, Src::Ocr],
+        (false, None) if chromium => vec![Src::Uia],
         (false, None) => vec![Src::Uia, Src::Ocr],
         (true, Some(e)) if e == ra_acro::NO_TEXT_ACRO || e.starts_with(ra_acro::NO_DOM) => {
             vec![Src::Ocr]
         }
-        (false, Some(e)) if e == NO_TEXT => vec![Src::Ocr],
+        (false, Some(e)) if e == NO_TEXT && !chromium => vec![Src::Ocr],
         _ => Vec::new(),
     }
 }
@@ -682,7 +686,8 @@ fn hover(st: &mut State, x: i32, y: i32) -> Vec<Rect> {
     }
     match word_at(st, x, y) {
         Ok((_, r)) => r,
-        Err(e) if e == NO_TEXT && ocr_ok_at(st, x, y) => {
+        // Chromium: no OCR (see `choose_source`), so no OCR hover box either
+        Err(e) if e == NO_TEXT && !st.target.chromium && ocr_ok_at(st, x, y) => {
             ra_ocr::hover_cached(&mut st.ocr_hover, root, x, y).unwrap_or_default()
         }
         Err(_) => Vec::new(),
@@ -881,13 +886,16 @@ fn word_at(st: &mut State, x: i32, y: i32) -> Result<(IUIAutomationTextRange, Ve
 fn pick(st: &mut State, x: i32, y: i32, retry: bool) -> Result<Vec<String>, String> {
     let root = own_root(st, x, y)?;
     let acro = acrobat_at(x, y);
+    let chromium = !acro && is_chromium(HWND(root as *mut _));
     let t0 = std::time::Instant::now();
     let mut err = String::new();
-    for (i, src) in choose_source(acro, None).into_iter().enumerate() {
+    let mut last = None;
+    for (i, src) in choose_source(acro, chromium, None).into_iter().enumerate() {
+        last = Some(src);
         if i > 0 {
             // fall through only after "nothing readable" (not a timeout or a rejection),
             // and not onto app chrome (menus, tabs, buttons) of a UIA window
-            if !choose_source(acro, Some(&err)).contains(&src) || (!acro && !ocr_ok_at(st, x, y)) {
+            if !choose_source(acro, chromium, Some(&err)).contains(&src) || (!acro && !ocr_ok_at(st, x, y)) {
                 return Err(err);
             }
             log::info!("read-aloud: {err}; trying {src:?}");
@@ -910,7 +918,11 @@ fn pick(st: &mut State, x: i32, y: i32, retry: bool) -> Result<Vec<String>, Stri
             Err(e) => err = e,
         }
     }
-    // only OCR (the last source) gets here: whatever it hit, nothing is readable here
+    if last != Some(Src::Ocr) {
+        // Chromium: UIA was the only source; its error stands (NO_TEXT = nothing readable)
+        return Err(err);
+    }
+    // OCR (the last source) failed: whatever it hit, nothing is readable here
     log::info!("read-aloud: OCR: {err}");
     Err(NO_TEXT.into())
 }
@@ -1167,17 +1179,17 @@ mod tests {
 
     #[test]
     fn acrobat_tries_its_dom_then_ocr() {
-        assert_eq!(choose_source(true, None), vec![Src::Acro, Src::Ocr]);
+        assert_eq!(choose_source(true, false, None), vec![Src::Acro, Src::Ocr]);
     }
 
     #[test]
     fn other_windows_try_uia_then_ocr() {
-        assert_eq!(choose_source(false, None), vec![Src::Uia, Src::Ocr]);
+        assert_eq!(choose_source(false, false, None), vec![Src::Uia, Src::Ocr]);
     }
 
     #[test]
     fn only_uia_no_text_falls_through_to_ocr() {
-        assert_eq!(choose_source(false, Some(NO_TEXT)), vec![Src::Ocr]);
+        assert_eq!(choose_source(false, false, Some(NO_TEXT)), vec![Src::Ocr]);
         for e in [
             "text lookup timed out",
             NOT_TEXT_CLICK,
@@ -1185,19 +1197,28 @@ mod tests {
             "browser UI, not page text",
             "point is over our own window",
         ] {
-            assert_eq!(choose_source(false, Some(e)), vec![], "{e}");
+            assert_eq!(choose_source(false, false, Some(e)), vec![], "{e}");
         }
     }
 
     #[test]
     fn acrobat_falls_through_to_ocr_only_without_a_dom_or_words() {
-        assert_eq!(choose_source(true, Some(ra_acro::NO_TEXT_ACRO)), vec![Src::Ocr]);
+        assert_eq!(choose_source(true, false, Some(ra_acro::NO_TEXT_ACRO)), vec![Src::Ocr]);
         assert_eq!(
-            choose_source(true, Some("Acrobat DOM unavailable (QueryService)")),
+            choose_source(true, false, Some("Acrobat DOM unavailable (QueryService)")),
             vec![Src::Ocr],
             "Acrobat withholds its DOM: OCR still reads the visible page"
         );
-        assert_eq!(choose_source(true, Some(ra_acro::ACRO_TIMEOUT)), vec![], "a timeout is final");
+        assert_eq!(choose_source(true, false, Some(ra_acro::ACRO_TIMEOUT)), vec![], "a timeout is final");
+    }
+
+    #[test]
+    fn chromium_never_falls_through_to_ocr() {
+        // a cold Edge/Chrome tree is retried by pick_uia, then "Nothing readable here":
+        // an OCR read there would have no scroll and no follow
+        assert_eq!(choose_source(false, true, None), vec![Src::Uia]);
+        assert_eq!(choose_source(false, true, Some(NO_TEXT)), vec![]);
+        assert_eq!(choose_source(false, true, Some("browser UI, not page text")), vec![]);
     }
 
     #[test]

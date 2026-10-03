@@ -37,7 +37,9 @@ const OVERLAP: u32 = 64;
 /// `thumb_sum` samples a THUMB x THUMB grid.
 const THUMB: u32 = 64;
 /// Width of the fingerprint column. Every GDI screen read costs ~7 ms whatever its
-/// size, so the fingerprint is ONE BitBlt: a full-height column through the text.
+/// size, so the fingerprint is ONE BitBlt: a column through the text, only as tall as
+/// the text (`span_of`), so an app toolbar that fades in or out above or below the
+/// text (Photos) does not mark the read stale.
 const STRIP_W: u32 = 32;
 
 /// OCR words in reading order: lines as given, words left->right in each line.
@@ -63,8 +65,8 @@ pub struct OcrRead {
     at_end: bool,
     /// (client rect in screen px, thumbnail checksum) when the OCR ran.
     orig: (Rect, u64),
-    /// Fingerprint column (x offset into the capture region, width).
-    strip: (u32, u32),
+    /// Fingerprint column (x, y offset into the capture region, width, height).
+    strip: (u32, u32, u32, u32),
     made: Instant,
     /// Last staleness answer and when it was computed.
     memo: Cell<Option<(Instant, bool)>>,
@@ -201,9 +203,11 @@ impl OcrRead {
             }
         }
         // the fingerprint comes from the OCR'd pixels themselves (no extra screen read)
-        let strip = strip_of(&words, reg.x as f64, reg.w);
-        let col = crop(&bgra, reg.w, (strip.0, 0, strip.1, reg.h));
-        let thumb = thumb_sum(&col, strip.1, reg.h);
+        let (sx, sw) = strip_of(&words, reg.x as f64, reg.w);
+        let (sy, sh) = span_of(&words, reg.y as f64, reg.h);
+        let strip = (sx, sy, sw, sh);
+        let col = crop(&bgra, reg.w, strip);
+        let thumb = thumb_sum(&col, sw, sh);
         drop(col);
         drop(bgra); // the pixels are not kept past OCR
         let mut words = dedupe_tiles(words);
@@ -250,12 +254,13 @@ impl OcrRead {
 
     /// `thumb_sum` of the fingerprint column, read from the screen with one BitBlt.
     fn strip_sum(&self, reg: &Region) -> Option<u64> {
-        let (x0, sw) = self.strip;
-        if sw == 0 || x0.checked_add(sw)? > reg.w {
+        let (x0, y0, sw, sh) = self.strip;
+        if sw == 0 || sh == 0 || x0.checked_add(sw)? > reg.w || y0.checked_add(sh)? > reg.h {
             return None;
         }
-        let col = Region { x: reg.x + x0 as i32, y: reg.y, w: sw, h: reg.h };
-        capture(&col, &[(reg.y, reg.h)]).map(|b| thumb_sum(&b, sw, reg.h))
+        // the same rows as at build time, so the two sums compare like for like
+        let col = Region { x: reg.x + x0 as i32, y: reg.y + y0 as i32, w: sw, h: sh };
+        capture(&col, &[(col.y, sh)]).map(|b| thumb_sum(&b, sw, sh))
     }
 }
 
@@ -269,6 +274,26 @@ pub(crate) fn strip_of(words: &[OcrWord], reg_x: f64, reg_w: u32) -> (u32, u32) 
     let mid = cx.get(cx.len() / 2).copied().unwrap_or(reg_w as f64 / 2.0);
     let x0 = (mid - sw as f64 / 2.0).round().clamp(0.0, (reg_w - sw) as f64);
     (x0 as u32, sw)
+}
+
+/// The fingerprint column's rows (y offset into the region, height): the span of the
+/// OCR'd words (min word top to max word bottom), clamped inside the region. The whole
+/// height when there are no words (or none inside the region).
+pub(crate) fn span_of(words: &[OcrWord], reg_y: f64, reg_h: u32) -> (u32, u32) {
+    let (mut top, mut bot) = (f64::INFINITY, f64::NEG_INFINITY);
+    for w in words {
+        let (a, b) = (w.rect.y - reg_y, w.rect.y + w.rect.h - reg_y);
+        if a.is_finite() && b.is_finite() {
+            top = top.min(a);
+            bot = bot.max(b);
+        }
+    }
+    let h = reg_h as f64;
+    let (t, b) = (top.floor().clamp(0.0, h), bot.ceil().clamp(0.0, h));
+    if t >= b {
+        return (0, reg_h);
+    }
+    (t as u32, (b - t) as u32)
 }
 
 /// What hover does with the cache.
@@ -307,7 +332,7 @@ impl OcrRead {
             next: 0,
             at_end: false,
             orig: (Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, 0),
-            strip: (0, 0),
+            strip: (0, 0, 0, 0),
             made: Instant::now(),
             memo: Cell::new(None),
         }
@@ -957,6 +982,33 @@ mod tests {
         assert_eq!(strip_of(&edge, 0.0, 1920), (1888, 32), "clamped right");
         assert_eq!(strip_of(&words, 5000.0, 1920).0, 0, "clamped left");
         assert_eq!(strip_of(&[], 0.0, 10), (0, 10), "narrow region");
+    }
+
+    #[test]
+    fn the_fingerprint_rows_are_the_span_of_the_words() {
+        // region from screen y 50, 1000 tall; words from y 100 to y 320
+        let words = vec![
+            wd("a", 0, r(0.0, 100.0, 40.0, 20.0)),
+            wd("b", 1, r(0.0, 300.0, 40.0, 20.0)),
+            wd("c", 1, r(50.0, 200.0, 40.0, 20.0)),
+        ];
+        assert_eq!(span_of(&words, 50.0, 1000), (50, 220));
+        // fractional boxes round outward
+        assert_eq!(span_of(&[wd("x", 0, r(0.0, 100.6, 5.0, 10.2))], 50.0, 1000), (50, 11));
+        // clamped to the region (a box poking out above / below)
+        let out = vec![wd("u", 0, r(0.0, 20.0, 5.0, 40.0)), wd("d", 0, r(0.0, 1000.0, 5.0, 100.0))];
+        assert_eq!(span_of(&out, 50.0, 1000), (0, 1000));
+        // a toolbar at the top / bottom of the window is outside the span
+        let mid = vec![wd("m", 0, r(0.0, 450.0, 5.0, 30.0))];
+        let (y0, h) = span_of(&mid, 50.0, 1000);
+        assert!(y0 > 0 && y0 + h < 1000, "{y0} {h}");
+        // no words, or none inside the region: the whole height
+        assert_eq!(span_of(&[], 50.0, 1000), (0, 1000));
+        assert_eq!(span_of(&[wd("o", 0, r(0.0, 5000.0, 5.0, 10.0))], 50.0, 1000), (0, 1000));
+        assert_eq!(span_of(&[wd("o", 0, r(0.0, 0.0, 5.0, 10.0))], 50.0, 1000), (0, 1000));
+        assert_eq!(span_of(&words, 50.0, 0), (0, 0));
+        // NaN / infinite boxes never panic
+        let _ = span_of(&[wd("n", 0, r(0.0, f64::NAN, 5.0, f64::INFINITY))], 0.0, 100);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::{
     ra_wsola,
 };
 use misaki_rs::{Language, Lexicon, G2P};
-use ort::{ep, session::{builder::GraphOptimizationLevel, Session}, value::Tensor};
+use ort::{ep, session::Session, value::Tensor};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -260,7 +260,8 @@ pub(crate) struct CpuOpts {
     pub spin: bool,
     pub mem_pattern: bool,
     /// Graph optimisation: 0 = ONNX Runtime's default (all), 1 basic, 2 extended,
-    /// 3 layout, 4 all, 9 none (bench only).
+    /// 3 layout, 4 all, 9 none. Bench only: production always uses the default.
+    #[cfg(test)]
     pub opt: u8,
 }
 
@@ -269,9 +270,24 @@ pub(crate) struct CpuOpts {
 /// defaults: CPU per second of speech 5.4 -> 2.8 s, RTF at 2.2x 0.75 -> 0.58, first
 /// chunk no slower (1154 -> 1118 ms). Spinning idle threads burn cores between ops;
 /// the memory pattern only pays off when an input length repeats, which reading never does.
+///
+/// Memory pattern trade-off (controller ruling, Task 8 review): with the pattern ON, a
+/// chunk whose input length was seen before runs ~300 ms faster (an exact replay of the
+/// same 12-word chunk: ~700 vs ~1045 ms), but every NEW length pays extra to plan and
+/// record its pattern, which nearly doubled CPU per second of speech. A read never
+/// repeats a chunk, and a jump re-chunks from the clicked word, so a jump back almost
+/// always gives new lengths too (measured: no slower with it OFF, see `tts_jump_back`).
+/// Only re-reading from the exact same start word replays the same shapes, so the
+/// pattern stays OFF.
 impl Default for CpuOpts {
     fn default() -> Self {
-        CpuOpts { intra: num_cpus::get_physical().clamp(1, 8), spin: false, mem_pattern: false, opt: 0 }
+        CpuOpts {
+            intra: num_cpus::get_physical().clamp(1, 8),
+            spin: false,
+            mem_pattern: false,
+            #[cfg(test)]
+            opt: 0,
+        }
     }
 }
 
@@ -293,13 +309,17 @@ fn open_session_with(path: &Path, gpu: bool, o: CpuOpts) -> Result<Session, Stri
         let b = b.with_execution_providers([cpu]).map_err(s)?;
         let b = b.with_intra_op_spinning(o.spin).map_err(s)?;
         let b = b.with_memory_pattern(o.mem_pattern).map_err(s)?;
-        let b = match o.opt {
-            1 => b.with_optimization_level(GraphOptimizationLevel::Level1).map_err(s)?,
-            2 => b.with_optimization_level(GraphOptimizationLevel::Level2).map_err(s)?,
-            3 => b.with_optimization_level(GraphOptimizationLevel::Level3).map_err(s)?,
-            4 => b.with_optimization_level(GraphOptimizationLevel::All).map_err(s)?,
-            9 => b.with_optimization_level(GraphOptimizationLevel::Disable).map_err(s)?,
-            _ => b,
+        #[cfg(test)]
+        let b = {
+            use ort::session::builder::GraphOptimizationLevel as G;
+            match o.opt {
+                1 => b.with_optimization_level(G::Level1).map_err(s)?,
+                2 => b.with_optimization_level(G::Level2).map_err(s)?,
+                3 => b.with_optimization_level(G::Level3).map_err(s)?,
+                4 => b.with_optimization_level(G::All).map_err(s)?,
+                9 => b.with_optimization_level(G::Disable).map_err(s)?,
+                _ => b,
+            }
         };
         b.with_intra_threads(o.intra).map_err(s)?
     };

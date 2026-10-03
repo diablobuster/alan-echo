@@ -263,3 +263,46 @@ fn tts_shapes() {
         summary("    new lengths", &st[i]);
     }
 }
+
+/// A jump back re-chunks from the clicked word, so the chunks it re-reads have other
+/// lengths than the first time. Per config (memory pattern on / off, both spin off),
+/// interleaved: a fresh session reads the passage from word 0 (12, then 30-word chunks),
+/// then "jumps back" to word 7 and reads again (12, then 30); the jump-back chunks are
+/// timed. RA_ROUNDS (default 3).
+/// cargo test --release ra_tts::bench::tts_jump_back -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn tts_jump_back() {
+    let w: Vec<&str> = PASSAGE.split_whitespace().collect();
+    let read_from = |start: usize| -> Vec<Vec<&str>> {
+        let mut out = vec![w[start..start + 12].to_vec()];
+        out.extend(w[start + 12..].chunks(30).take(4).map(|c| c.to_vec()));
+        out
+    };
+    let (first, back) = (read_from(0), read_from(7));
+    let e = Engine::new(data_dir());
+    e.preload("af_heart", "cpu");
+    let eng = e.acquire().expect("engine");
+    let mut l = eng.lock();
+    let f = ra_model::files(&data_dir());
+    let configs = ["8:0:1", "8:0:0"].map(|c| parse_opts(c).unwrap());
+    let rounds: usize = std::env::var("RA_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let mut jump_first: Vec<Vec<f64>> = vec![Vec::new(); 2];
+    let mut st: Vec<Vec<ChunkStat>> = vec![Vec::new(), Vec::new()];
+    for _ in 0..rounds {
+        for (i, o) in configs.iter().enumerate() {
+            l.session = open_session_with(&f.fp32, false, *o).unwrap();
+            for c in &first {
+                Engine::synth_inner(&mut l, c, 2.2, true).unwrap();
+            }
+            let t = Instant::now();
+            Engine::synth_inner(&mut l, &back[0], 2.2, true).unwrap();
+            jump_first[i].push(ms(t.elapsed()));
+            st[i].extend(back[1..].iter().map(|c| run_chunk(&mut l, c)));
+        }
+    }
+    for (i, o) in configs.iter().enumerate() {
+        println!("--- {o:?}: jump-back first chunk (12 words) {}", pct(&jump_first[i]));
+        summary("    jump-back chunks", &st[i]);
+    }
+}

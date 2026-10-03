@@ -2,7 +2,7 @@
 //! Order: hand list (names_fix.tsv) -> CMUdict (BSD-2) -> optional letter-to-sound
 //! model -> spelled letters. Never panics; the misaki fallback is always Ok.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 
@@ -93,8 +93,21 @@ pub trait Lts: Send + Sync {
 
 pub struct Names {
     map: HashMap<String, String>,
+    /// Keys that came from the hand list (they override misaki too).
+    hand: HashSet<String>,
+    /// CMUdict keys whose entry only spells the letters (fbi, gdp, ceo).
+    acronyms: HashSet<String>,
     lts: Option<Box<dyn Lts>>,
 }
+
+/// A pronunciation with stress and spaces removed and ɡ read as ʤ (CMUdict has
+/// some hard-G letter spellings, e.g. gdp), for comparing against `spell`.
+fn bare(p: &str) -> String {
+    p.chars().filter(|c| !matches!(c, 'ˈ' | 'ˌ' | ' ')).map(|c| if c == 'ɡ' { 'ʤ' } else { c }).collect()
+}
+
+/// Longest word checked for being a letter-spelled acronym.
+const ACRONYM_MAX: usize = 6;
 
 impl Names {
     /// Decompress the embedded data. On failure logs and keeps only the hand list.
@@ -117,24 +130,49 @@ impl Names {
             }
             Err(e) => log::warn!("ra_names: CMUdict decompress failed: {e}"),
         }
+        let mut hand = HashSet::new();
         for line in FIX_TSV.lines() {
             if line.starts_with('#') {
                 continue;
             }
             if let Some((w, ph)) = line.split_once('\t') {
                 let ph = ph.trim();
-                if !ph.is_empty() {
-                    map.insert(w.trim().to_lowercase(), ph.to_string());
+                // the phonemes go inside misaki's `[word](/ph/)` override: no syntax chars
+                if ph.is_empty() || ph.contains(['[', ']', '(', ')', '/']) {
+                    log::warn!("ra_names: bad hand-list entry skipped: {line:?}");
+                    continue;
                 }
+                let w = w.trim().to_lowercase();
+                map.insert(w.clone(), ph.to_string());
+                hand.insert(w);
             }
         }
-        Names { map, lts }
+        let acronyms = map
+            .iter()
+            .filter(|(w, p)| w.len() <= ACRONYM_MAX && bare(p) == bare(&spell(w)))
+            .map(|(w, _)| w.clone())
+            .collect();
+        Names { map, hand, acronyms, lts }
     }
 
     /// Knows nothing (the "before" side of the names A/B board).
     #[cfg(test)]
     pub fn empty() -> Names {
-        Names { map: HashMap::new(), lts: None }
+        Names { map: HashMap::new(), hand: HashSet::new(), acronyms: HashSet::new(), lts: None }
+    }
+
+    /// Hand-list pronunciation of `word` (any case, optional possessive 's), or None.
+    /// Hand-list words override misaki's own reading (e.g. Xi, Nguyen).
+    pub fn hand(&self, word: &str) -> Option<String> {
+        let lower = word.to_lowercase();
+        if self.hand.contains(&lower) {
+            return self.map.get(&lower).cloned();
+        }
+        let stem = lower.strip_suffix("'s").or_else(|| lower.strip_suffix("\u{2019}s"))?;
+        if !self.hand.contains(stem) {
+            return None;
+        }
+        self.map.get(stem).map(|v| format!("{v}{}", possessive(v)))
     }
 
     pub fn lookup(&self, word: &str) -> Option<String> {
@@ -148,13 +186,9 @@ impl Names {
 
     /// True when the dictionary says `word_lower` as a word. CMUdict also lists
     /// acronyms as their spelled letters (fbi, gdp, ceo); those don't count, so an
-    /// ALL-CAPS acronym stays spelled. (Compared without stress or spaces, and with
-    /// ɡ read as ʤ: CMUdict has some hard-G letter spellings, e.g. gdp.)
+    /// ALL-CAPS acronym stays spelled. No allocation (the acronym set is built at load).
     pub fn knows(&self, word_lower: &str) -> bool {
-        let bare = |p: &str| {
-            p.chars().filter(|c| !matches!(c, 'ˈ' | 'ˌ' | ' ')).map(|c| if c == 'ɡ' { 'ʤ' } else { c }).collect::<String>()
-        };
-        self.map.get(word_lower).is_some_and(|p| bare(p) != bare(&spell(word_lower)))
+        self.map.contains_key(word_lower) && !self.acronyms.contains(word_lower)
     }
 }
 
@@ -248,6 +282,22 @@ mod tests {
             assert!(n.knows(w), "{w}");
         }
         assert!(!n.knows("qzxv"));
+    }
+
+    #[test]
+    fn hand_returns_only_hand_list_entries() {
+        let n = Names::load(None);
+        assert_eq!(n.hand("Xi").as_deref(), Some("ʃˈi"));
+        assert_eq!(n.hand("XI").as_deref(), Some("ʃˈi"));
+        assert_eq!(n.hand("Nguyen").as_deref(), Some("wˈɪn"));
+        assert_eq!(n.hand("Xi's").as_deref(), Some("ʃˈiz"));
+        assert_eq!(n.hand("Ozempic\u{2019}s").as_deref(), Some("Ozˈɛmpɪks"));
+        assert_eq!(n.hand("pelosi"), None, "CMUdict word, not a hand entry");
+        assert_eq!(n.hand("the"), None);
+        for w in ["", "'", "'s", "🙂", "東京", "[xi]", &"x".repeat(60)] {
+            let _ = n.hand(w);
+        }
+        assert!(Names::empty().hand("xi").is_none());
     }
 
     #[test]

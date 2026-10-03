@@ -506,6 +506,9 @@ impl Engine {
         let rate = effective_rate(rate);
         let empty = || ChunkAudio { pcm: Vec::new(), words: Vec::new(), device, covered: words.len() };
         let fed = g2p_words(&l.g2p, &l.names, words);
+        // align against the words as misaki tokenizes them (hand-list overrides stripped)
+        let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+        let plain: Vec<&str> = plain.iter().map(|w| w.as_ref()).collect();
         let fed: Vec<&str> = fed.iter().map(|w| w.as_ref()).collect();
         let text = fed.join(" ");
         if text.trim().is_empty() {
@@ -515,8 +518,8 @@ impl Engine {
         let toks: Vec<(&str, Option<&str>, bool)> =
             tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
         let tok_text: Vec<&str> = toks.iter().map(|t| t.0).collect();
-        // `fed` keeps the word count and order of `words`, so indices line up
-        let owner = ra_timing::align(&fed, &tok_text);
+        // `plain` keeps the word count and order of `words`, so indices line up
+        let owner = ra_timing::align(&plain, &tok_text);
         let ph = token_phonemes(&toks, &owner);
         let (ids, spans, covered) = build_ids_with(&ph, &l.vocab, words.len(), map_joined);
         let covered = covered.min(words.len());
@@ -577,13 +580,84 @@ fn build_g2p() -> (G2P, Arc<Names>) {
     (g2p, names)
 }
 
-/// G2P input for a chunk: ALL-CAPS words lowercased when misaki or the names
-/// dictionary knows them, or they are long enough to be a word (see
-/// `ra_text::speakable_caps`), so they are read instead of spelled.
+/// G2P input for a chunk, one entry per word (same count and order):
+/// - a hand-list word (Xi, Nguyen) becomes misaki's `[word](/phonemes/)` override,
+///   so the hand list wins even where misaki has its own reading;
+/// - ALL-CAPS words are lowercased when misaki or the names dictionary knows them,
+///   or they are long enough to be a word (`ra_text::speakable_caps`);
+/// - page `[` `]` become `(` `)`, so page text is never read as override syntax
+///   (Kokoro has no bracket symbols; parens give the same pause).
+/// Hyphen-joined parts are handled one by one. Use `plain_word` for alignment.
 fn g2p_words<'a>(g: &G2P, names: &Names, words: &[&'a str]) -> Vec<Cow<'a, str>> {
     let known = |w: &str| lexicon_knows(&g.lexicon, w);
     let names_knows = |w: &str| names.knows(w);
-    words.iter().map(|w| ra_text::speakable_caps(w, &known, &names_knows)).collect()
+    let part = |p: &'a str| -> Cow<'a, str> {
+        match hand_override(p, names) {
+            Some(o) => Cow::Owned(o),
+            None => unbracket(ra_text::speakable_caps(p, &known, &names_knows)),
+        }
+    };
+    words
+        .iter()
+        .map(|w| {
+            if !w.contains('-') {
+                return part(w);
+            }
+            let parts: Vec<Cow<str>> = w.split('-').map(part).collect();
+            if parts.iter().all(|p| matches!(p, Cow::Borrowed(_))) {
+                Cow::Borrowed(*w)
+            } else {
+                Cow::Owned(parts.join("-"))
+            }
+        })
+        .collect()
+}
+
+/// `[` / `]` -> `(` / `)`.
+fn unbracket(s: Cow<'_, str>) -> Cow<'_, str> {
+    if s.contains(['[', ']']) {
+        Cow::Owned(s.replace('[', "(").replace(']', ")"))
+    } else {
+        s
+    }
+}
+
+/// A word (no hyphen) whose letters are a hand-list entry, as misaki's phoneme
+/// override with its surrounding punctuation kept (`"Xi's,"` -> `[Xi's](/ʃˈiz/),`).
+/// Hand-list phonemes never contain `[ ] ( ) /` (checked at load).
+fn hand_override(w: &str, names: &Names) -> Option<String> {
+    let start = w.find(char::is_alphanumeric)?;
+    let (last, ch) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric())?;
+    let end = last + ch.len_utf8();
+    let core = &w[start..end];
+    if !core.chars().all(|c| c.is_alphabetic() || c == '\'' || c == '\u{2019}') {
+        return None;
+    }
+    let ph = names.hand(core)?;
+    let lead = unbracket(Cow::Borrowed(&w[..start]));
+    let trail = unbracket(Cow::Borrowed(&w[end..]));
+    Some(format!("{lead}[{core}](/{ph}/){trail}"))
+}
+
+/// A `g2p_words` entry as misaki tokenizes it: every `[text](/ph/)` override
+/// replaced by `text`. Page brackets were already turned into parens, so any `[`
+/// here is ours. Malformed input is returned as is; never panics.
+fn plain_word(w: &str) -> Cow<'_, str> {
+    if !w.contains('[') {
+        return Cow::Borrowed(w);
+    }
+    let mut out = String::with_capacity(w.len());
+    let mut rest = w;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(mid) = after.find("](/") else { break };
+        let Some(close) = after[mid + 3..].find("/)") else { break };
+        out.push_str(&rest[..open]);
+        out.push_str(&after[..mid]);
+        rest = &after[mid + 3 + close + 2..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 /// Uppercase: the lexicon has that exact spelling (NATO, US). Lowercase: a gold
@@ -725,6 +799,77 @@ mod tests {
         let owner = ra_timing::align(&words, &tt);
         for w in 0..words.len() {
             assert!(owner.contains(&Some(w)), "word {w} has no token");
+        }
+    }
+
+    /// Phonemes per word through the real path: g2p_words -> misaki -> align on plain words.
+    fn spoken(words: &[&str]) -> Vec<String> {
+        phonemes_per_word(test_g2p(), test_names(), words)
+    }
+
+    #[test]
+    fn hand_list_overrides_misaki() {
+        // misaki reads XI as the Roman numeral "eleven"/"Roman" and has its own Nguyen
+        assert_eq!(spoken(&["Today,", "Xi", "spoke."])[1], "ʃˈi");
+        assert_eq!(spoken(&["Today,", "XI", "spoke."])[1], "ʃˈi");
+        assert_eq!(spoken(&["Today,", "Nguyen", "spoke."])[1], "wˈɪn");
+        assert_eq!(spoken(&["Today,", "Xi's", "plan."])[1], "ʃˈiz");
+        assert_eq!(spoken(&["Today,", "XI'S", "plan."])[1], "ʃˈiz");
+        assert_eq!(spoken(&["(Xi),", "spoke."])[0].replace(['(', ')', ','], ""), "ʃˈi");
+        assert!(spoken(&["a", "Xi-led", "talk"])[1].starts_with("ʃˈi"), "{:?}", spoken(&["a", "Xi-led", "talk"]));
+    }
+
+    #[test]
+    fn override_word_keeps_one_span_per_word() {
+        let g = test_g2p();
+        for words in [
+            vec!["Senator", "Xi", "said", "no"],
+            vec!["Xi's", "talks", "with", "Nguyen,", "XI", "said."],
+            vec!["\u{201C}XI'S", "Xi-led", "plan\u{201D}"],
+        ] {
+            let fed = g2p_words(g, test_names(), &words);
+            let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+            let plain: Vec<&str> = plain.iter().map(|c| c.as_ref()).collect();
+            let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+            let (_, toks) = g.g2p(&fed.join(" ")).unwrap();
+            let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+            let owner = ra_timing::align(&plain, &tt);
+            for w in 0..words.len() {
+                assert!(owner.contains(&Some(w)), "{words:?}: word {w} has no token ({tt:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn words_misaki_gets_right_are_untouched() {
+        let words = ["Washington", "Pelosi", "the", "NATO", "FBI", "mid-year", "iPhone", "McDonald's", "said."];
+        let fed = g2p_words(test_g2p(), test_names(), &words);
+        for (w, f) in words.iter().zip(&fed) {
+            assert!(!f.contains('['), "{w} -> {f}");
+            assert!(matches!(f, Cow::Borrowed(_)), "{w} -> {f}");
+        }
+    }
+
+    #[test]
+    fn page_brackets_are_never_override_syntax() {
+        let g = test_g2p();
+        let words = ["[1](2)", "[Xi", "x](/ʒʒʒ/)", "](", "[", "]", "🙂", "東京", "a[b](/zz/)c", "Xi](/x/)", "[[Xi]]", "word"];
+        let fed = g2p_words(g, test_names(), &words);
+        for (w, f) in words.iter().zip(&fed) {
+            if !w.contains("Xi") {
+                assert!(!f.contains(['[', ']']), "{w:?} -> {f:?}");
+            }
+        }
+        let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
+        let (_, toks) = g.g2p(&fed.join(" ")).expect("never errors");
+        let ph: String = toks.iter().filter_map(|t| t.phonemes.clone()).collect();
+        assert!(!ph.contains("ʒʒ") && !ph.contains("zz"), "page text applied an override: {ph}");
+        // every override that does happen is a whole word we produced
+        let one = g2p_words(g, test_names(), &["[[Xi]]"]);
+        assert_eq!(one[0], "(([Xi](/ʃˈi/)))");
+        assert_eq!(plain_word(&one[0]), "((Xi))");
+        for w in ["", "[", "](", "[a](/", "[a](/b", "x[Xi](/ʃˈi/", "🙂[", "東京](/"] {
+            let _ = plain_word(w);
         }
     }
 
@@ -1134,11 +1279,13 @@ mod tests {
     /// Phonemes each word of `words` gets (after the caps rule), as fed to the model.
     fn phonemes_per_word(g: &G2P, names: &Names, words: &[&str]) -> Vec<String> {
         let fed = g2p_words(g, names, words);
+        let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+        let plain: Vec<&str> = plain.iter().map(|c| c.as_ref()).collect();
         let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();
         let mut out = vec![String::new(); words.len()];
         let Ok((_, toks)) = g.g2p(&fed.join(" ")) else { return out };
         let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
-        let owner = ra_timing::align(&fed, &tt);
+        let owner = ra_timing::align(&plain, &tt);
         for (t, o) in toks.iter().zip(owner) {
             if let (Some(o), Some(p)) = (o, &t.phonemes) {
                 out[o].push_str(&kokoro_phonemes(p));

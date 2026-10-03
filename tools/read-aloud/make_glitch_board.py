@@ -1,6 +1,7 @@
 """Listening board for the Read Aloud glitch hunt (phase 3 spec §6).
 
 Builds one HTML page Alex can open and listen through:
+  0. Round 1: 20 acronym / emphasis / unit lines, before vs after round 1;
   1. 15 showcase lines, before (feat/read-aloud) vs after (this branch), with what
      Whisper heard for each;
   2. every residual round-trip glitch (audio, the sentence, the words, what
@@ -79,6 +80,9 @@ def main():
     ap.add_argument("--after", default=os.path.join(TEMP, "after"))
     ap.add_argument("--whisper-port", type=int, default=0)
     ap.add_argument("--gate", default="", help="optional JSON with the gate table rows")
+    ap.add_argument("--r1-before", default=os.path.join(TEMP, "r1-before"),
+                    help="round 1 WAVs from the code before round 1 (ids from board_round1.tsv)")
+    ap.add_argument("--r1-after", default=os.path.join(TEMP, "r1-after"), help="round 1 WAVs from this branch")
     a = ap.parse_args()
     random.seed(7)
 
@@ -86,6 +90,9 @@ def main():
     show = load_tsv(os.path.join(HERE, "board_showcase.tsv"))
     hb = heard_for(a.before, list(show), a.whisper_port)
     ha = heard_for(a.after, list(show), a.whisper_port)
+    r1 = load_tsv(os.path.join(HERE, "board_round1.tsv"))
+    r1b = heard_for(a.r1_before, list(r1), a.whisper_port)
+    r1a = heard_for(a.r1_after, list(r1), a.whisper_port)
 
     sample = load_tsv(os.path.join(a.hunt, "sample.tsv"))
     trans = {}
@@ -118,13 +125,21 @@ def main():
              f"<p class=lede>Phase 3 glitch hunt. {len(glitch)} residual round-trip mismatches in {len(bad_ids)} sentences, "
              f"{len(pauses)} long pauses, 20 random clean sentences, and 15 before/after showcase lines. "
              "Voice: Kokoro af_heart on CPU at 1.0x. &ldquo;Heard&rdquo; is what Whisper large-v3 wrote down.</p>",
-             "<nav><a href='#show'>Before / after</a><a href='#glitch'>Residual glitches</a><a href='#pause'>Pauses</a><a href='#good'>Clean sentences</a></nav>"]
+             "<nav><a href='#round1'>Round 1</a><a href='#show'>Before / after</a><a href='#glitch'>Residual glitches</a><a href='#pause'>Pauses</a><a href='#good'>Clean sentences</a></nav>"]
         if a.gate and os.path.exists(a.gate):
             g = json.load(open(a.gate, encoding="utf-8"))
             o.append("<h2>Gate</h2><div class=scroll><table><tr><th>Measure</th><th>Baseline</th><th>After tasks 1-5</th><th>After fix rounds</th><th>Target</th></tr>")
             for r in g:
                 o.append("<tr>" + "".join(f"<td class=num>{html.escape(str(x))}</td>" for x in r) + "</tr>")
             o.append("</table></div>")
+        o.append("<h2 id=round1>Round 1: acronyms, emphasis, units</h2><p class=lede>20 lines, before round 1 "
+                 "(2703e6b) vs after. Dense acronyms stay spelled (SAT, ACT, ER, ETA), emphasis caps read as words, "
+                 "units are plural after any number but 1, 60/40 is two numbers, a time zone stays in the phrase.</p>"
+                 "<div class=scroll><table><tr><th>Line</th><th>Before (2703e6b)</th><th>After (round 1)</th></tr>")
+        for i, t in r1.items():
+            o.append(f"<tr><td>{html.escape(t)}</td><td>{audio(link('r1-before', i))}<div class=muted>{html.escape(r1b.get(i, ''))}</div></td>"
+                     f"<td>{audio(link('r1-after', i))}<div class=muted>{html.escape(r1a.get(i, ''))}</div></td></tr>")
+        o.append("</table></div>")
         o.append("<h2 id=show>Before and after: 15 showcase lines</h2><div class=scroll><table><tr><th>Line</th><th>Before (feat/read-aloud)</th><th>After (phase 3)</th></tr>")
         for i, t in show.items():
             o.append(f"<tr><td>{html.escape(t)}</td><td>{audio(link('before', i))}<div class=muted>{html.escape(hb.get(i, ''))}</div></td>"
@@ -156,7 +171,8 @@ def main():
         return "\n".join(o)
 
     def file_url(kind, i):
-        d = {"before": a.before, "after": a.after, "rt": os.path.join(TEMP, "rt")}[kind]
+        d = {"before": a.before, "after": a.after, "rt": os.path.join(TEMP, "rt"),
+             "r1-before": a.r1_before, "r1-after": a.r1_after}[kind]
         return "file:///" + os.path.abspath(os.path.join(d, f"{i}.wav")).replace("\\", "/")
 
     abs_html = page(file_url)
@@ -165,7 +181,10 @@ def main():
 
     # self-contained copy with relative links
     board = os.path.join(HERE, "board")
-    for kind, d in (("before", a.before), ("after", a.after), ("rt", os.path.join(TEMP, "rt"))):
+    for kind, d in (("before", a.before), ("after", a.after), ("rt", os.path.join(TEMP, "rt")),
+                    ("r1-before", a.r1_before), ("r1-after", a.r1_after)):
+        if not os.path.isdir(d):
+            continue
         os.makedirs(os.path.join(board, kind), exist_ok=True)
         for f in os.listdir(d):
             if f.endswith(".wav"):

@@ -139,15 +139,18 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
     out
 }
 /// ALL-CAPS words misaki tends to spell letter by letter in an all-caps sentence.
-/// Returns the form to feed G2P: lowercased when `known(lower)` says it is a
-/// dictionary word, unless it is a common acronym (`KEEP_CAPS`) or the lexicon
-/// has the uppercase spelling itself (`known(upper)`, e.g. NATO). Leading/trailing
-/// punctuation, possessive 's and hyphen-joined parts are handled. Never panics.
-pub fn speakable_caps<'a>(word: &'a str, known: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
+/// Returns the form to feed G2P. A caps word is lowercased (so it is read as a
+/// word) when misaki knows the lowercase word (`known`), the names dictionary
+/// knows it (`names_knows`, e.g. PELOSI), or it is 5+ letters (the letter-to-sound
+/// model says it). It stays caps (spelled) when it is a common acronym
+/// (`KEEP_CAPS`), the lexicon has the caps spelling itself (`known(upper)`, e.g.
+/// NATO), or it is a short unknown (GDP, NFLX). Leading/trailing punctuation,
+/// possessive 'S and hyphen-joined parts are handled. Never panics.
+pub fn speakable_caps<'a>(word: &'a str, known: &dyn Fn(&str) -> bool, names_knows: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
     if !word.contains('-') {
-        return caps_part(word, known);
+        return caps_part(word, known, names_knows);
     }
-    let parts: Vec<Cow<str>> = word.split('-').map(|p| caps_part(p, known)).collect();
+    let parts: Vec<Cow<str>> = word.split('-').map(|p| caps_part(p, known, names_knows)).collect();
     if parts.iter().all(|p| matches!(p, Cow::Borrowed(_))) {
         Cow::Borrowed(word)
     } else {
@@ -158,7 +161,10 @@ pub fn speakable_caps<'a>(word: &'a str, known: &dyn Fn(&str) -> bool) -> Cow<'a
 /// Common acronyms whose lowercase form is also an English word.
 const KEEP_CAPS: &[&str] = &["US", "IT", "WHO", "AM", "PM", "OK", "AI", "ID", "TV", "UK", "EU", "UN", "IQ", "PC"];
 
-fn caps_part<'a>(w: &'a str, known: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
+/// Unknown caps words this long are more likely words or names than acronyms.
+const SAY_CAPS_LEN: usize = 5;
+
+fn caps_part<'a>(w: &'a str, known: &dyn Fn(&str) -> bool, names_knows: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
     let Some(start) = w.find(char::is_alphanumeric) else { return Cow::Borrowed(w) };
     let Some((last, ch)) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric()) else { return Cow::Borrowed(w) };
     let end = last + ch.len_utf8();
@@ -167,7 +173,11 @@ fn caps_part<'a>(w: &'a str, known: &dyn Fn(&str) -> bool) -> Cow<'a, str> {
     if base.chars().count() < 2 || !base.chars().all(|c| c.is_alphabetic() && c.is_uppercase()) {
         return Cow::Borrowed(w);
     }
-    if KEEP_CAPS.contains(&base) || known(base) || !known(&base.to_lowercase()) {
+    if KEEP_CAPS.contains(&base) || known(base) {
+        return Cow::Borrowed(w);
+    }
+    let lower = base.to_lowercase();
+    if !(known(&lower) || names_knows(&lower) || base.chars().count() >= SAY_CAPS_LEN) {
         return Cow::Borrowed(w);
     }
     Cow::Owned(format!("{}{}{}", &w[..start], core.to_lowercase(), &w[end..]))
@@ -183,7 +193,26 @@ mod tests {
     }
 
     fn caps(w: &str) -> String {
-        speakable_caps(w, &known).into_owned()
+        speakable_caps(w, &known, &|_| false).into_owned()
+    }
+
+    fn cmu(w: &str) -> bool {
+        ["pelosi", "schumer"].contains(&w)
+    }
+
+    #[test]
+    fn caps_names_known_to_cmu_are_lowercased() {
+        assert_eq!(speakable_caps("PELOSI", &known, &cmu), "pelosi");
+        assert_eq!(speakable_caps("SCHUMER's", &known, &cmu), "SCHUMER's"); // mixed-case suffix: untouched
+        assert_eq!(speakable_caps("PELOSI'S", &known, &cmu), "pelosi's");
+    }
+
+    #[test]
+    fn short_unknown_caps_stay_spelled_long_ones_are_pronounced() {
+        assert_eq!(speakable_caps("GDP", &known, &cmu), "GDP");
+        assert_eq!(speakable_caps("NFLX", &known, &cmu), "NFLX");
+        assert_eq!(speakable_caps("ZELENSKY", &known, &cmu), "zelensky");
+        assert_eq!(speakable_caps("US", &known, &cmu), "US");
     }
 
     #[test]

@@ -48,7 +48,10 @@ enum Req {
     Hover(i32, i32, Sender<Vec<Rect>>),
     Pick(i32, i32, Sender<Result<Vec<String>, String>>),
     /// A plain click while reading: `Pick`, but only on ordinary text, and no retry.
-    ClickPick(i32, i32, Sender<Result<Vec<String>, String>>),
+    /// Non-committing: the read it finds is only staged under the id until a
+    /// matching `CommitClick` (the controller accepted it); the current read stays.
+    ClickPick(u64, i32, i32, Sender<Result<Vec<String>, String>>),
+    CommitClick(u64),
     More(Sender<Result<Vec<String>, String>>),
     Rects(Vec<usize>, Sender<Option<Vec<Rect>>>),
     Scroll(usize),
@@ -185,6 +188,18 @@ impl Uia {
     pub fn scroll_to(&self, src_idx: usize) {
         let _ = self.tx.send(Req::Scroll(src_idx));
     }
+
+    /// Switch the worker to the read staged by click lookup `id` (the controller
+    /// accepted it). Requests sent after this one see the new read. Fire-and-forget.
+    pub fn commit_click(&self, id: u64) {
+        let _ = self.tx.send(Req::CommitClick(id));
+    }
+}
+
+/// The staged click read, if it belongs to `id`. Anything staged is consumed either
+/// way (a mismatched one is stale). Pure, so it is unit-tested.
+fn take_staged<T>(staged: &mut Option<(u64, T)>, id: u64) -> Option<T> {
+    staged.take().filter(|(k, _)| *k == id).map(|(_, v)| v)
 }
 
 /// See `Uia::click_fetcher`.
@@ -195,10 +210,12 @@ pub struct ClickFetcher {
 impl ClickFetcher {
     /// Like `Uia::pick`, for a plain (not swallowed) click while reading: rejected with
     /// `NOT_TEXT_CLICK` when it is on a link, button, field, menu, etc.; no retry.
-    pub fn pick(&self, x: i32, y: i32) -> Result<Vec<String>, String> {
+    /// Does NOT switch the worker to the clicked text: that happens only on
+    /// `Uia::commit_click(id)`, so a result the controller drops changes nothing.
+    pub fn pick(&self, id: u64, x: i32, y: i32) -> Result<Vec<String>, String> {
         let (t, r) = mpsc::channel();
         self.tx
-            .send(Req::ClickPick(x, y, t))
+            .send(Req::ClickPick(id, x, y, t))
             .map_err(|_| "text reader is not running".to_string())?;
         Uia::wait_pick(r)
     }
@@ -252,6 +269,8 @@ struct State {
     own_pid: u32,
     target: Target,
     read: Read,
+    /// A click lookup's read, waiting for the controller's `CommitClick`.
+    staged: Option<(u64, Read)>,
     source: Arc<AtomicIsize>,
 }
 
@@ -303,6 +322,7 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
             hwnd,
             ..Default::default()
         },
+        staged: None,
         source,
     };
 
@@ -327,8 +347,30 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
                 }
                 let _ = t.send(word_at(&mut st, x, y).map(|(_, r)| r).unwrap_or_default());
             }
-            Req::Pick(x, y, t) => pick_req(&mut st, x, y, t, false),
-            Req::ClickPick(x, y, t) => pick_req(&mut st, x, y, t, true),
+            Req::Pick(x, y, t) => {
+                st.staged = None;
+                pick_req(&mut st, x, y, t);
+            }
+            Req::ClickPick(id, x, y, t) => {
+                // pick into st.read, then put the current read back: the new one is staged
+                let saved = std::mem::take(&mut st.read);
+                let res = click_on_text(&mut st, x, y).and_then(|()| pick(&mut st, x, y, false));
+                let found = std::mem::replace(&mut st.read, saved);
+                st.staged = None;
+                if res.is_ok() {
+                    if t.send(res).is_ok() {
+                        st.staged = Some((id, found));
+                    }
+                } else {
+                    let _ = t.send(res);
+                }
+            }
+            Req::CommitClick(id) => {
+                if let Some(r) = take_staged(&mut st.staged, id) {
+                    st.read = r;
+                    st.source.store(st.read.hwnd, Ordering::Release);
+                }
+            }
             Req::More(t) => {
                 let (len, cur) = (st.read.ranges.len(), st.read.cursor.clone());
                 let res = read_forward(&mut st.read, MORE_BATCH);
@@ -358,13 +400,9 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
 /// Run a pick (a plain click when `click`). If the caller already timed out (reply
 /// undeliverable), roll the read back so source indices stay aligned with the tokens
 /// the caller actually has; a rejected pick keeps the old read too.
-fn pick_req(st: &mut State, x: i32, y: i32, t: Sender<Result<Vec<String>, String>>, click: bool) {
+fn pick_req(st: &mut State, x: i32, y: i32, t: Sender<Result<Vec<String>, String>>) {
     let saved = std::mem::take(&mut st.read);
-    let res = if click {
-        click_on_text(st, x, y).and_then(|()| pick(st, x, y, false))
-    } else {
-        pick(st, x, y, true)
-    };
+    let res = pick(st, x, y, true);
     let failed = res.is_err();
     if t.send(res).is_err() || failed {
         st.read = saved;
@@ -774,6 +812,18 @@ mod tests {
         assert!(!superseded(&q, |r| matches!(r, Req::Rects(..))));
         let q: VecDeque<Req> = [Req::Rects(vec![0], t)].into_iter().collect();
         assert!(superseded(&q, |r| matches!(r, Req::Rects(..))));
+    }
+
+    #[test]
+    fn click_read_commits_only_for_its_own_id() {
+        let mut staged = Some((7u64, "clicked"));
+        assert_eq!(take_staged(&mut staged, 7), Some("clicked"));
+        assert_eq!(take_staged(&mut staged, 7), None, "committed once");
+        let mut staged = Some((7u64, "clicked"));
+        assert_eq!(take_staged(&mut staged, 8), None, "another click's commit");
+        assert!(staged.is_none(), "a stale staged read is dropped");
+        let mut none: Option<(u64, &str)> = None;
+        assert_eq!(take_staged(&mut none, 1), None, "nothing staged (dropped result)");
     }
 
     #[test]

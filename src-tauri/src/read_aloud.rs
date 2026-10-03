@@ -833,6 +833,14 @@ fn covers_word(src: isize, root: isize, root_is_ours: bool) -> bool {
     root != 0 && (root == src || root_is_ours)
 }
 
+/// A click lookup's result is taken (the worker told to commit, the read restarted)
+/// only when it is the lookup in flight, a read is still under way (not pick mode,
+/// not torn down) and it found speakable words. Anything else is dropped, and since
+/// the worker only commits on our say-so, it stays on the current read.
+fn accept_click(current: bool, in_read: bool, has_words: bool) -> bool {
+    current && in_read && has_words
+}
+
 /// Click-vs-drag slop at (x, y) in physical px.
 fn click_slop(x: i32, y: i32) -> i32 {
     let scale = win::monitor_of_point(x, y).map_or(1.0, |m| m.scale);
@@ -1338,9 +1346,7 @@ impl Controller {
         let jobs = self.s.jobs(pos, self.speed);
         self.submit(jobs);
         let due = self.more_retry_at.map_or(true, |t| Instant::now() >= t);
-        // not while a click lookup is in flight: the UIA worker may already have switched
-        // to the clicked text, and a batch read now would be lost to the new read
-        if self.s.wants_more() && !self.more_inflight && self.click_inflight.is_none() && due {
+        if self.s.wants_more() && !self.more_inflight && due {
             let Some(fetch) = self.uia.as_ref().map(|u| u.more_fetcher()) else {
                 self.s.append_more(&[]); // no text reader: nothing more to read
                 return;
@@ -1484,12 +1490,6 @@ impl Controller {
     fn update_word_rects(&mut self, changed: bool) {
         let due = std::mem::take(&mut self.rects_due);
         if !changed && !due && !self.rects_retry && self.rects_at.elapsed() < RECTS_REFRESH {
-            return;
-        }
-        if self.click_inflight.is_some() {
-            // the UIA worker may already hold the clicked text: source indices would
-            // point at the wrong words (and could scroll the page). Look again next tick.
-            self.rects_due = true;
             return;
         }
         self.rects_at = Instant::now();
@@ -1644,7 +1644,7 @@ impl Controller {
         self.click_seq += 1;
         let (tx, id) = (self.tx.clone(), self.click_seq);
         let spawned = std::thread::Builder::new().name("ra-click".into()).spawn(move || {
-            let _ = tx.send(Msg::ClickPicked(id, fetch.pick(x, y)));
+            let _ = tx.send(Msg::ClickPicked(id, fetch.pick(id, x, y)));
         });
         match spawned {
             Ok(_) => self.click_inflight = Some(id),
@@ -1655,27 +1655,29 @@ impl Controller {
     /// A click lookup's answer: jump there if it was on ordinary text (links, buttons,
     /// fields etc. are left to the app; the click itself was never swallowed).
     /// Anything else, or a stale answer, is silently ignored (the read goes on).
+    /// The UIA worker only *stages* the clicked text; it switches to it when we send
+    /// `commit_click`, which happens only here, on acceptance. A dropped result
+    /// therefore leaves the worker on the current read (they can never disagree).
     fn on_click_picked(&mut self, id: u64, r: Result<Vec<String>, String>) {
-        if self.click_inflight != Some(id) {
-            return; // stale: torn down, or superseded
+        let current = self.click_inflight == Some(id);
+        if current {
+            self.click_inflight = None;
         }
-        self.click_inflight = None;
-        self.rects_due = true;
-        if !self.in_read() {
+        let (words, raw_len) = match &r {
+            Ok(raw) => (ra_text::normalize(raw), raw.len()),
+            Err(e) => {
+                log::debug!("read-aloud: click is not a jump: {e}");
+                (Vec::new(), 0)
+            }
+        };
+        if !accept_click(current, self.in_read(), !words.is_empty()) {
             return;
         }
-        match r {
-            Ok(raw) => {
-                let words = ra_text::normalize(&raw);
-                if words.is_empty() {
-                    return;
-                }
-                log::info!("read-aloud: click-to-jump");
-                self.picked = Some((words, raw.len()));
-                self.feed(Ev::Jump);
-            }
-            Err(e) => log::debug!("read-aloud: click is not a jump: {e}"),
-        }
+        let Some(u) = &self.uia else { return };
+        u.commit_click(id); // queued before any request for the new read
+        log::info!("read-aloud: click-to-jump");
+        self.picked = Some((words, raw_len));
+        self.feed(Ev::Jump);
     }
 
     /// The pill's "Go to word": follow ON, and scroll the spoken word into view if it
@@ -2156,6 +2158,14 @@ mod tests {
         for from in [Idle, FRESH, JUMP_R, JUMP_P, JUMP_W] {
             assert_eq!(step(&from, Ev::Jump), (from, vec![]));
         }
+    }
+
+    #[test]
+    fn click_result_is_committed_only_when_accepted() {
+        assert!(accept_click(true, true, true));
+        assert!(!accept_click(false, true, true), "stale id (superseded / torn down)");
+        assert!(!accept_click(true, false, true), "pick mode started meanwhile (hotkey)");
+        assert!(!accept_click(true, true, false), "nothing speakable");
     }
 
     #[test]

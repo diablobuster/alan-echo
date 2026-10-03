@@ -2642,4 +2642,41 @@ mod session_tests {
         let fa = first_audio.expect("audio").as_secs_f64();
         assert!(total.as_secs_f64() <= fa + audio_secs + 3.0, "playback stalled: total {total:?}");
     }
+
+    /// Task 8: cost of the per-tick work while reading (no app, no windows of ours):
+    /// the Win32 checks a tick makes and the timeline lookup. The UIA rects request it
+    /// sends on a word change is measured by uia_notepad_bench.
+    /// cargo test --release tick_parts_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn tick_parts_cost() {
+        use crate::ra_perf::{ms, thread_cpu};
+        let fg = crate::paste::foreground_window();
+        let n = 10_000;
+        let us = |f: &mut dyn FnMut()| {
+            let t = Instant::now();
+            for _ in 0..n {
+                f();
+            }
+            ms(t.elapsed()) * 1000.0 / n as f64
+        };
+        let mut s = session(2000, 15);
+        let pos = s.chunk_ends.last().copied().unwrap_or(0) / 2;
+        let (x, y) = win::cursor().unwrap_or((100, 100));
+        println!("window_exists      {:.2} us", us(&mut || { std::hint::black_box(win::window_exists(fg)); }));
+        println!("window_shown       {:.2} us", us(&mut || { std::hint::black_box(win::window_shown(fg)); }));
+        println!("word_visible       {:.2} us", us(&mut || { std::hint::black_box(win::word_visible(fg, x, y)); }));
+        println!("monitor_of_point   {:.2} us", us(&mut || { std::hint::black_box(win::monitor_of_point(x, y)); }));
+        println!("word_at (timeline) {:.2} us", us(&mut || { std::hint::black_box(s.word_at(pos)); }));
+        println!("jobs (queue full)  {:.2} us", us(&mut || { std::hint::black_box(s.jobs(0, 2.2)); }));
+        // a reading second: 30 ticks; the rects/visibility path only on ~7 word changes
+        let c0 = thread_cpu();
+        for i in 0..30 * 60 {
+            std::hint::black_box((win::window_exists(fg), s.word_at(pos + i)));
+            if i % 4 == 0 {
+                std::hint::black_box((win::window_shown(fg), win::word_visible(fg, x, y), win::monitor_of_point(x, y)));
+            }
+        }
+        println!("60 s of ticks (excl. UIA + webview): {:.1} ms CPU", ms(thread_cpu() - c0));
+    }
 }

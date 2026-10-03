@@ -11,6 +11,16 @@ import notices from '../legal/third-party-notices.txt?raw'
 // levels_visibly_differ_on_settings_sample test in text_cleanup.rs.
 const CLEANUP_SAMPLE = "um so basically we're gonna need to uh move the the meeting to friday in order to hit the api deadline you know"
 const MODEL_LABELS = { base: 'Basic', small: 'Standard', medium: 'Enhanced', 'large-v3': 'Ultra' }
+const RA_VOICES = [
+  { value: 'af_heart', label: 'Heart · US' },
+  { value: 'am_michael', label: 'Michael · US' },
+  { value: 'bf_emma', label: 'Emma · UK' },
+]
+const RA_HIGHLIGHTS = { 'Brass fill': 'brass', 'Mono underline': 'mono', Off: 'off' }
+const RA_DEVICES = { Auto: 'auto', GPU: 'gpu', CPU: 'cpu' }
+const keyOf = (map, v) => Object.keys(map).find(k => map[k] === v)
+// Read Aloud is Windows-only; the panel has no other platform gate, so use the webview UA.
+const IS_WINDOWS = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
 const LABEL_TO_MODEL = { Basic: 'base', Standard: 'small', Enhanced: 'medium', Ultra: 'large-v3' }
 
 export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
@@ -29,6 +39,8 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
   const [hasMultilingualModel, setHasMultilingualModel] = useState(true)
   const [modelDownload, setModelDownload] = useState(null) // null | {stage, percent, ...}
   const [showNotices, setShowNotices] = useState(false)
+  const [raInstalled, setRaInstalled] = useState(null) // null = unknown
+  const [raSpeed, setRaSpeed] = useState(null) // local drag value; null = follow settings
   const pollRef = useRef(null)
 
   const LANGUAGES = [
@@ -74,6 +86,12 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
         if (s.microphone_device) setSelectedDevice(s.microphone_device)
         const devs = await invoke('list_audio_devices')
         setDevices(devs || [])
+        if (IS_WINDOWS) {
+          try {
+            const ra = await invoke('ra_get_state')
+            setRaInstalled(ra && typeof ra.installed === 'boolean' ? ra.installed : null)
+          } catch { setRaInstalled(null) }
+        }
         try { setModels(await invoke('list_models') || []) } catch {}
         try { setAutostart(await invoke('get_autostart')) } catch {}
         try { setHasMultilingualModel(await invoke('has_multilingual_model')) } catch {}
@@ -134,6 +152,14 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
       console.error('Save failed:', e)
       setModelError(String(e))
     }
+  }
+
+  // Persist the speed once per gesture (pointer-up / key-up / blur), not per drag tick.
+  const commitRaSpeed = async () => {
+    if (raSpeed == null) return
+    const v = raSpeed
+    if (v !== Number(settings.read_aloud_speed ?? 2.2)) await updateSetting('read_aloud_speed', v)
+    setRaSpeed(null)
   }
 
   const changeModel = async (label) => {
@@ -404,6 +430,84 @@ export default function SettingsPanel({ open, onClose, hotkeys = {} }) {
               onChange={changeTheme}
             />
           </SettingsRow>
+
+          {/* Read Aloud (beta) — Windows only */}
+          {IS_WINDOWS && (
+            <>
+              <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 4 }}>Settings · Beta</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Read Aloud</div>
+              <div style={{ fontSize: 10, color: 'var(--text-faint)', margin: '2px 0 8px', lineHeight: 1.5 }}>
+                Press the shortcut, click any word, and Echo reads from there. Nothing loads until you use it.
+              </div>
+
+              <SettingsRow label="Enable Read Aloud">
+                <Toggle
+                  label="Enable Read Aloud"
+                  checked={settings.read_aloud_enabled === true}
+                  disabled={raInstalled === false && settings.read_aloud_enabled !== true}
+                  onChange={v => updateSetting('read_aloud_enabled', v)}
+                />
+              </SettingsRow>
+              {raInstalled === false && (
+                <div style={{ fontSize: 10, color: 'var(--accent-yellow)', marginBottom: 4 }}>
+                  Voice files not installed — run <span className="echo-mono">tools/read-aloud/prepare_model.py</span>
+                </div>
+              )}
+
+              <HotkeyRow label="Shortcut" keys="Ctrl + Shift + E" />
+
+              <SettingsRow label="Speed">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="range" min={1.0} max={3.5} step={0.1}
+                    aria-label="Read Aloud speed"
+                    value={raSpeed ?? Number(settings.read_aloud_speed ?? 2.2)}
+                    onChange={e => setRaSpeed(parseFloat(e.target.value))}
+                    onPointerUp={commitRaSpeed}
+                    onKeyUp={commitRaSpeed}
+                    onBlur={commitRaSpeed}
+                    style={{ width: 110, accentColor: 'var(--brass)' }}
+                  />
+                  <span className="echo-mono" style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>
+                    {(raSpeed ?? Number(settings.read_aloud_speed ?? 2.2)).toFixed(1)}×
+                  </span>
+                </div>
+              </SettingsRow>
+
+              <SettingsRow label="Voice">
+                <select
+                  aria-label="Read Aloud voice"
+                  value={settings.read_aloud_voice || 'af_heart'}
+                  onChange={e => updateSetting('read_aloud_voice', e.target.value)}
+                  style={{
+                    background: 'var(--bg-card)', border: '1px solid var(--border-primary)',
+                    borderRadius: 'var(--echo-radius-sm)', padding: '4px 8px',
+                    fontSize: 11, fontFamily: 'var(--font-sans)', color: 'var(--text-primary)',
+                  }}
+                >
+                  {RA_VOICES.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
+                </select>
+              </SettingsRow>
+
+              <SettingsRow label="Word highlight">
+                <Seg
+                  label="Word highlight"
+                  options={Object.keys(RA_HIGHLIGHTS)}
+                  value={keyOf(RA_HIGHLIGHTS, settings.read_aloud_highlight || 'brass')}
+                  onChange={l => updateSetting('read_aloud_highlight', RA_HIGHLIGHTS[l])}
+                />
+              </SettingsRow>
+
+              <SettingsRow label="Run voice on" hint="Unloads after 2 min idle.">
+                <Seg
+                  label="Run voice on"
+                  options={Object.keys(RA_DEVICES)}
+                  value={keyOf(RA_DEVICES, settings.read_aloud_device || 'auto')}
+                  onChange={l => updateSetting('read_aloud_device', RA_DEVICES[l])}
+                />
+              </SettingsRow>
+            </>
+          )}
 
           {/* Hotkeys section */}
           <div className="echo-eyebrow" style={{ marginTop: 20, marginBottom: 12 }}>Hotkeys</div>
@@ -836,15 +940,18 @@ function Seg({ options, value, onChange, disabled = [], label }) {
   )
 }
 
-function Toggle({ checked, onChange, label }) {
+function Toggle({ checked, onChange, label, disabled = false }) {
   return (
     <button
       role="switch"
       aria-checked={checked}
       aria-label={label}
-      onClick={() => onChange(!checked)}
+      aria-disabled={disabled}
+      disabled={disabled}
+      onClick={() => { if (!disabled) onChange(!checked) }}
       style={{
-        width: 36, height: 20, borderRadius: 10, padding: 2, border: 'none', cursor: 'pointer',
+        width: 36, height: 20, borderRadius: 10, padding: 2, border: 'none',
+        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
         background: checked ? 'var(--accent-green)' : 'var(--bg-tertiary)',
         transition: 'background 0.15s',
         display: 'flex', alignItems: 'center',

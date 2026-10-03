@@ -34,3 +34,4 @@ html.ra-window, html.ra-window body, html.ra-window #root { background: transpar
 @keyframes ra-rot { to { transform: rotate(360deg); } }
 .ra-err { font-size: 14px; color: #fff; flex: 1; margin-left: 8px; }
 @media (prefers-reduced-motion: reduce) { .ra-hint.shake, .ra-spin { animation: none; } .ra-box { transition: none; } }
+.ra-speed button:disabled { opacity: 0.35; cursor: default; }

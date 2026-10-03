@@ -106,6 +106,10 @@ function App() {
 // Dashboard's dynamic import of the same module.)
 const label = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label
 const root = createRoot(document.getElementById('root'))
+if (label === 'ra-overlay' || label === 'ra-pill') {
+  // Synchronously, before first paint, so there is no opaque first frame.
+  document.documentElement.classList.add('ra-window')
+}
 if (label === 'ra-overlay') root.render(<ReadAloudOverlay />)
 else if (label === 'ra-pill') root.render(<NowReadingPill />)
 else root.render(<App />)

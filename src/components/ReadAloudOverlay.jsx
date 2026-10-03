@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import '../readAloud.css'
 
@@ -7,6 +7,7 @@ export default function ReadAloudOverlay() {
   const [hover, setHover] = useState([])
   const [word, setWord] = useState({ rects: [], style: 'brass' })
   const [shake, setShake] = useState(false)
+  const shakeTimer = useRef(null)
 
   useEffect(() => {
     document.documentElement.classList.add('ra-window')
@@ -16,9 +17,14 @@ export default function ReadAloudOverlay() {
         if (e.payload.kind === 'hover') setHover(e.payload.rects)
         else setWord({ rects: e.payload.rects, style: e.payload.style })
       }),
-      listen('ra-pick-rejected', () => { setShake(true); setTimeout(() => setShake(false), 320) }),
+      listen('ra-pick-rejected', () => {
+        clearTimeout(shakeTimer.current)
+        setShake(false)
+        requestAnimationFrame(() => setShake(true))
+        shakeTimer.current = setTimeout(() => setShake(false), 320)
+      }),
     ]
-    return () => offs.forEach(p => p.then(f => f()))
+    return () => { clearTimeout(shakeTimer.current); offs.forEach(p => p.then(f => f())) }
   }, [])
 
   const box = (r, cls, i) => (

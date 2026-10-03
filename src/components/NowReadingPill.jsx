@@ -19,21 +19,29 @@ export default function NowReadingPill() {
   useEffect(() => {
     document.documentElement.classList.add('ra-window')
     invoke('ra_get_state').then(s => setMono(s?.highlight === 'mono')).catch(() => {})
+    let alive = true
+    let unMoved = null
+    let timer = null
+    import('@tauri-apps/api/window').then(({ getCurrentWindow }) =>
+      getCurrentWindow().onMoved(({ payload }) => {
+        clearTimeout(timer)
+        timer = setTimeout(() => invoke('ra_save_pill_pos', { x: payload.x, y: payload.y }).catch(() => {}), 400)
+      })
+    ).then(f => { if (alive) unMoved = f; else f() }).catch(() => {})
     const offs = [
       listen('ra-state', e => setSt(e.payload)),
       listen('ra-sentence', e => setSent(e.payload)),
     ]
-    return () => offs.forEach(p => p.then(f => f()))
+    return () => { alive = false; clearTimeout(timer); if (unMoved) unMoved(); offs.forEach(p => p.then(f => f())) }
   }, [])
 
-  const drag = async () => {
+  const drag = async e => {
+    if (e.button !== 0) return
     const { getCurrentWindow } = await import('@tauri-apps/api/window')
-    const w = getCurrentWindow()
-    await w.startDragging()
-    const p = await w.outerPosition()
-    invoke('ra_save_pill_pos', { x: p.x, y: p.y }).catch(() => {})
+    getCurrentWindow().startDragging().catch(() => {})
   }
-  const speed = d => invoke('ra_set_speed', { speed: Math.round((st.speed + d) * 10) / 10 })
+  const spd = st.speed ?? 2.2
+  const speed = d => invoke('ra_set_speed', { speed: Math.min(3.5, Math.max(1.0, Math.round((spd + d) * 10) / 10)) })
 
   if (st.state === 'warming') {
     return (
@@ -68,9 +76,9 @@ export default function NowReadingPill() {
         {st.message && <span className="ra-status">{st.message}</span>}
         <div style={{ flex: 1 }} />
         <div className="ra-speed">
-          <button aria-label="Slower" onClick={() => speed(-0.1)}>−</button>
-          <span>{st.speed.toFixed(1)}×</span>
-          <button aria-label="Faster" onClick={() => speed(0.1)}>+</button>
+          <button aria-label="Slower" disabled={spd <= 1.0} onClick={() => speed(-0.1)}>−</button>
+          <span>{spd.toFixed(1)}×</span>
+          <button aria-label="Faster" disabled={spd >= 3.5} onClick={() => speed(0.1)}>+</button>
         </div>
         <button className="ra-btn stop" aria-label="Stop reading" onClick={() => invoke('ra_stop')}>{Icon.x}</button>
       </div>

@@ -5,7 +5,6 @@
 //! Windows drops if it takes ~300 ms+, so they must only send to a channel.
 //! Only one `PickHook` may be alive at a time (callbacks live in statics); a second
 //! `install` while one is alive returns an inactive no-op hook.
-#![allow(dead_code)] // wired up by the Read Aloud controller task
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;

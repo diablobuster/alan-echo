@@ -1,5 +1,4 @@
 //! Read Aloud — turn raw UIA word tokens into speakable words and chunks.
-#![allow(dead_code)]
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq)]

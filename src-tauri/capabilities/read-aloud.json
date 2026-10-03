@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickel-0/tauri/v2/crates/tauri-utils/schema.json",
+  "identifier": "read-aloud",
+  "description": "Read Aloud overlay and pill windows",
+  "windows": ["ra-overlay", "ra-pill"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:window:allow-start-dragging",
+    "core:window:allow-outer-position"
+  ]
+}

@@ -60,6 +60,8 @@ pub struct AppState {
     pub trial_state: Mutex<trial::TrialState>,
     pub dictation: dictation::Dictation,
     pub data_dir: std::path::PathBuf,
+    #[cfg(target_os = "windows")]
+    pub read_aloud: read_aloud::ReadAloud,
 }
 
 // ── Transcript commands ──────────────────────────────────────────────
@@ -108,7 +110,9 @@ fn get_settings(state: State<Arc<AppState>>) -> Result<serde_json::Value, String
 }
 
 #[tauri::command]
-fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Value) -> Result<(), String> {
+fn set_setting(app: tauri::AppHandle, state: State<Arc<AppState>>, key: String, value: serde_json::Value) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    let _ = &app;
     // Refuse a model the user can't actually run — otherwise the engine
     // silently falls back and the selector appears broken.
     if key == "whisper_model" {
@@ -147,9 +151,98 @@ fn set_setting(state: State<Arc<AppState>>, key: String, value: serde_json::Valu
                 state.whisper.reload(None);
             }
         }
+        // Speed/voice/highlight/device need no arm: the controller reads them at each read start.
+        #[cfg(target_os = "windows")]
+        "read_aloud_enabled" => {
+            let on = value.as_bool() == Some(true);
+            if !on {
+                state.read_aloud.post(read_aloud::Msg::Stop);
+            }
+            if on && !ra_model::is_installed(&state.data_dir) {
+                log::warn!("read-aloud: enabled but voice files are not installed; hotkey not registered");
+            } else {
+                // (un)register on the main thread, where the shortcut plugin's window lives
+                let h = app.clone();
+                app.run_on_main_thread(move || {
+                    let ok = if on {
+                        read_aloud::register_hotkey(&h)
+                    } else {
+                        read_aloud::unregister_hotkey(&h);
+                        false
+                    };
+                    if let Some(st) = h.try_state::<Arc<AppState>>() {
+                        if let Some(o) = st.hotkeys.lock().as_object_mut() {
+                            o.insert("readAloud".into(), if ok { read_aloud::hotkey_label().into() } else { serde_json::Value::Null });
+                        }
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            }
+        }
         _ => {}
     }
     Ok(())
+}
+
+// ── Read Aloud commands (Windows) ────────────────────────────────────
+// The pill only exists during a session, so these post to the running controller
+// (they never start one). Each only sends a message.
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_toggle(state: State<Arc<AppState>>) {
+    state.read_aloud.post(read_aloud::Msg::PlayPause);
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_skip(state: State<Arc<AppState>>, dir: i32) {
+    state.read_aloud.post(read_aloud::Msg::Skip(dir.signum()));
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_set_speed(state: State<Arc<AppState>>, speed: f32) -> Result<(), String> {
+    let speed = read_aloud::clamp_speed(speed);
+    {
+        let mut s = state.settings.lock();
+        s.set("read_aloud_speed", serde_json::json!((speed as f64 * 10.0).round() / 10.0));
+        s.save().map_err(|e| e.to_string())?;
+    }
+    state.read_aloud.post(read_aloud::Msg::Speed(speed));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_stop(state: State<Arc<AppState>>) {
+    state.read_aloud.post(read_aloud::Msg::Stop);
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_save_pill_pos(state: State<Arc<AppState>>, x: f64, y: f64) -> Result<(), String> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err("bad position".into());
+    }
+    let mut s = state.settings.lock();
+    s.set("read_aloud_pill_pos", serde_json::json!([x.round(), y.round()]));
+    s.save().map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_get_state(state: State<Arc<AppState>>) -> serde_json::Value {
+    let s = state.settings.lock();
+    let speed = read_aloud::clamp_speed(s.get("read_aloud_speed").and_then(|v| v.as_f64()).unwrap_or(2.2) as f32);
+    serde_json::json!({
+        "enabled": s.get_bool("read_aloud_enabled") == Some(true),
+        "speed": (speed as f64 * 10.0).round() / 10.0,
+        "voice": s.get_str("read_aloud_voice").unwrap_or_else(|| "af_heart".into()),
+        "device": s.get_str("read_aloud_device").unwrap_or_else(|| "auto".into()),
+        "highlight": s.get_str("read_aloud_highlight").unwrap_or_else(|| "brass".into()),
+        "installed": ra_model::is_installed(&state.data_dir),
+    })
 }
 
 /// Parse the `text_replace_rules` setting — a JSON array of
@@ -1148,6 +1241,8 @@ fn main() {
         trial_state: Mutex::new(initial_trial),
         dictation: dictation::Dictation::new(),
         data_dir: data_dir.clone(),
+        #[cfg(target_os = "windows")]
+        read_aloud: read_aloud::ReadAloud::new(data_dir.clone()),
     });
 
     // Migrate old trial keys to signed blob on first run
@@ -1201,6 +1296,10 @@ fn main() {
         .manage(app_state.clone())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Hide-to-tray is for the dashboard only (Read Aloud windows are destroyed).
+                if window.label() != "main" {
+                    return;
+                }
                 let app = window.app_handle();
                 let state = app.state::<Arc<AppState>>();
                 let tray_ok = state.settings.lock().get_bool("_tray_ok") == Some(true);
@@ -1342,6 +1441,19 @@ fn main() {
                 });
             }
 
+            // Read Aloud: Ctrl+Shift+E only when enabled AND the voice files exist.
+            // Nothing else of Read Aloud exists until the hotkey is pressed.
+            #[cfg(target_os = "windows")]
+            {
+                let state = app.state::<Arc<AppState>>();
+                let enabled = state.settings.lock().get_bool("read_aloud_enabled") == Some(true);
+                let ok = enabled && ra_model::is_installed(&state.data_dir) && read_aloud::register_hotkey(handle);
+                let mut hk = state.hotkeys.lock();
+                if let Some(o) = hk.as_object_mut() {
+                    o.insert("readAloud".into(), if ok { read_aloud::hotkey_label().into() } else { serde_json::Value::Null });
+                }
+            }
+
             // Set window icon
             if let Some(window) = app.get_webview_window("main") {
                 let png_bytes = include_bytes!("../icons/icon.png");
@@ -1408,6 +1520,18 @@ fn main() {
             download_update,
             get_autostart,
             set_autostart,
+            #[cfg(target_os = "windows")]
+            ra_toggle,
+            #[cfg(target_os = "windows")]
+            ra_skip,
+            #[cfg(target_os = "windows")]
+            ra_set_speed,
+            #[cfg(target_os = "windows")]
+            ra_stop,
+            #[cfg(target_os = "windows")]
+            ra_save_pill_pos,
+            #[cfg(target_os = "windows")]
+            ra_get_state,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

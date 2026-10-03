@@ -3,7 +3,6 @@
 //! One worker thread ("ra-uia") owns every COM object; callers talk to it over
 //! channels with short timeouts, so a hung target app can never block the UI.
 //! Behaviour follows Spike A (spec section 5, rules 1-9). Never panics.
-#![allow(dead_code)] // wired up by the Read Aloud controller task
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicIsize, Ordering};

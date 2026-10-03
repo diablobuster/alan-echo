@@ -28,6 +28,8 @@ mod ra_timing;
 mod ra_wsola;
 #[cfg(target_os = "windows")]
 mod ra_tts;
+#[cfg(target_os = "windows")]
+mod read_aloud;
 
 use audio::{DeviceInfo, RecorderHandle};
 use db::TranscriptDB;

@@ -56,4 +56,5 @@ if [ -n "$STARTED" ]; then
   [ -n "$WPID" ] && taskkill //PID "$WPID" //F > /dev/null && echo "stopped whisper-server pid $WPID (port $PORT)"
 fi
 python roundtrip.py > /dev/null
+python pauses.py                                    # long silences mid-phrase (from wav/<id>.json)
 python cluster.py "$@"

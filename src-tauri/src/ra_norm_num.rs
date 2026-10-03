@@ -699,6 +699,7 @@ fn number_unit(core: &str) -> Option<String> {
 fn times_ten(core: &str) -> Option<String> {
     let (mant, rest) = core.split_once('×').or_else(|| core.split_once('x'))?;
     let (ip, fp) = number_parts(mant)?;
+    let caret = rest.starts_with("10^");
     let exp = if let Some(e) = rest.strip_prefix("10^") {
         e
     } else {
@@ -715,6 +716,10 @@ fn times_ten(core: &str) -> Option<String> {
         return None;
     }
     let n: u64 = e.parse().ok()?;
+    // a glued `x100` / `x101` is a plain product, not ten to the 0th / 1st
+    if !caret && !neg && n < 2 {
+        return None;
+    }
     let sign = if neg { "minus " } else { "" };
     Some(format!("{} times ten to the {sign}{}", decimal(ip, fp), ordinal(n)))
 }
@@ -1676,6 +1681,7 @@ mod tests {
         assert_eq!(one("3×10^8"), "three times ten to the eighth");
         // a plain product stays a product
         assert_eq!(one("3×4"), "three times four");
+        assert!(!one("2.5x100").contains("to the"), "{}", one("2.5x100"));
     }
 
     #[test]

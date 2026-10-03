@@ -823,20 +823,23 @@ fn is_caps_word(w: &str) -> bool {
     core.len() >= 2 && core.bytes().all(|b| b.is_ascii_uppercase())
 }
 
-/// Per word: headline mode, i.e. at least two OTHER caps words in the same sentence
-/// of the chunk ("FED CUTS RATES"). One caps neighbour ("DO NOT") is still mixed text.
+/// Per word: headline mode. A sentence of the chunk is a headline when at least 60%
+/// of its alphabetic words (2+ letters) are ALL-CAPS and there are at least 3 of
+/// them ("FED CUTS RATES"). "took the SAT, ACT and AP" (3 of 6) and "DO NOT" (2)
+/// are mixed text.
 fn headline_flags(words: &[Cow<str>]) -> Vec<bool> {
     let mut out = vec![false; words.len()];
     let mut start = 0;
+    let letters = |w: &str| w.chars().filter(|c| c.is_alphabetic()).count();
     for i in 0..words.len() {
         let w = words[i].trim_end_matches(|c: char| matches!(c, '"' | '\'' | ')' | ']' | '\u{201D}' | '\u{2019}'));
         if i + 1 == words.len() || w.ends_with(['.', '!', '?']) {
-            let caps: Vec<bool> = words[start..=i].iter().map(|w| is_caps_word(w)).collect();
-            let n = caps.iter().filter(|c| **c).count();
-            for (k, c) in caps.iter().enumerate() {
-                if let Some(o) = out.get_mut(start + k) {
-                    *o = n - usize::from(*c) >= 2;
-                }
+            let sent = &words[start..=i];
+            let alpha = sent.iter().filter(|w| letters(w) >= 2).count();
+            let caps = sent.iter().filter(|w| is_caps_word(w)).count();
+            let head = caps >= 3 && caps * 10 >= alpha * 6;
+            for o in out.iter_mut().skip(start).take(i + 1 - start) {
+                *o = head;
             }
             start = i + 1;
         }
@@ -847,12 +850,16 @@ fn headline_flags(words: &[Cow<str>]) -> Vec<bool> {
 /// Alex's acronym rule for a 2-5 letter ALL-CAPS token (optional `'s` / plural `s`):
 /// - a `ra_names::PRONOUNCED` acronym is a word (NASA, NATO, SPACs): misaki's caps
 ///   entry, else the lowercase word;
-/// - in mixed-case text it is spelled (ISS, IRAs, US, WHO), unless it is a common
-///   emphasis word (`ra_names::EMPHASIS`: "do NOT");
-/// - in a headline (`headline`) a common dictionary word is a word (THE NEW LAW,
-///   BUS); KEEP_CAPS / SPELLED words and unknown or short non-words are spelled.
-/// So a 2-4 letter caps token never reaches the GRU. Roman numerals (II, XIV) and
-/// other lengths are left to the other rules. `None`: not decided here.
+/// - an acronym list entry (`SPELLED`, `KEEP_CAPS`, `ACRONYM_WORDS`, a CMUdict
+///   letter-spelled entry) is spelled;
+/// - in mixed-case text a 2-3 letter token is spelled (SAT, ACT, ISS, IRAs) unless
+///   it is an `EMPHASIS` word ("do NOT", "a BIG deal", "the BUS"); a 4-5 letter
+///   token that is a common dictionary word reads as that word (HUGE, SORRY, NEWS);
+/// - in a headline (`headline`) a dictionary word is a word (THE NEW TAX LAW).
+/// "Dictionary word": a misaki gold word (an inflected one at 4+ letters, HITS) or,
+/// at 4+ letters, a CMUdict word not read letter by letter. Anything else is
+/// spelled, so a 2-5 letter caps token never reaches the GRU. Roman numerals (II,
+/// XIV) and other lengths are left to the other rules. `None`: not decided here.
 fn caps_rule(w: &str, names: &Names, lex: &Lex, known: &dyn Fn(&str) -> bool, headline: bool) -> Option<String> {
     let start = w.find(char::is_alphanumeric)?;
     let (last, ch) = w.char_indices().rev().find(|(_, c)| c.is_alphanumeric())?;
@@ -878,19 +885,28 @@ fn caps_rule(w: &str, names: &Names, lex: &Lex, known: &dyn Fn(&str) -> bool, he
         }
         return Some(format!("{lead}{}{trail}", core.to_lowercase()));
     }
-    let spell = if headline {
-        let low = stem.to_ascii_lowercase();
+    let low = stem.to_ascii_lowercase();
+    // an all-caps plural (IRAS, CEOS) is checked by its stem too
+    let bare = stem.strip_suffix('S').filter(|b| b.len() >= 2);
+    let on_list = |x: &str| {
+        ra_names::SPELLED.contains(&x) || ra_text::KEEP_CAPS.contains(&x) || ra_names::ACRONYM_WORDS.contains(&x)
+    };
+    let listed = on_list(stem) || bare.is_some_and(on_list) || names.letter_spelled(&low);
+    let word = if listed {
+        false
+    } else if ra_names::EMPHASIS.contains(&stem) && !suf {
+        true
+    } else if !headline && stem.len() <= 3 {
+        false
+    } else {
         // a dictionary word, read as a word (not misaki's letter-spelled entries)
         let as_word = |p: String| p.matches(['ˈ', 'ˌ']).count() < stem.len();
         // exact gold entry, or an inflected 4+ letter word (HITS); "iss" is not "is" + s
-        let common = ((lex.knows)(&low) || (stem.len() >= 4 && known(&low))) && (lex.phonemes)(&low).map_or(true, as_word);
-        let listed = ra_names::SPELLED.contains(&stem) || ra_text::KEEP_CAPS.contains(&stem);
-        listed || !(common || (stem.len() == 5 && names.knows(&low)))
-    } else {
-        !(ra_names::EMPHASIS.contains(&stem) && !suf)
+        let gold = ((lex.knows)(&low) || (stem.len() >= 4 && known(&low))) && (lex.phonemes)(&low).map_or(true, as_word);
+        gold || (stem.len() >= 4 && names.knows(&low))
     };
-    if !spell {
-        return None;
+    if word {
+        return Some(format!("{lead}{}{trail}", core.to_lowercase()));
     }
     let p = ra_names::spell_tight(stem);
     let p = if suf { format!("{p}{}", ra_names::possessive(&p)) } else { p };
@@ -1751,7 +1767,7 @@ mod tests {
         // tech
         "CPU", "GPU", "SSD", "HDD", "LCD", "DNS", "URL", "HTML", "CSS", "API", "SDK", "IDE", "AWS", "GCP", "PDF", "SQL",
         "XML", "NFT", "PC", "TV", "AI", "LLM", "GPT", "IoT", "HTTP", "HTTPS", "SSH", "VR", "AR", "OS", "UI", "UX",
-        "CRM", "ERP", "DVD", "CD", "LTE", "NFC", "RFID", "IP", "TCP", "UDP", "BIOS", "USBs", "GPUs", "IEC",
+        "CRM", "ERP", "DVD", "CD", "LTE", "NFC", "RFID", "IP", "TCP", "UDP", "USBs", "GPUs", "IEC",
         "ISO", "NXP", "HTC", "LG", "BYD", "BMW", "GM", "DHL", "BP",
         // medicine
         "ER", "MRI", "CT", "EKG", "ECG", "DNA", "RNA", "HIV", "ADHD", "PTSD", "OCD", "BMI", "CPR", "EMT", "ENT", "MD",
@@ -1771,7 +1787,7 @@ mod tests {
         "SARS", "MERS", "ISIS", "DARPA", "NOAA", "OSHA", "HUD", "GAAP", "ICE", "DOGE", "SPAC", "SPACs", "NASA's",
         "CERN", "FIFA", "UEFA", "IKEA", "REIT", "JSON", "AWOL", "RAM", "LAN", "SIM", "MRSA", "HIPAA", "ASCII", "GUI",
         "SCUBA", "TASER", "FICO", "META", "EDGAR", "POSIX", "NAND", "MIPS", "NIST", "CHIP", "PRISM", "ATLAS", "ENSO",
-        "XBOX", "PIN", "ARM", "BERT", "GNOME", "BLOOM", "FRED", "SAKS", "VESA", "SUSE", "LEO", "MIRI", "MEMS", "FOSS", "PEP", "MAC",
+        "XBOX", "BIOS", "ARPA", "PIN", "ARM", "BERT", "GNOME", "BLOOM", "FRED", "SAKS", "VESA", "SUSE", "LEO", "MIRI", "MEMS", "FOSS", "PEP", "MAC",
     ];
 
     #[test]
@@ -1829,7 +1845,9 @@ mod tests {
         let roman = |w: &str| w.chars().all(|c| matches!(c, 'I' | 'V' | 'X'));
         let mut bad = Vec::new();
         for w in CORPUS.split_whitespace() {
-            let word = crate::ra_names::PRONOUNCED.contains(&w) || crate::ra_names::EMPHASIS.contains(&w);
+            // round 1: 4-5 letter caps that are dictionary words (names, CNET) read as words
+            const DICT: &[&str] = &["RIVA", "CNET", "ELKS", "AMRO"];
+            let word = crate::ra_names::PRONOUNCED.contains(&w) || crate::ra_names::EMPHASIS.contains(&w) || DICT.contains(&w);
             if word || roman(w) || n.hand(w).is_some() {
                 continue;
             }
@@ -1862,6 +1880,64 @@ mod tests {
         let s = spoken(&["NASA", "AND", "NATO", "MEET"]);
         assert_ne!(s[0], spelled_with_suffix("NASA"));
         assert_ne!(s[2], spelled_with_suffix("NATO"));
+    }
+
+    /// Round 1: headline mode needs 60%+ caps words and 3+ of them; in mixed text a
+    /// 2-3 letter caps token is spelled (unless EMPHASIS / PRONOUNCED) and a 4-5
+    /// letter one that is a common dictionary word reads as that word.
+    #[test]
+    fn round1_caps_context_table() {
+        // (sentence, tokens that must be spelled, tokens that must read as words)
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            // dense acronym sentences: never a headline, never "sat" / "act" / "era"
+            ("we took the SAT, ACT and AP.", &["SAT", "ACT", "AP"], &[]),
+            ("took the SAT, ACT and AP", &["SAT", "ACT", "AP"], &[]),
+            ("the ER, ICU and VA", &["ER", "ICU", "VA"], &[]),
+            ("ETA and ERA", &["ETA", "ERA"], &[]),
+            ("IRAs, ISS's, CEO and CFO", &["IRAs", "ISS's", "CEO", "CFO"], &[]),
+            ("an AD for the MA program", &["AD", "MA"], &[]),
+            // emphasis caps in normal text read as words
+            ("this is NOT okay", &[], &["NOT"]),
+            ("it was HUGE", &[], &["HUGE"]),
+            ("a BIG deal", &[], &["BIG"]),
+            ("I'm SORRY", &[], &["SORRY"]),
+            ("the NEWS today", &[], &["NEWS"]),
+            ("follow the MONEY", &[], &["MONEY"]),
+            ("we are DONE", &[], &["DONE"]),
+            // real headlines: dictionary words are words, acronyms spelled
+            ("BREAKING: SENATE PASSES NEW TAX LAW", &[], &["BREAKING:", "SENATE", "PASSES", "NEW", "TAX", "LAW"]),
+            ("FDA APPROVES NEW DRUG", &["FDA"], &["APPROVES", "NEW", "DRUG"]),
+        ];
+        let mut bad = Vec::new();
+        for (text, spell, word) in cases {
+            let words: Vec<&str> = text.split(' ').collect();
+            let lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+            let lower: Vec<&str> = lower.iter().map(|w| w.as_str()).collect();
+            let got = spoken(&words);
+            let low = spoken(&lower);
+            for (i, w) in words.iter().enumerate() {
+                let core = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+                let core = core.trim_end_matches('\'');
+                if spell.contains(&core) && got[i] != spelled_with_suffix(core) {
+                    bad.push(format!("{text}: {w} should be spelled, got {}", got[i]));
+                }
+                if word.contains(w) && got[i] != low[i] {
+                    bad.push(format!("{text}: {w} should read as a word, got {} (want {})", got[i], low[i]));
+                }
+            }
+        }
+        // emphasis caps Alex heard spelled
+        for w in [
+            "OKAY", "SORRY", "FROM", "HARD", "SURE", "HATE", "DONE", "FAKE", "EVEN", "BACK", "NEXT", "LATE", "CRAZY", "AWFUL",
+            "MONEY", "NEWS", "BUS", "HUGS",
+        ] {
+            let low = w.to_lowercase();
+            let (got, want) = (in_text(w), spoken(&["we", "saw", &low, "today."])[2].clone());
+            if got != want {
+                bad.push(format!("emphasis {w}: {got} (want {want})"));
+            }
+        }
+        assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
     }
 
     #[test]

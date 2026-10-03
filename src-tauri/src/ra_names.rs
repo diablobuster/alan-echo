@@ -284,6 +284,11 @@ impl Names {
     pub fn knows(&self, word_lower: &str) -> bool {
         self.map.contains_key(word_lower) && !self.acronyms.contains(word_lower)
     }
+
+    /// CMUdict lists `word_lower` only as its spelled letters (fbi, gdp, ceo).
+    pub fn letter_spelled(&self, word_lower: &str) -> bool {
+        self.acronyms.contains(word_lower)
+    }
 }
 
 /// `word` lowercased with Latin accents folded (`Erdoğan` -> "erdogan", `Æ` -> "ae")
@@ -416,7 +421,7 @@ pub const PRONOUNCED: &[&str] = &[
     "ARM", "ATLAS", "AWOL", "EFTA", "PAHO", "BERT", "BLOOM", "CERN", "CHIP", "COTS", "EDGAR", "ENSO", "FICO", "FIFA", "FOSS", "FRED",
     "GNOME", "GUI", "HIPAA", "IKEA", "JSON", "LAN", "LEO", "MAC", "MEMS", "META", "MIPS", "MIRI", "MRSA", "NAND",
     "NASDAQ", "NIST", "PEP", "PIN", "POSIX", "PRISM", "RAM", "REIT", "SAKS", "SCUBA", "SIM", "SUSE", "TASER",
-    "UEFA", "VESA", "XBOX", "ASCII",
+    "UEFA", "VESA", "XBOX", "ASCII", "BIOS", "ARPA",
 ];
 
 /// Common words often set in caps for emphasis ("do NOT", "FREE shipping"): read
@@ -432,6 +437,22 @@ pub const EMPHASIS: &[&str] = &[
     "THIS", "TO", "TOO", "TOTAL", "TRUE", "TWO", "UP", "VERY", "WAIT", "WANT", "WAS", "WE", "WELL", "WERE", "WHAT",
     "WHEN", "WHERE", "WHICH", "WHY", "WILL", "WIN", "WITH", "WORST", "WOULD", "WOW", "WRONG", "YES", "YET", "YOU",
     "YOUR",
+    // round 1: everyday 2-3 letter words set in caps for emphasis (a 2-3 letter caps
+    // token in mixed text is spelled unless it is here or PRONOUNCED). No acronym
+    // collisions (SAT, ACT, AP, ER, ETA, AD, MA, PR, HR, OR stay out or spelled).
+    "AGO", "AIR", "ASK", "BAN", "BED", "BOY", "BUS", "BUY", "CAR", "CUT", "DAD", "DAY", "DIE", "DOG", "EAT",
+    "END", "FAR", "FEW", "FIX", "FUN", "GAY", "GOD", "GUN", "GUY", "HAT", "HIM", "HIT", "HUG", "ITS", "JOB", "KID",
+    "LET", "LIE", "LOT", "LOW", "MAD", "MAN", "MAY", "MEN", "MOM", "NOR", "ODD", "OH", "OLD", "OUCH", "OWN",
+    "PAY", "PUT", "RAN", "RED", "RUN", "SAD", "SAW", "SAY", "SEE", "SET", "SEX", "SIT", "SON", "SUN", "TAX", "TEN",
+    "TOP", "TRY", "UGH", "USE", "WAR", "WAY", "WET", "WON", "YAY", "YEAH",
+];
+
+/// Acronyms whose lowercase is also a dictionary word (or that a dictionary has a
+/// word reading for): always spelled, in mixed text and in headlines, unless they
+/// are PRONOUNCED. Covers the dense-acronym misfires (ER, ERA, ETA, AD, MA, SAT,
+/// IRA) and 4-5 letter acronyms and tickers a dictionary would read as a word.
+pub const ACRONYM_WORDS: &[&str] = &[
+    "AD", "AP", "ER", "ERA", "ETA", "IRA", "MA", "SAT", "AARP", "AAPL", "ACLU", "DRAM", "OLED",
 ];
 
 /// Two-letter acronyms whose lowercase is a word (ra_text's KEEP_CAPS): spelled when

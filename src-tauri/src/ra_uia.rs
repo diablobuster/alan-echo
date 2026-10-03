@@ -3,6 +3,10 @@
 //! One worker thread ("ra-uia") owns every COM object; callers talk to it over
 //! channels with short timeouts, so a hung target app can never block the UI.
 //! Behaviour follows Spike A (spec section 5, rules 1-9). Never panics.
+//!
+//! The worker reads from one of three sources (phase 2 spec 3.2), chosen per pick:
+//! UIA (TextPattern), Adobe Acrobat's own DOM (`ra_acro`), or Windows OCR of the
+//! visible window (`ra_ocr`) for windows with no readable text.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -27,6 +31,9 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetClassNameW, GetWindowThreadProcessId, WindowFromPoint, GA_ROOT,
 };
+
+use crate::ra_acro::{self, AcroRead};
+use crate::ra_ocr::{self, OcrRead};
 
 /// A rectangle in physical screen pixels.
 #[derive(Clone, Debug, serde::Serialize, PartialEq)]
@@ -55,6 +62,8 @@ enum Req {
     More(Sender<Result<Vec<String>, String>>),
     Rects(Vec<usize>, Sender<Option<Vec<Rect>>>),
     Scroll(usize),
+    /// Is the current read an OCR read that reached the end of what is on screen?
+    AtEnd(Sender<bool>),
 }
 
 /// Handle to the UIA worker thread. Dropping it ends the worker.
@@ -94,6 +103,71 @@ const TEXT_CONTROL_TYPES: &[i32] = &[
 ];
 /// Document control type: the walk up from the clicked element stops here.
 const DOCUMENT_TYPE: i32 = 50030;
+
+/// App chrome: a point on (or just inside) one of these is for the app, so a UIA
+/// `NO_TEXT` there is final and OCR is not tried (a click on Notepad's menu bar must not
+/// read the menu). Content with no text (an image, a canvas pane) is OCR'd.
+const APP_CHROME_TYPES: &[i32] = &[
+    50000, // Button
+    50002, // CheckBox
+    50003, // ComboBox
+    50004, // Edit
+    50005, // Hyperlink
+    50009, // Menu
+    50010, // MenuBar
+    50011, // MenuItem
+    50012, // ProgressBar
+    50013, // RadioButton
+    50014, // ScrollBar
+    50015, // Slider
+    50016, // Spinner
+    50017, // StatusBar
+    50018, // Tab
+    50019, // TabItem
+    50021, // ToolBar
+    50022, // ToolTip
+    50023, // Tree
+    50024, // TreeItem
+    50027, // Thumb
+    50031, // SplitButton
+    50037, // TitleBar
+    50040, // AppBar
+];
+/// How far up from the point element the chrome check looks: chrome sits right at the
+/// point (Text in a MenuItem in a Menu), while an image's pane may live deep inside a
+/// Tab's page, which must not count.
+const CHROME_DEPTH: usize = 3;
+
+/// May OCR read at a point whose UIA lookup found no text? `chain` = control types of
+/// the element under the point and its nearest ancestors. Pure, so it is unit-tested.
+pub(crate) fn ocr_ok_on(chain: &[i32]) -> bool {
+    !chain.iter().any(|t| APP_CHROME_TYPES.contains(t))
+}
+
+/// A text source of the worker.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Src {
+    Uia,
+    Acro,
+    Ocr,
+}
+
+/// Which sources a pick tries. `first_err` = `None` before anything ran (the whole
+/// order), or the error of the first source (Acro on Acrobat, else UIA): the sources
+/// still worth trying after it. OCR follows only "nothing readable here" (UIA
+/// `NO_TEXT`; Acrobat: no words, or no DOM at all), never a timeout or a rejection
+/// (rules 2/3, a control click). Pure, so it is unit-tested.
+pub(crate) fn choose_source(is_acrobat: bool, first_err: Option<&str>) -> Vec<Src> {
+    match (is_acrobat, first_err) {
+        (true, None) => vec![Src::Acro, Src::Ocr],
+        (false, None) => vec![Src::Uia, Src::Ocr],
+        (true, Some(e)) if e == ra_acro::NO_TEXT_ACRO || e.starts_with(ra_acro::NO_DOM) => {
+            vec![Src::Ocr]
+        }
+        (false, Some(e)) if e == NO_TEXT => vec![Src::Ocr],
+        _ => Vec::new(),
+    }
+}
 
 /// Decide whether a plain click is on ordinary text. `chain` = control type ids of
 /// the element under the point, then its ancestors, up to and including the first
@@ -138,8 +212,9 @@ impl Uia {
     }
 
     /// Validate the click (rules 2/3) on whatever window is under the point and return
-    /// raw tokens from the clicked word forward (≤ 200). Token `i` ↔ source index `i`
-    /// for `rects`/`scroll_to`. A failed pick keeps the previous read.
+    /// raw tokens from the clicked word forward (≤ 200; ≤ 60 from Acrobat). Token `i` ↔
+    /// source index `i` for `rects`/`scroll_to`. The source (UIA, Acrobat, OCR) is chosen
+    /// per window (`choose_source`). A failed pick keeps the previous read.
     pub fn pick(&self, x: i32, y: i32) -> Result<Vec<String>, String> {
         let (t, r) = mpsc::channel();
         self.tx
@@ -193,6 +268,17 @@ impl Uia {
     /// accepted it). Requests sent after this one see the new read. Fire-and-forget.
     pub fn commit_click(&self, id: u64) {
         let _ = self.tx.send(Req::CommitClick(id));
+    }
+
+    /// True only when the current read is an OCR read and `more` already said "end":
+    /// it read everything that was on screen (not the end of the document). False on
+    /// no answer within 50 ms.
+    pub fn at_end_of_screen(&self) -> bool {
+        let (t, r) = mpsc::channel();
+        if self.tx.send(Req::AtEnd(t)).is_err() {
+            return false;
+        }
+        r.recv_timeout(Duration::from_millis(50)).unwrap_or(false)
     }
 }
 
@@ -253,15 +339,113 @@ struct Target {
     fallback: Option<(Vec<IUIAutomationElement>, std::time::Instant)>,
 }
 
-/// The current read: everything from the one TextPattern picked at click time (rule 7).
+/// A UIA read: everything from the one TextPattern picked at click time (rule 7).
 #[derive(Default)]
-struct Read {
+struct UiaRead {
     hwnd: isize,
     chromium: bool,
     /// Word range per source index.
     ranges: Vec<IUIAutomationTextRange>,
     /// Last word range handed out; `more` walks forward from here (rule 8).
     cursor: Option<IUIAutomationTextRange>,
+}
+
+/// The current read, from whichever source the pick chose. Moved as a whole (click
+/// staging, rollback of a failed pick).
+enum Read {
+    Uia(UiaRead),
+    Acro(AcroRead),
+    Ocr(OcrRead),
+}
+
+impl Default for Read {
+    fn default() -> Self {
+        Read::Uia(UiaRead::default())
+    }
+}
+
+/// Where a read's `more` was, so a batch the caller never got can be undone.
+enum Mark {
+    Uia(usize, Option<IUIAutomationTextRange>),
+    Acro(ra_acro::AcroMark),
+    Ocr(ra_ocr::OcrMark),
+}
+
+impl Read {
+    /// Top-level window being read.
+    fn hwnd(&self) -> isize {
+        match self {
+            Read::Uia(r) => r.hwnd,
+            Read::Acro(r) => r.hwnd(),
+            Read::Ocr(r) => r.hwnd(),
+        }
+    }
+
+    /// Next ≤ 400 tokens (same contract as `Uia::more`).
+    fn more(&mut self) -> Result<Vec<String>, String> {
+        match self {
+            Read::Uia(r) => read_forward(r, MORE_BATCH),
+            Read::Acro(r) => r.more(),
+            Read::Ocr(r) => r.more(),
+        }
+    }
+
+    fn mark(&self) -> Mark {
+        match self {
+            Read::Uia(r) => Mark::Uia(r.ranges.len(), r.cursor.clone()),
+            Read::Acro(r) => Mark::Acro(r.mark()),
+            Read::Ocr(r) => Mark::Ocr(r.mark()),
+        }
+    }
+
+    fn rollback(&mut self, m: Mark) {
+        match (self, m) {
+            (Read::Uia(r), Mark::Uia(len, cur)) => {
+                r.ranges.truncate(len);
+                r.cursor = cur;
+            }
+            (Read::Acro(r), Mark::Acro(m)) => r.rollback(m),
+            (Read::Ocr(r), Mark::Ocr(m)) => r.rollback(m),
+            _ => {} // a mark of another read: nothing of it to undo
+        }
+    }
+
+    /// Same contract as `Uia::rects`.
+    fn rects(&self, src: &[usize]) -> Option<Vec<Rect>> {
+        match self {
+            Read::Uia(r) => word_rects(r, src),
+            Read::Acro(r) => r.rects(src),
+            Read::Ocr(r) => r.rects(src),
+        }
+    }
+
+    fn scroll_to(&self, uia: &IUIAutomation, i: usize) {
+        match self {
+            Read::Uia(r) => {
+                if let Some(range) = r.ranges.get(i) {
+                    scroll(uia, r, range);
+                }
+            }
+            Read::Acro(r) => r.scroll_to(i),
+            Read::Ocr(r) => r.scroll_to(i),
+        }
+    }
+
+    /// An OCR read that already returned its last batch.
+    fn at_end_of_screen(&self) -> bool {
+        matches!(self, Read::Ocr(r) if r.at_end())
+    }
+}
+
+/// Answer a `More`: the next batch, rolled back when it failed or the caller is gone
+/// (it timed out), so source indices stay aligned with the tokens the caller has.
+fn serve_more(read: &mut Read, send: impl FnOnce(Result<Vec<String>, String>) -> bool) {
+    let m = read.mark();
+    let res = read.more();
+    let failed = res.is_err();
+    if !send(res) || failed {
+        read.rollback(m);
+    }
 }
 
 struct State {
@@ -272,6 +456,18 @@ struct State {
     /// A click lookup's read, waiting for the controller's `CommitClick`.
     staged: Option<(u64, Read)>,
     source: Arc<AtomicIsize>,
+    /// Pick-mode hover caches: the OCR of the hovered window, and the DOM root of the
+    /// hovered Acrobat page view. Dropped when a pick succeeds and when reading needs
+    /// the highlight (`Rects`); the OCR one also when the hover moves to another window.
+    ocr_hover: Option<OcrRead>,
+    acro_hover: Option<ra_acro::HoverView>,
+}
+
+impl State {
+    fn drop_hover_caches(&mut self) {
+        self.ocr_hover = None;
+        self.acro_hover = None;
+    }
 }
 
 fn worker(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
@@ -318,12 +514,14 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
         uia,
         own_pid: unsafe { GetCurrentProcessId() },
         target,
-        read: Read {
+        read: Read::Uia(UiaRead {
             hwnd,
             ..Default::default()
-        },
+        }),
         staged: None,
         source,
+        ocr_hover: None,
+        acro_hover: None,
     };
 
     let mut pending: VecDeque<Req> = VecDeque::new();
@@ -345,7 +543,7 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
                 if superseded(&pending, |r| matches!(r, Req::Hover(..))) {
                     continue;
                 }
-                let _ = t.send(word_at(&mut st, x, y).map(|(_, r)| r).unwrap_or_default());
+                let _ = t.send(hover(&mut st, x, y));
             }
             Req::Pick(x, y, t) => {
                 st.staged = None;
@@ -353,8 +551,9 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
             }
             Req::ClickPick(id, x, y, t) => {
                 // pick into st.read, then put the current read back: the new one is staged
+                let ok = click_on_text(&mut st, x, y);
                 let saved = std::mem::take(&mut st.read);
-                let res = click_on_text(&mut st, x, y).and_then(|()| pick(&mut st, x, y, false));
+                let res = ok.and_then(|()| pick(&mut st, x, y, false));
                 let found = std::mem::replace(&mut st.read, saved);
                 st.staged = None;
                 if res.is_ok() {
@@ -368,30 +567,23 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
             Req::CommitClick(id) => {
                 if let Some(r) = take_staged(&mut st.staged, id) {
                     st.read = r;
-                    st.source.store(st.read.hwnd, Ordering::Release);
+                    st.source.store(st.read.hwnd(), Ordering::Release);
                 }
             }
-            Req::More(t) => {
-                let (len, cur) = (st.read.ranges.len(), st.read.cursor.clone());
-                let res = read_forward(&mut st.read, MORE_BATCH);
-                let failed = res.is_err();
-                if t.send(res).is_err() || failed {
-                    st.read.ranges.truncate(len);
-                    st.read.cursor = cur;
-                }
-            }
+            Req::More(t) => serve_more(&mut st.read, |res| t.send(res).is_ok()),
             Req::Rects(src, t) => {
+                // reading (the highlight): pick mode's hover caches are not needed now
+                st.drop_hover_caches();
                 // Coalesce like hovers: only the newest request is answered.
                 if superseded(&pending, |r| matches!(r, Req::Rects(..))) {
                     let _ = t.send(None);
                     continue;
                 }
-                let _ = t.send(word_rects(&st.read, &src));
+                let _ = t.send(st.read.rects(&src));
             }
-            Req::Scroll(i) => {
-                if let Some(r) = st.read.ranges.get(i) {
-                    scroll(&st, r);
-                }
+            Req::Scroll(i) => st.read.scroll_to(&st.uia, i),
+            Req::AtEnd(t) => {
+                let _ = t.send(st.read.at_end_of_screen());
             }
         }
     }
@@ -406,31 +598,94 @@ fn pick_req(st: &mut State, x: i32, y: i32, t: Sender<Result<Vec<String>, String
     let failed = res.is_err();
     if t.send(res).is_err() || failed {
         st.read = saved;
+    } else {
+        st.drop_hover_caches(); // pick mode is over
     }
-    st.source.store(st.read.hwnd, Ordering::Release);
+    st.source.store(st.read.hwnd(), Ordering::Release);
 }
 
 /// Err(NOT_TEXT_CLICK) unless the element under the point (and every ancestor up to
 /// its Document) is plain text: a click on a link, button or field is for the app.
+/// Acrobat pages and the window being read by OCR have no control tree to ask: a
+/// click there is always a jump.
 fn click_on_text(st: &mut State, x: i32, y: i32) -> Result<(), String> {
+    let root = own_root(st, x, y)?;
+    if acrobat_at(x, y) || matches!(&st.read, Read::Ocr(r) if r.hwnd() == root) {
+        return Ok(());
+    }
     retarget(st, x, y)?;
+    if click_is_on_text(&control_chain(st, x, y, MAX_ANCESTORS, true)?) {
+        Ok(())
+    } else {
+        Err(NOT_TEXT_CLICK.into())
+    }
+}
+
+/// Control types of the element under the point and up to `depth - 1` ancestors
+/// (stopping after the first Document when `to_document`).
+fn control_chain(st: &State, x: i32, y: i32, depth: usize, to_document: bool) -> Result<Vec<i32>, String> {
     let el = unsafe { st.uia.ElementFromPoint(POINT { x, y }) }.map_err(|e| e.to_string())?;
     let walker = unsafe { st.uia.ControlViewWalker() }.map_err(|e| e.to_string())?;
     let mut chain = Vec::new();
     let mut cur = Some(el);
-    for _ in 0..MAX_ANCESTORS {
+    for _ in 0..depth {
         let Some(e) = cur else { break };
         let t = unsafe { e.CurrentControlType() }.map(|t| t.0).unwrap_or(0);
         chain.push(t);
-        if t == DOCUMENT_TYPE {
+        if to_document && t == DOCUMENT_TYPE {
             break;
         }
         cur = unsafe { walker.GetParentElement(&e) }.ok();
     }
-    if click_is_on_text(&chain) {
-        Ok(())
-    } else {
-        Err(NOT_TEXT_CLICK.into())
+    Ok(chain)
+}
+
+/// After a UIA `NO_TEXT`: is the point on content (OCR it) rather than app chrome?
+fn ocr_ok_at(st: &State, x: i32, y: i32) -> bool {
+    control_chain(st, x, y, CHROME_DEPTH, false).map_or(true, |c| ocr_ok_on(&c))
+}
+
+/// The window under the point is an Acrobat page view.
+fn acrobat_at(x: i32, y: i32) -> bool {
+    let w = unsafe { WindowFromPoint(POINT { x, y }) };
+    !w.is_invalid() && ra_acro::is_acrobat_view(w.0 as isize)
+}
+
+/// Top-level window under the point, unless it is one of ours or there is none.
+fn own_root(st: &State, x: i32, y: i32) -> Result<isize, String> {
+    let root = root_at(x, y).ok_or("no window under the point")?;
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
+    if pid == st.own_pid {
+        return Err("point is over our own window".into());
+    }
+    Ok(root.0 as isize)
+}
+
+/// Hover in pick mode, through the same source switch as `pick`. Always an answer:
+/// empty = no word box here (the overlay then clears any box from another window).
+fn hover(st: &mut State, x: i32, y: i32) -> Vec<Rect> {
+    let Ok(root) = own_root(st, x, y) else {
+        return Vec::new();
+    };
+    // the OCR cache belongs to one window
+    if st.ocr_hover.as_ref().is_some_and(|c| c.hwnd() != root) {
+        st.ocr_hover = None;
+    }
+    if acrobat_at(x, y) {
+        return match ra_acro::hover_cached(&mut st.acro_hover, x, y) {
+            ra_acro::Hover::Rects(v) => v,
+            ra_acro::Hover::NoAnswer => Vec::new(),
+            // Acrobat withholds its DOM: the page is still readable by OCR
+            ra_acro::Hover::NoDom => ra_ocr::hover_cached(&mut st.ocr_hover, root, x, y).unwrap_or_default(),
+        };
+    }
+    match word_at(st, x, y) {
+        Ok((_, r)) => r,
+        Err(e) if e == NO_TEXT && ocr_ok_at(st, x, y) => {
+            ra_ocr::hover_cached(&mut st.ocr_hover, root, x, y).unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
     }
 }
 
@@ -441,7 +696,7 @@ fn superseded(pending: &VecDeque<Req>, same_kind: impl Fn(&Req) -> bool) -> bool
 
 /// Rects of the words at source indices `src`; `None` if a range is unknown or UIA
 /// errors (so the caller never mistakes a failure for "off screen").
-fn word_rects(read: &Read, src: &[usize]) -> Option<Vec<Rect>> {
+fn word_rects(read: &UiaRead, src: &[usize]) -> Option<Vec<Rect>> {
     let mut out = Vec::new();
     for &i in src {
         out.extend(rects_of(read.ranges.get(i)?)?);
@@ -472,13 +727,7 @@ fn text_pattern_condition(uia: &IUIAutomation) -> windows::core::Result<IUIAutom
 /// Point the probe at the top-level window under (x, y). Rejects our own windows
 /// (overlay, panels) and empty desktop space. Re-targets when the window changed.
 fn retarget(st: &mut State, x: i32, y: i32) -> Result<(), String> {
-    let root = root_at(x, y).ok_or("no window under the point")?;
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
-    if pid == st.own_pid {
-        return Err("point is over our own window".into());
-    }
-    let h = root.0 as isize;
+    let h = own_root(st, x, y)?;
     if h != st.target.hwnd {
         st.target = make_target(&st.uia, h);
     }
@@ -627,8 +876,47 @@ fn word_at(st: &mut State, x: i32, y: i32) -> Result<(IUIAutomationTextRange, Ve
     Ok((r, rects))
 }
 
-/// Starts a new read in `st.read` (the caller saved and cleared the old one).
+/// Starts a new read in `st.read` (the caller saved and cleared the old one), from the
+/// source `choose_source` picks for the window under the point (spec 3.2).
 fn pick(st: &mut State, x: i32, y: i32, retry: bool) -> Result<Vec<String>, String> {
+    let root = own_root(st, x, y)?;
+    let acro = acrobat_at(x, y);
+    let t0 = std::time::Instant::now();
+    let mut err = String::new();
+    for (i, src) in choose_source(acro, None).into_iter().enumerate() {
+        if i > 0 {
+            // fall through only after "nothing readable" (not a timeout or a rejection),
+            // and not onto app chrome (menus, tabs, buttons) of a UIA window
+            if !choose_source(acro, Some(&err)).contains(&src) || (!acro && !ocr_ok_at(st, x, y)) {
+                return Err(err);
+            }
+            log::info!("read-aloud: {err}; trying {src:?}");
+        }
+        let res = match src {
+            Src::Uia => pick_uia(st, x, y, retry),
+            Src::Acro => AcroRead::pick(x, y).map(|(r, t)| (Read::Acro(r), t)),
+            Src::Ocr => OcrRead::pick(root, x, y).map(|(r, t)| (Read::Ocr(r), t)),
+        };
+        match res {
+            Ok((read, toks)) => {
+                log::info!(
+                    "read-aloud: pick from {src:?}: {} tokens in {} ms",
+                    toks.len(),
+                    t0.elapsed().as_millis()
+                );
+                st.read = read;
+                return Ok(toks);
+            }
+            Err(e) => err = e,
+        }
+    }
+    // only OCR (the last source) gets here: whatever it hit, nothing is readable here
+    log::info!("read-aloud: OCR: {err}");
+    Err(NO_TEXT.into())
+}
+
+/// The UIA source: the word under the point and up to 199 after it.
+fn pick_uia(st: &mut State, x: i32, y: i32, retry: bool) -> Result<(Read, Vec<String>), String> {
     // Rule 1: Chromium's first query can come back empty — retry once, but only for
     // "nothing there"; rule 2/3 rejections are final.
     let (r, _) = match word_at(st, x, y) {
@@ -643,7 +931,7 @@ fn pick(st: &mut State, x: i32, y: i32, retry: bool) -> Result<Vec<String>, Stri
     let first = unsafe { r.GetText(-1) }
         .map(|b| b.to_string())
         .unwrap_or_default();
-    st.read = Read {
+    let mut read = UiaRead {
         hwnd: st.target.hwnd,
         chromium: st.target.chromium,
         ranges: vec![r.clone()],
@@ -652,14 +940,14 @@ fn pick(st: &mut State, x: i32, y: i32, retry: bool) -> Result<Vec<String>, Stri
     let mut out = Vec::with_capacity(FIRST_BATCH);
     out.push(first);
     // a failed forward read keeps the clicked word; more() continues from the cursor
-    out.extend(read_forward(&mut st.read, FIRST_BATCH - 1).unwrap_or_default());
-    Ok(out)
+    out.extend(read_forward(&mut read, FIRST_BATCH - 1).unwrap_or_default());
+    Ok((Read::Uia(read), out))
 }
 
 /// Rule 8: walk forward word by word from the cursor; never re-query visible ranges.
 /// `Ok(empty)` only at the true end of the text. A UIA error before any token is read
 /// is `Err` (retryable); after some tokens it ends the batch early (`Ok(partial)`).
-fn read_forward(read: &mut Read, n: usize) -> Result<Vec<String>, String> {
+fn read_forward(read: &mut UiaRead, n: usize) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let Some(cur) = read.cursor.as_ref() else {
         return Err("no current read".into());
@@ -732,14 +1020,14 @@ unsafe fn read_f64_array(sa: *mut SAFEARRAY) -> Vec<f64> {
     nums
 }
 
-fn scroll(st: &State, r: &IUIAutomationTextRange) {
+fn scroll(uia: &IUIAutomation, read: &UiaRead, r: &IUIAutomationTextRange) {
     unsafe {
-        if st.read.chromium {
+        if read.chromium {
             // Rule 4: Chromium ignores word-range ScrollIntoView. Measured on Edge 2026-10-02:
             // the paragraph *range* ScrollIntoView was also a no-op, while ScrollItemPattern on
             // the word's enclosing element (the <p>) scrolled it into view. Use that first and
             // keep the paragraph range as the fallback.
-            if scroll_item(st, r) {
+            if scroll_item(uia, r) {
                 return;
             }
             if let Ok(p) = r.Clone() {
@@ -754,8 +1042,8 @@ fn scroll(st: &State, r: &IUIAutomationTextRange) {
 }
 
 /// ScrollItemPattern on the range's enclosing element or its nearest ancestor that has one.
-fn scroll_item(st: &State, r: &IUIAutomationTextRange) -> bool {
-    let Ok(walker) = (unsafe { st.uia.ControlViewWalker() }) else {
+fn scroll_item(uia: &IUIAutomation, r: &IUIAutomationTextRange) -> bool {
+    let Ok(walker) = (unsafe { uia.ControlViewWalker() }) else {
         return false;
     };
     let mut el = unsafe { r.GetEnclosingElement() }.ok();
@@ -870,8 +1158,99 @@ mod tests {
     #[test]
     fn rects_of_an_unknown_word_is_no_answer_not_off_screen() {
         let read = Read::default();
-        assert_eq!(word_rects(&read, &[0]), None);
-        assert_eq!(word_rects(&read, &[]), Some(vec![]));
+        assert!(matches!(read, Read::Uia(_)), "the default read is an empty UIA read");
+        assert_eq!(read.rects(&[0]), None);
+        assert_eq!(read.rects(&[]), Some(vec![]));
+        assert_eq!(read.hwnd(), 0);
+        assert!(!read.at_end_of_screen());
+    }
+
+    #[test]
+    fn acrobat_tries_its_dom_then_ocr() {
+        assert_eq!(choose_source(true, None), vec![Src::Acro, Src::Ocr]);
+    }
+
+    #[test]
+    fn other_windows_try_uia_then_ocr() {
+        assert_eq!(choose_source(false, None), vec![Src::Uia, Src::Ocr]);
+    }
+
+    #[test]
+    fn only_uia_no_text_falls_through_to_ocr() {
+        assert_eq!(choose_source(false, Some(NO_TEXT)), vec![Src::Ocr]);
+        for e in [
+            "text lookup timed out",
+            NOT_TEXT_CLICK,
+            "click is not on a word",
+            "browser UI, not page text",
+            "point is over our own window",
+        ] {
+            assert_eq!(choose_source(false, Some(e)), vec![], "{e}");
+        }
+    }
+
+    #[test]
+    fn acrobat_falls_through_to_ocr_only_without_a_dom_or_words() {
+        assert_eq!(choose_source(true, Some(ra_acro::NO_TEXT_ACRO)), vec![Src::Ocr]);
+        assert_eq!(
+            choose_source(true, Some("Acrobat DOM unavailable (QueryService)")),
+            vec![Src::Ocr],
+            "Acrobat withholds its DOM: OCR still reads the visible page"
+        );
+        assert_eq!(choose_source(true, Some(ra_acro::ACRO_TIMEOUT)), vec![], "a timeout is final");
+    }
+
+    #[test]
+    fn ocr_is_not_tried_on_app_chrome() {
+        // an image (Photos), a canvas pane, the desktop's icon list: content
+        assert!(ocr_ok_on(&[50006, 50033, 50032]));
+        assert!(ocr_ok_on(&[50025, 50033, 50032]));
+        assert!(ocr_ok_on(&[]), "UIA could not say: let OCR look");
+        // menus, tabs, toolbars, buttons, the title bar: the click is for the app
+        for ctl in [50011, 50010, 50019, 50018, 50021, 50000, 50037, 50014, 50004] {
+            assert!(!ocr_ok_on(&[ctl, 50033, 50032]), "{ctl} itself");
+            assert!(!ocr_ok_on(&[50020, ctl, 50032]), "inside {ctl}");
+        }
+    }
+
+    fn toks(v: &[&str]) -> Vec<String> {
+        v.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn an_ocr_read_delegates_and_reaches_the_end_of_the_screen() {
+        let mut read = Read::Ocr(ra_ocr::OcrRead::for_test(77, &["a", "b"]));
+        assert_eq!(read.hwnd(), 77);
+        assert!(!read.at_end_of_screen());
+        assert_eq!(read.more(), Ok(toks(&["a", "b"])));
+        assert!(!read.at_end_of_screen(), "a full batch is not the end");
+        assert_eq!(read.more(), Ok(vec![]));
+        assert!(read.at_end_of_screen(), "OCR read to the end of what is on screen");
+        // UIA reads never show the end-of-screen notice
+        assert!(!Read::default().at_end_of_screen());
+    }
+
+    /// `serve_more` with a caller that did (or did not) get the reply.
+    fn more_req(read: &mut Read, delivered: bool) -> Option<Result<Vec<String>, String>> {
+        let mut got = None;
+        serve_more(read, |r| {
+            if delivered {
+                got = Some(r);
+            }
+            delivered
+        });
+        got
+    }
+
+    #[test]
+    fn an_undelivered_batch_is_rolled_back() {
+        let mut read = Read::Ocr(ra_ocr::OcrRead::for_test(77, &["a", "b"]));
+        assert_eq!(more_req(&mut read, false), None, "reply undeliverable: rolled back");
+        assert_eq!(more_req(&mut read, true), Some(Ok(toks(&["a", "b"]))));
+        assert_eq!(more_req(&mut read, false), None);
+        assert!(!read.at_end_of_screen(), "an end nobody saw is undone");
+        assert_eq!(more_req(&mut read, true), Some(Ok(vec![])));
+        assert!(read.at_end_of_screen());
     }
 }
 

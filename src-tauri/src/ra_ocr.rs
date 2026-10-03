@@ -6,7 +6,6 @@
 //! released by a Drop guard on all paths, and the captured pixels are dropped right
 //! after OCR. No background work: staleness is checked only when asked, at most every
 //! 500 ms.
-#![allow(dead_code)] // wired into the UIA worker in Task 6
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -46,6 +45,12 @@ pub(crate) struct OcrWord {
     pub text: String,
     pub rect: Rect,
     pub line: usize,
+}
+
+/// `OcrRead::mark`.
+pub struct OcrMark {
+    next: usize,
+    at_end: bool,
 }
 
 /// A read over one OCR snapshot of a window. Source index `i` is word `start + i`.
@@ -118,9 +123,28 @@ impl OcrRead {
         self.hwnd
     }
 
-    /// True once `more` returned empty (Task 6 shows the end-of-screen toast).
+    /// True once `more` returned empty (the controller then says it read to the end
+    /// of what is on screen).
     pub fn at_end(&self) -> bool {
         self.at_end
+    }
+
+    /// Where `more` is; `rollback` returns there (a batch the caller never got).
+    pub fn mark(&self) -> OcrMark {
+        OcrMark { next: self.next, at_end: self.at_end }
+    }
+
+    pub fn rollback(&mut self, m: OcrMark) {
+        self.next = m.next;
+        self.at_end = m.at_end;
+    }
+
+    /// A read over ready-made tokens (no OCR), for unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(hwnd: isize, toks: &[&str]) -> OcrRead {
+        let mut r = OcrRead::failed(hwnd);
+        r.toks = toks.iter().map(|t| t.to_string()).collect();
+        r
     }
 
     fn take(&mut self, n: usize) -> Vec<String> {
@@ -933,6 +957,23 @@ mod tests {
         assert_eq!(strip_of(&edge, 0.0, 1920), (1888, 32), "clamped right");
         assert_eq!(strip_of(&words, 5000.0, 1920).0, 0, "clamped left");
         assert_eq!(strip_of(&[], 0.0, 10), (0, 10), "narrow region");
+    }
+
+    #[test]
+    fn a_rolled_back_batch_is_read_again_and_the_end_is_undone() {
+        let s = |v: &[&str]| v.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let mut rd = OcrRead::for_test(9, &["a", "b", "c"]);
+        let m = rd.mark();
+        assert_eq!(rd.more(), Ok(s(&["a", "b", "c"])));
+        rd.rollback(m);
+        assert_eq!(rd.more(), Ok(s(&["a", "b", "c"])), "the undelivered batch comes again");
+        let m = rd.mark();
+        assert_eq!(rd.more(), Ok(vec![]));
+        assert!(rd.at_end(), "an empty more() is the end of the screen");
+        rd.rollback(m);
+        assert!(!rd.at_end(), "an undelivered end is not the end");
+        assert_eq!(rd.more(), Ok(vec![]));
+        assert!(rd.at_end());
     }
 
     #[test]

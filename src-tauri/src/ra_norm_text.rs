@@ -1870,7 +1870,7 @@ mod tests {
 
     #[test]
     fn roman_one_after_a_name_at_a_clause_end() {
-        assert_eq!(render("was the Apple I, designed by"), "was the Apple one, designed by");
+        assert_eq!(render("was the Apple I, built by"), "was the Apple one, built by");
         assert_eq!(render("King Henry I. Then"), "King Henry the first. Then");
         // the pronoun stays
         assert_eq!(render("said John I think"), "said John I think");

@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn hard_cut_does_not_split_a_number_from_its_unit() {
         // no clause end; the hard cut at 12 would fall between "450" and "GeV"
-        let w = words("a b c d e f g h i j k 450 GeV before they are at last injected into it");
+        let w = words("a b c d e f g h i j k 450 GeV before the beam moves on to the next ring");
         let c = chunk(&w, 12, 50);
         // the cut moves back to the nearest gap with no number on either side
         assert_eq!(c[0], 0..10);
@@ -635,12 +635,12 @@ mod tests {
     #[test]
     fn hard_cut_prefers_the_gap_before_a_joining_word() {
         // no clause end within 12: cut before "as" / "in" / "with", not mid-phrase
-        let w = words("The current official names and logos have removed those references as most full-featured cables can be used.");
+        let w = words("Newer brand labels and logos have dropped those old mentions as most modern cables work fine.");
         assert_eq!(chunk(&w, 12, 50)[0], 0..10);
-        let w = words("Pairing mechanisms changed significantly with the introduction of Secure Simple Pairing in Bluetooth v2.1 today.");
+        let w = words("Device linking got easier once makers added a simpler setup step in Bluetooth v2.1 today.");
         assert_eq!(chunk(&w, 12, 50)[0], 0..11);
         // ... but never next to a number ("iPhone 6 | and")
-        let w = words("Some users experienced bending issues from normal use with the iPhone 6 and 6 Plus, particularly.");
+        let w = words("Several owners reported phones bending slightly over months with the iPhone 6 and 6 Plus, mostly.");
         assert_eq!(chunk(&w, 12, 50)[0], 0..8);
     }
 

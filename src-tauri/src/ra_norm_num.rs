@@ -1698,22 +1698,22 @@ mod tests {
     #[test]
     fn year_after_a_name_or_a_determiner_beats_other_digits() {
         // a year right after a month and day, and a product year after a name
-        let s = "On September 4, 2012, Microsoft released Windows Server 2012.";
+        let s = "On September 4, 2012, the team shipped Windows Server 2012.";
         assert_eq!(at(s, 3).1, "twenty twelve,");
-        assert_eq!(at(s, 8).1, "twenty twelve.");
+        assert_eq!(at(s, 9).1, "twenty twelve.");
         // a determiner before a year-shaped number, other digits in the sentence
-        assert_eq!(at("rising 11 places above its 2012 ranking", 5).1, "twenty twelve");
+        assert_eq!(at("climbing 11 spots past its 2012 position", 5).1, "twenty twelve");
         assert_eq!(at("She finished 1st out of 22 runners in the 2026 race.", 9).1, "twenty twenty six");
-        assert_eq!(at("overturn the 2020 United States election, 4 counts", 2).1, "twenty twenty");
+        assert_eq!(at("challenge the 2020 national vote, 4 charges", 2).1, "twenty twenty");
         // "of" and "since about"
-        assert_eq!(at("By the end of 1946 the IMF had grown to 39 members.", 4).1, "nineteen forty six");
+        assert_eq!(at("By the close of 1946 the club had signed up 39 members.", 4).1, "nineteen forty six");
         assert_eq!(at("(since about 2019) has found 3 things", 2).1, "twenty nineteen)");
         // quantities stay quantities
         assert_eq!(at("the 1500 workers and 3 more", 1).1, "one thousand five hundred");
         assert_eq!(at("one of 1950 residents and 3 more", 2).1, "one thousand nine hundred fifty");
         assert_eq!(at("Room 1204, Floor 12", 1).1, "one thousand two hundred four,");
         assert_eq!(at("Dial 1200 then 3 more.", 1).1, "one thousand two hundred");
-        assert_eq!(at("Six of them are national, 1261 are public, and 53 are private.", 5).1, "one thousand two hundred sixty one");
+        assert_eq!(at("Four of these are federal, 1261 are local, and 53 are private.", 5).1, "one thousand two hundred sixty one");
     }
 
     #[test]

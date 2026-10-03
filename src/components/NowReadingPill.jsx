@@ -8,6 +8,7 @@ const Icon = {
   fwd: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m5 4 10 8-10 8V4z"/><path d="M19 5v14"/></svg>,
   pause: <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>,
   play: <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>,
+  locate: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>,
   x: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>,
 }
 
@@ -65,6 +66,8 @@ export default function NowReadingPill() {
   }
 
   const paused = st.state === 'paused'
+  // follow is off after the user scrolled the page by hand: offer the way back
+  const lost = st.follow === false
   return (
     <div className="ra-pill">
       <div className="ra-row">
@@ -82,10 +85,17 @@ export default function NowReadingPill() {
         </div>
         <button className="ra-btn stop" aria-label="Stop reading" onClick={() => invoke('ra_stop')}>{Icon.x}</button>
       </div>
-      <div className="ra-sentence">
-        {sent.words.map((w, i) => (
-          <span key={i} className={i === sent.current ? `cur${mono ? ' mono' : ''}` : i < sent.current ? 'done' : ''}>{w}{' '}</span>
-        ))}
+      <div className="ra-sentrow">
+        <div className="ra-sentence">
+          {sent.words.map((w, i) => (
+            <span key={i} className={i === sent.current ? `cur${mono ? ' mono' : ''}` : i < sent.current ? 'done' : ''}>{w}{' '}</span>
+          ))}
+        </div>
+        {lost && (
+          <button className="ra-goto" aria-label="Go to the word being read and follow it again" onClick={() => invoke('ra_go_to_word')}>
+            {Icon.locate}<span>Go to word</span>
+          </button>
+        )}
       </div>
       <div className="ra-progress"><div style={{ width: `${Math.round(sent.progress * 100)}%` }} /></div>
     </div>

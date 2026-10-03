@@ -47,6 +47,8 @@ pub fn contains(rects: &[Rect], x: f64, y: f64) -> bool {
 enum Req {
     Hover(i32, i32, Sender<Vec<Rect>>),
     Pick(i32, i32, Sender<Result<Vec<String>, String>>),
+    /// A plain click while reading: `Pick`, but only on ordinary text, and no retry.
+    ClickPick(i32, i32, Sender<Result<Vec<String>, String>>),
     More(Sender<Result<Vec<String>, String>>),
     Rects(Vec<usize>, Sender<Option<Vec<Rect>>>),
     Scroll(usize),
@@ -67,6 +69,39 @@ const MORE_BATCH: usize = 400;
 const MAX_ANCESTORS: usize = 30;
 /// Error text for "nothing with a TextPattern here" — the only pick error that is retried.
 pub const NO_TEXT: &str = "no TextPattern under the point";
+/// Error text for a plain click on a link, button, field, etc. (not a jump).
+pub const NOT_TEXT_CLICK: &str = "click is on a control, not text";
+
+/// Control types a plain click may land on (or sit inside) and still be a jump. Any
+/// other type on the way from the clicked element up to its Document (a link, button,
+/// edit field, check box, menu, tab, scroll bar, ...) means the click is for the app.
+const TEXT_CONTROL_TYPES: &[i32] = &[
+    50020, // Text
+    50030, // Document
+    50026, // Group (paragraphs, sections)
+    50025, // Custom
+    50033, // Pane
+    50008, // List
+    50007, // ListItem (a bullet point)
+    50036, // Table
+    50028, // DataGrid
+    50029, // DataItem (table cell)
+    50034, // Header (table header)
+    50035, // HeaderItem
+];
+/// Document control type: the walk up from the clicked element stops here.
+const DOCUMENT_TYPE: i32 = 50030;
+
+/// Decide whether a plain click is on ordinary text. `chain` = control type ids of
+/// the element under the point, then its ancestors, up to and including the first
+/// Document (or as far as was walked). Pure, so it is unit-tested.
+pub fn click_is_on_text(chain: &[i32]) -> bool {
+    if chain.is_empty() {
+        return false;
+    }
+    let upto = chain.iter().position(|&t| t == DOCUMENT_TYPE).map_or(chain.len(), |i| i + 1);
+    chain[..upto].iter().all(|t| TEXT_CONTROL_TYPES.contains(t))
+}
 
 impl Uia {
     /// Spawn the worker and start warming the UIA connection to `hwnd` (the foreground
@@ -107,6 +142,20 @@ impl Uia {
         self.tx
             .send(Req::Pick(x, y, t))
             .map_err(|_| "text reader is not running".to_string())?;
+        Self::wait_pick(r)
+    }
+
+    /// Like `pick`, for a plain (not swallowed) click while reading: rejected with
+    /// `NOT_TEXT_CLICK` when it is on a link, button, field, menu, etc.; no retry.
+    pub fn click_pick(&self, x: i32, y: i32) -> Result<Vec<String>, String> {
+        let (t, r) = mpsc::channel();
+        self.tx
+            .send(Req::ClickPick(x, y, t))
+            .map_err(|_| "text reader is not running".to_string())?;
+        Self::wait_pick(r)
+    }
+
+    fn wait_pick(r: Receiver<Result<Vec<String>, String>>) -> Result<Vec<String>, String> {
         match r.recv_timeout(Duration::from_secs(5)) {
             Ok(res) => res,
             Err(mpsc::RecvTimeoutError::Timeout) => Err("text lookup timed out".into()),
@@ -265,17 +314,8 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
                 }
                 let _ = t.send(word_at(&mut st, x, y).map(|(_, r)| r).unwrap_or_default());
             }
-            // If the caller already timed out (reply undeliverable), roll the read back so
-            // source indices stay aligned with the tokens the caller actually has.
-            Req::Pick(x, y, t) => {
-                let saved = std::mem::take(&mut st.read);
-                let res = pick(&mut st, x, y);
-                let failed = res.is_err();
-                if t.send(res).is_err() || failed {
-                    st.read = saved; // a rejected/lost pick keeps the old read
-                }
-                st.source.store(st.read.hwnd, Ordering::Release);
-            }
+            Req::Pick(x, y, t) => pick_req(&mut st, x, y, t, false),
+            Req::ClickPick(x, y, t) => pick_req(&mut st, x, y, t, true),
             Req::More(t) => {
                 let (len, cur) = (st.read.ranges.len(), st.read.cursor.clone());
                 let res = read_forward(&mut st.read, MORE_BATCH);
@@ -299,6 +339,47 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
                 }
             }
         }
+    }
+}
+
+/// Run a pick (a plain click when `click`). If the caller already timed out (reply
+/// undeliverable), roll the read back so source indices stay aligned with the tokens
+/// the caller actually has; a rejected pick keeps the old read too.
+fn pick_req(st: &mut State, x: i32, y: i32, t: Sender<Result<Vec<String>, String>>, click: bool) {
+    let saved = std::mem::take(&mut st.read);
+    let res = if click {
+        click_on_text(st, x, y).and_then(|()| pick(st, x, y, false))
+    } else {
+        pick(st, x, y, true)
+    };
+    let failed = res.is_err();
+    if t.send(res).is_err() || failed {
+        st.read = saved;
+    }
+    st.source.store(st.read.hwnd, Ordering::Release);
+}
+
+/// Err(NOT_TEXT_CLICK) unless the element under the point (and every ancestor up to
+/// its Document) is plain text: a click on a link, button or field is for the app.
+fn click_on_text(st: &mut State, x: i32, y: i32) -> Result<(), String> {
+    retarget(st, x, y)?;
+    let el = unsafe { st.uia.ElementFromPoint(POINT { x, y }) }.map_err(|e| e.to_string())?;
+    let walker = unsafe { st.uia.ControlViewWalker() }.map_err(|e| e.to_string())?;
+    let mut chain = Vec::new();
+    let mut cur = Some(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(e) = cur else { break };
+        let t = unsafe { e.CurrentControlType() }.map(|t| t.0).unwrap_or(0);
+        chain.push(t);
+        if t == DOCUMENT_TYPE {
+            break;
+        }
+        cur = unsafe { walker.GetParentElement(&e) }.ok();
+    }
+    if click_is_on_text(&chain) {
+        Ok(())
+    } else {
+        Err(NOT_TEXT_CLICK.into())
     }
 }
 
@@ -496,12 +577,12 @@ fn word_at(st: &mut State, x: i32, y: i32) -> Result<(IUIAutomationTextRange, Ve
 }
 
 /// Starts a new read in `st.read` (the caller saved and cleared the old one).
-fn pick(st: &mut State, x: i32, y: i32) -> Result<Vec<String>, String> {
+fn pick(st: &mut State, x: i32, y: i32, retry: bool) -> Result<Vec<String>, String> {
     // Rule 1: Chromium's first query can come back empty — retry once, but only for
     // "nothing there"; rule 2/3 rejections are final.
     let (r, _) = match word_at(st, x, y) {
         Ok(v) => v,
-        Err(e) if e == NO_TEXT => {
+        Err(e) if e == NO_TEXT && retry => {
             std::thread::sleep(Duration::from_millis(150));
             word_at(st, x, y)?
         }
@@ -680,6 +761,47 @@ mod tests {
         assert!(!superseded(&q, |r| matches!(r, Req::Rects(..))));
         let q: VecDeque<Req> = [Req::Rects(vec![0], t)].into_iter().collect();
         assert!(superseded(&q, |r| matches!(r, Req::Rects(..))));
+    }
+
+    #[test]
+    fn plain_text_clicks_are_jumps() {
+        // Text in a paragraph group in the page document
+        assert!(click_is_on_text(&[50020, 50026, 50030]));
+        // a bullet point, a table cell
+        assert!(click_is_on_text(&[50020, 50007, 50008, 50030]));
+        assert!(click_is_on_text(&[50020, 50029, 50036, 50030]));
+        // only the part up to the first Document counts (browser frame above it)
+        assert!(click_is_on_text(&[50020, 50030, 50033, 50032]));
+    }
+
+    #[test]
+    fn clicks_on_controls_are_not_jumps() {
+        for ctl in [
+            50005, // Hyperlink
+            50000, // Button
+            50004, // Edit
+            50002, // CheckBox
+            50013, // RadioButton
+            50003, // ComboBox
+            50011, // MenuItem
+            50009, // Menu
+            50019, // TabItem
+            50014, // ScrollBar
+            50027, // Thumb
+            50015, // Slider
+            50031, // SplitButton
+            50006, // Image
+        ] {
+            assert!(!click_is_on_text(&[ctl, 50026, 50030]), "{ctl} itself");
+            // link text: a Text element inside a Hyperlink
+            assert!(!click_is_on_text(&[50020, ctl, 50030]), "text inside {ctl}");
+        }
+    }
+
+    #[test]
+    fn nothing_under_the_point_is_not_a_jump() {
+        assert!(!click_is_on_text(&[]));
+        assert!(!click_is_on_text(&[0]), "unknown control type");
     }
 
     #[test]

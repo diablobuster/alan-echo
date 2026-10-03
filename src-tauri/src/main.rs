@@ -219,6 +219,13 @@ fn ra_set_speed(state: State<Arc<AppState>>, speed: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// The pill's "Go to word": scroll the spoken word into view and turn follow back on.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn ra_go_to_word(state: State<Arc<AppState>>) {
+    state.read_aloud.post(read_aloud::Msg::GoToWord);
+}
+
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn ra_stop(state: State<Arc<AppState>>) {
@@ -1532,6 +1539,8 @@ fn main() {
             ra_skip,
             #[cfg(target_os = "windows")]
             ra_set_speed,
+            #[cfg(target_os = "windows")]
+            ra_go_to_word,
             #[cfg(target_os = "windows")]
             ra_stop,
             #[cfg(target_os = "windows")]

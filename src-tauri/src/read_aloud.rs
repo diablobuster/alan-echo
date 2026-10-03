@@ -13,7 +13,7 @@
 //! worker, hook and player all live only for a session.
 
 use crate::{
-    ra_hook::PickHook,
+    ra_hook::{self, MouseEv, PickHook, WatchHook},
     ra_player::Player,
     ra_text::{self, Word},
     ra_tts::{self, ChunkAudio, Device, Engine},
@@ -50,6 +50,8 @@ pub enum Ev {
     Hotkey,
     Click,
     ClickRejected,
+    /// A plain click on text in the source window while reading (no pick mode).
+    Jump,
     FirstAudio,
     Esc,
     PlayPause,
@@ -95,11 +97,92 @@ pub fn step(p: &Phase, ev: Ev) -> (Phase, Vec<Act>) {
             Resume::Reading => (Reading, vec![ExitPick, ShowReading]),
             Resume::Paused => (Paused, vec![ExitPick, ShowPaused]),
         },
+        (Reading | Paused | Warming, Ev::Jump) => (Warming, vec![BumpGen, StartRead, ShowWarming]),
         (Warming, Ev::FirstAudio) => (Reading, vec![ShowReading]),
         (Reading, Ev::PlayPause) => (Paused, vec![ShowPaused]),
         (Paused, Ev::PlayPause) => (Reading, vec![ShowReading]),
         (Reading | Paused | Warming, Ev::End) => (Idle, vec![Teardown]),
         _ => (*p, vec![]),
+    }
+}
+
+// ── Follow mode ──────────────────────────────────────────────────────
+//
+// Follow ON (the default for every read): Echo scrolls the source so the spoken word
+// stays in view. The user scrolling the source by hand turns it OFF (reading goes on,
+// the highlight still shows when the word is visible, Echo never scrolls); the pill's
+// "Go to word" button or any jump turns it back ON.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FollowEv {
+    /// Mouse wheel (vertical or horizontal); `over_source` = over the source window.
+    Wheel { over_source: bool },
+    /// A left press in the source ended as a drag (not a click) while a scroll to an
+    /// off-screen word was being held back for it: the user moved the page.
+    DragEnd { scroll_was_deferred: bool },
+    /// The spoken word moved inside the source window while the user was using the
+    /// mouse there (scroll bar drag / click, selection autoscroll): see `user_scrolled`.
+    ShiftSeen,
+    /// The pill's "Go to word" button.
+    GoToWord,
+    /// A new pick or jump (hotkey + click, or a plain click on text).
+    Jump,
+}
+
+pub fn follow_next(on: bool, ev: FollowEv) -> bool {
+    match ev {
+        FollowEv::Wheel { over_source } => on && !over_source,
+        FollowEv::DragEnd { scroll_was_deferred } => on && !scroll_was_deferred,
+        FollowEv::ShiftSeen => false,
+        FollowEv::GoToWord | FollowEv::Jump => true,
+    }
+}
+
+/// What to do when the spoken word has no rects (it is off screen).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrollPlan {
+    /// Scroll it into view now.
+    Scroll,
+    /// The user is holding the mouse down in the source: wait until they let go.
+    Defer,
+    /// Leave the page alone.
+    Leave,
+}
+
+/// `fresh` = the word just became current, or a scroll for it was deferred. A word is
+/// scrolled to once (never re-tried every tick, which would fight the user).
+pub fn scroll_plan(follow: bool, fresh: bool, pressing: bool) -> ScrollPlan {
+    match (follow, fresh, pressing) {
+        (false, ..) | (_, false, _) => ScrollPlan::Leave,
+        (true, true, true) => ScrollPlan::Defer,
+        (true, true, false) => ScrollPlan::Scroll,
+    }
+}
+
+/// Where the spoken word was last seen: its first rect's top-left relative to the
+/// source window (`None` = off screen), and the source window's size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anchor {
+    pub word: usize,
+    pub pos: Option<(f64, f64)>,
+    pub win_size: (i32, i32),
+}
+
+/// Movement (px) of the same word inside the window that counts as a scroll.
+const SHIFT_PX: f64 = 3.0;
+
+/// The page was scrolled by the user: the same word moved inside the (same-sized)
+/// source window, or left the screen, while the user was pressing / had just pressed
+/// the mouse in it, and not right after a scroll of our own.
+pub fn user_scrolled(prev: Option<Anchor>, now: Anchor, input_recent: bool, own_scroll_recent: bool) -> bool {
+    let Some(prev) = prev else { return false };
+    if prev.word != now.word || prev.win_size != now.win_size || !input_recent || own_scroll_recent {
+        return false;
+    }
+    match (prev.pos, now.pos) {
+        (Some(a), Some(b)) => (a.0 - b.0).abs() >= SHIFT_PX || (a.1 - b.1).abs() >= SHIFT_PX,
+        (Some(_), None) => true, // scrolled off screen
+        _ => false,
     }
 }
 
@@ -445,6 +528,10 @@ pub enum Msg {
     More(u64, Result<Vec<String>, String>),
     /// Escape could not be registered; `hotkey_ok` = Ctrl+Shift+E can still cancel.
     EscFailed { hotkey_ok: bool },
+    /// From the observe-only watch hook (alive only while a read session is active).
+    Mouse(MouseEv),
+    /// The pill's "Go to word" button: scroll the spoken word into view, follow ON.
+    GoToWord,
 }
 
 const HOTKEY: &str = "CmdOrCtrl+Shift+E";
@@ -455,6 +542,14 @@ const HOVER_MIN_MS: u64 = 33;
 /// Word rects are re-read this often even when the word did not change (the page may
 /// have scrolled; rects are never cached).
 const RECTS_REFRESH: Duration = Duration::from_millis(250);
+/// ... and this often while the user holds the mouse down in the source window.
+const RECTS_REFRESH_BUSY: Duration = Duration::from_millis(100);
+/// After a left press in the source ends, a word shift within this long is the user's.
+const INPUT_GRACE: Duration = Duration::from_millis(700);
+/// After our own scroll, a word shift within this long is ours, not the user's.
+const OWN_SCROLL_GRACE: Duration = Duration::from_millis(800);
+/// Click-vs-drag slop in logical px (scaled by the monitor's DPI).
+const CLICK_SLOP: f64 = 6.0;
 /// The pill re-sends its state this often while reading (an event emitted before the
 /// pill's page finished loading is lost).
 const STATE_RESEND: Duration = Duration::from_millis(1000);
@@ -609,7 +704,7 @@ struct Mon {
 
 mod win {
     use super::Mon;
-    use windows::Win32::Foundation::{HWND, POINT};
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         MONITOR_DEFAULTTONULL,
@@ -618,7 +713,7 @@ mod win {
         GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetAncestor, GetCursorPos, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint,
+        GetAncestor, GetCursorPos, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WindowFromPoint,
         GA_ROOT,
     };
 
@@ -662,6 +757,34 @@ mod win {
 
     pub fn point_on_screen(x: i32, y: i32) -> bool {
         !unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL) }.is_invalid()
+    }
+
+    /// Top-level window under the point (0 = none).
+    pub fn root_at(x: i32, y: i32) -> isize {
+        let w = unsafe { WindowFromPoint(POINT { x, y }) };
+        if w.is_invalid() {
+            return 0;
+        }
+        let root = unsafe { GetAncestor(w, GA_ROOT) };
+        if root.is_invalid() {
+            w.0 as isize
+        } else {
+            root.0 as isize
+        }
+    }
+
+    /// (left, top, width, height) of a window in physical px.
+    pub fn window_rect(h: isize) -> Option<(i32, i32, i32, i32)> {
+        if h == 0 {
+            return None;
+        }
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(hwnd(h), &mut r) }.ok()?;
+        Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+    }
+
+    pub fn double_click_ms() -> u32 {
+        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }
     }
 
     pub fn cursor() -> Option<(i32, i32)> {
@@ -764,6 +887,22 @@ struct Controller {
     source_gone: bool,
     /// Re-read the word rects on the next tick (after a resume).
     rects_due: bool,
+    /// Observe-only mouse hook, alive only while a read session is active.
+    watch: Option<WatchHook>,
+    /// Follow mode: auto-scroll to the spoken word (see `follow_next`).
+    follow: bool,
+    /// A left press that went down in the source window: (x, y, hook time).
+    press: Option<(i32, i32, u32)>,
+    /// When the last such press ended.
+    press_ended: Option<Instant>,
+    /// Up of the last click in the source (double-click detection).
+    last_click: Option<(i32, i32, u32)>,
+    /// When Echo last scrolled the source.
+    own_scroll_at: Option<Instant>,
+    /// Where the spoken word was last seen (user-scroll detection).
+    anchor: Option<Anchor>,
+    /// An off-screen word's scroll is held back until the user lets go of the mouse.
+    scroll_deferred: bool,
 }
 
 impl Controller {
@@ -810,6 +949,14 @@ impl Controller {
             synth_fails: 0,
             source_gone: false,
             rects_due: false,
+            watch: None,
+            follow: true,
+            press: None,
+            press_ended: None,
+            last_click: None,
+            own_scroll_at: None,
+            anchor: None,
+            scroll_deferred: false,
         }
     }
 
@@ -937,6 +1084,8 @@ impl Controller {
                     self.feed(Ev::Stop);
                 }
             }
+            Msg::Mouse(ev) => self.on_mouse(ev),
+            Msg::GoToWord => self.go_to_word(),
             Msg::Chunk(g, idx, r) => self.on_chunk(g, idx, r),
             Msg::More(id, r) => self.on_more(id, r),
             Msg::EscFailed { hotkey_ok } => {
@@ -1155,6 +1304,11 @@ impl Controller {
         self.s.start(words, raw_len, false);
         self.cur_word = None;
         self.last_word = None;
+        self.follow = follow_next(self.follow, FollowEv::Jump);
+        self.anchor = None;
+        self.scroll_deferred = false;
+        self.press = None;
+        self.ensure_watch();
         self.ensure_pill();
         self.pump();
     }
@@ -1317,7 +1471,8 @@ impl Controller {
 
     fn update_word_rects(&mut self, changed: bool) {
         let due = std::mem::take(&mut self.rects_due);
-        if !changed && !due && !self.rects_retry && self.rects_at.elapsed() < RECTS_REFRESH {
+        let every = if self.press.is_some() { RECTS_REFRESH_BUSY } else { RECTS_REFRESH };
+        if !changed && !due && !self.rects_retry && self.rects_at.elapsed() < every {
             return;
         }
         self.rects_at = Instant::now();
@@ -1326,7 +1481,8 @@ impl Controller {
         if self.source_gone {
             return;
         }
-        let Some(src) = self.cur_word.and_then(|w| self.s.words.get(w)).map(|w| w.src.clone()) else { return };
+        let Some(wi) = self.cur_word else { return };
+        let Some(src) = self.s.words.get(wi).map(|w| w.src.clone()) else { return };
         let Some(u) = &self.uia else { return };
         let source = u.source_hwnd();
         if self.style == "off" || !win::window_shown(source) {
@@ -1334,18 +1490,40 @@ impl Controller {
         }
         // None = UIA timed out / errored: keep what is drawn, never scroll on it
         let Some(rects) = u.rects(src.clone()) else { return };
+        if let Some((wx, wy, ww, wh)) = win::window_rect(source) {
+            let now = Anchor {
+                word: wi,
+                pos: rects.first().map(|r| (r.x - wx as f64, r.y - wy as f64)),
+                win_size: (ww, wh),
+            };
+            if self.follow && user_scrolled(self.anchor, now, self.input_recent(), self.own_scroll_recent()) {
+                log::info!("read-aloud: the user scrolled the source; follow off");
+                self.set_follow(follow_next(self.follow, FollowEv::ShiftSeen));
+            }
+            self.anchor = Some(now);
+        }
         if rects.is_empty() {
-            if changed {
-                // off screen: scroll it into view, look again next tick
-                if let Some(&first) = src.first() {
-                    u.scroll_to(first);
+            // off screen: scroll it into view (follow on), look again next tick
+            match scroll_plan(self.follow, changed || self.scroll_deferred, self.press.is_some()) {
+                ScrollPlan::Scroll => {
+                    self.scroll_deferred = false;
+                    if let (Some(&first), Some(u)) = (src.first(), &self.uia) {
+                        u.scroll_to(first);
+                        self.own_scroll_at = Some(Instant::now());
+                    }
+                    self.rects_retry = true;
                 }
-                self.rects_retry = true;
-            } else if retrying {
-                log::debug!("read-aloud: word still has no rects after scrolling");
+                ScrollPlan::Defer => self.scroll_deferred = true,
+                ScrollPlan::Leave => {
+                    self.scroll_deferred = false;
+                    if retrying {
+                        log::debug!("read-aloud: word still has no rects after scrolling");
+                    }
+                }
             }
             return self.emit_word(Vec::new());
         }
+        self.scroll_deferred = false;
         let (cx, cy) = ((rects[0].x + rects[0].w / 2.0) as i32, (rects[0].y + rects[0].h / 2.0) as i32);
         // hidden behind another window (or off every monitor): no box
         if !win::word_visible(source, cx, cy) {
@@ -1358,6 +1536,136 @@ impl Controller {
         }
         let css = self.to_css(&rects);
         self.emit_word(css);
+    }
+
+    // ── follow mode + click-to-jump (watch hook) ──
+
+    /// A read is under way (the watch hook's events count; in pick mode they do not).
+    fn in_read(&self) -> bool {
+        matches!(self.phase, Phase::Reading | Phase::Paused | Phase::Warming)
+    }
+
+    fn source(&self) -> isize {
+        self.uia.as_ref().map_or(self.source_hwnd, |u| u.source_hwnd())
+    }
+
+    /// The user is pressing, or just pressed, the mouse in the source window.
+    fn input_recent(&self) -> bool {
+        self.press.is_some() || self.press_ended.is_some_and(|t| t.elapsed() < INPUT_GRACE)
+    }
+
+    fn own_scroll_recent(&self) -> bool {
+        self.own_scroll_at.is_some_and(|t| t.elapsed() < OWN_SCROLL_GRACE)
+    }
+
+    fn set_follow(&mut self, on: bool) {
+        if on == self.follow {
+            return;
+        }
+        self.follow = on;
+        if on {
+            self.anchor = None;
+            self.scroll_deferred = false;
+        }
+        self.emit_state();
+    }
+
+    /// Start the observe-only mouse hook for this read (once per session).
+    fn ensure_watch(&mut self) {
+        if self.watch.is_some() {
+            return;
+        }
+        let tx = self.tx.clone();
+        let hook = WatchHook::install(move |ev| {
+            let _ = tx.send(Msg::Mouse(ev));
+        });
+        if hook.is_active() {
+            self.watch = Some(hook);
+        } else {
+            // reading still works; only click-to-jump and scroll detection are lost
+            log::warn!("read-aloud: watch hook not installed; click-to-jump is off");
+        }
+    }
+
+    fn on_mouse(&mut self, ev: MouseEv) {
+        if !self.in_read() {
+            self.press = None; // pick mode (or idle): the pick hook handles clicks
+            return;
+        }
+        match ev {
+            MouseEv::Wheel { x, y } => {
+                let over_source = self.follow && win::root_at(x, y) == self.source();
+                let on = follow_next(self.follow, FollowEv::Wheel { over_source });
+                if on != self.follow {
+                    log::info!("read-aloud: wheel over the source; follow off");
+                    self.set_follow(on);
+                }
+            }
+            MouseEv::Down { x, y, t } => {
+                let src = self.source();
+                self.press = (src != 0 && win::root_at(x, y) == src).then_some((x, y, t));
+            }
+            MouseEv::Up { x, y, t } => {
+                let Some(down) = self.press.take() else { return };
+                self.press_ended = Some(Instant::now());
+                let scale = win::monitor_of_point(down.0, down.1).map_or(1.0, |m| m.scale);
+                let slop = (CLICK_SLOP * scale).round() as i32;
+                if !ra_hook::is_click(down, (x, y, t), slop) {
+                    let on = follow_next(self.follow, FollowEv::DragEnd { scroll_was_deferred: self.scroll_deferred });
+                    if on != self.follow {
+                        log::info!("read-aloud: a drag in the source moved the page; follow off");
+                        self.set_follow(on);
+                    }
+                    return;
+                }
+                let double = ra_hook::is_double_click(self.last_click, down, win::double_click_ms(), slop);
+                self.last_click = Some((x, y, t));
+                if !double {
+                    self.click_jump(down.0, down.1);
+                }
+            }
+        }
+    }
+
+    /// A plain click in the source while reading: jump there if it is on ordinary text
+    /// (links, buttons, fields etc. are left to the app). The click itself was not
+    /// swallowed. Anything else is silently ignored (the read goes on).
+    fn click_jump(&mut self, x: i32, y: i32) {
+        let Some(u) = &self.uia else { return };
+        match u.click_pick(x, y) {
+            Ok(raw) => {
+                let words = ra_text::normalize(&raw);
+                if words.is_empty() {
+                    return;
+                }
+                log::info!("read-aloud: click-to-jump");
+                self.picked = Some((words, raw.len()));
+                self.feed(Ev::Jump);
+            }
+            Err(e) => log::debug!("read-aloud: click is not a jump: {e}"),
+        }
+    }
+
+    /// The pill's "Go to word": follow ON, and scroll the spoken word into view if it
+    /// is off screen.
+    fn go_to_word(&mut self) {
+        if !self.in_read() {
+            return;
+        }
+        self.set_follow(follow_next(self.follow, FollowEv::GoToWord));
+        let wi = self.cur_word.or_else(|| {
+            let c = self.s.current_chunk(None);
+            self.s.chunks.get(c).map(|r| r.start)
+        });
+        let Some(first) = wi.and_then(|w| self.s.words.get(w)).and_then(|w| w.src.first().copied()) else { return };
+        let Some(u) = &self.uia else { return };
+        let on_screen = u.rects(vec![first]).is_some_and(|r| !r.is_empty());
+        if !on_screen {
+            u.scroll_to(first);
+            self.own_scroll_at = Some(Instant::now());
+            self.rects_retry = true;
+        }
+        self.rects_due = true;
     }
 
     /// Word highlight rects, only when they changed.
@@ -1448,6 +1756,14 @@ impl Controller {
 
     fn teardown(&mut self) {
         self.hook = None;
+        self.watch = None;
+        self.follow = true;
+        self.press = None;
+        self.press_ended = None;
+        self.last_click = None;
+        self.own_scroll_at = None;
+        self.anchor = None;
+        self.scroll_deferred = false;
         self.pick_deadline = None;
         self.more_retry_at = None;
         self.hook_to_drop = None;
@@ -1634,7 +1950,13 @@ impl Controller {
         });
         self.emit_pill(
             "ra-state",
-            serde_json::json!({ "state": self.shown, "speed": self.speed, "device": device, "message": self.message }),
+            serde_json::json!({
+                "state": self.shown,
+                "speed": self.speed,
+                "device": device,
+                "message": self.message,
+                "follow": self.follow,
+            }),
         );
     }
 
@@ -1790,6 +2112,86 @@ mod tests {
         assert_eq!(a, vec![Act::ExitPick, Act::ShowReading]);
         let (_, a) = step(&FRESH, Ev::Esc);
         assert_eq!(a, vec![Act::ExitPick, Act::Teardown]);
+    }
+
+    #[test]
+    fn plain_click_jump_restarts_from_any_read_phase() {
+        for from in [Reading, Paused, Warming] {
+            let (p, a) = step(&from, Ev::Jump);
+            assert_eq!(p, Warming, "{from:?}");
+            assert_eq!(a, vec![Act::BumpGen, Act::StartRead, Act::ShowWarming], "no pick mode to exit");
+        }
+        // not a read (idle) or in pick mode (the pick hook owns clicks): ignored
+        for from in [Idle, FRESH, JUMP_R, JUMP_P, JUMP_W] {
+            assert_eq!(step(&from, Ev::Jump), (from, vec![]));
+        }
+    }
+
+    #[test]
+    fn hand_scrolling_turns_follow_off() {
+        assert!(!follow_next(true, FollowEv::Wheel { over_source: true }));
+        assert!(!follow_next(true, FollowEv::ShiftSeen));
+        assert!(!follow_next(true, FollowEv::DragEnd { scroll_was_deferred: true }));
+    }
+
+    #[test]
+    fn other_input_leaves_follow_alone() {
+        for on in [true, false] {
+            assert_eq!(follow_next(on, FollowEv::Wheel { over_source: false }), on, "wheel over another app");
+            assert_eq!(follow_next(on, FollowEv::DragEnd { scroll_was_deferred: false }), on, "a drag that held nothing back");
+        }
+    }
+
+    #[test]
+    fn go_to_word_and_any_jump_turn_follow_back_on() {
+        for on in [true, false] {
+            assert!(follow_next(on, FollowEv::GoToWord));
+            assert!(follow_next(on, FollowEv::Jump));
+        }
+    }
+
+    #[test]
+    fn off_screen_word_is_scrolled_only_when_following() {
+        assert_eq!(scroll_plan(true, true, false), ScrollPlan::Scroll);
+        assert_eq!(scroll_plan(false, true, false), ScrollPlan::Leave, "follow off: never scroll");
+        assert_eq!(scroll_plan(false, true, true), ScrollPlan::Leave);
+    }
+
+    #[test]
+    fn scroll_waits_while_the_user_holds_the_mouse() {
+        assert_eq!(scroll_plan(true, true, true), ScrollPlan::Defer);
+    }
+
+    #[test]
+    fn same_word_is_never_rescrolled_every_tick() {
+        // the old snap-back: a word that stays off screen is not scrolled again
+        assert_eq!(scroll_plan(true, false, false), ScrollPlan::Leave);
+        assert_eq!(scroll_plan(true, false, true), ScrollPlan::Leave);
+    }
+
+    fn at(word: usize, pos: Option<(f64, f64)>) -> Anchor {
+        Anchor { word, pos, win_size: (1200, 900) }
+    }
+
+    #[test]
+    fn word_moving_under_the_users_mouse_is_a_scroll() {
+        let prev = Some(at(5, Some((100.0, 400.0))));
+        assert!(user_scrolled(prev, at(5, Some((100.0, 250.0))), true, false), "scroll bar dragged");
+        assert!(user_scrolled(prev, at(5, None), true, false), "scrolled off screen");
+        assert!(user_scrolled(prev, at(5, Some((40.0, 400.0))), true, false), "horizontal");
+    }
+
+    #[test]
+    fn word_moves_that_are_not_the_users_scroll() {
+        let prev = Some(at(5, Some((100.0, 400.0))));
+        assert!(!user_scrolled(prev, at(5, Some((100.0, 250.0))), false, false), "no mouse input in the source");
+        assert!(!user_scrolled(prev, at(5, Some((100.0, 250.0))), true, true), "our own scroll");
+        assert!(!user_scrolled(prev, at(6, Some((100.0, 250.0))), true, false), "a different word");
+        assert!(!user_scrolled(prev, at(5, Some((101.0, 401.5))), true, false), "jitter");
+        let resized = Anchor { win_size: (1000, 900), ..at(5, Some((100.0, 250.0))) };
+        assert!(!user_scrolled(prev, resized, true, false), "window resized (reflow)");
+        assert!(!user_scrolled(None, at(5, Some((100.0, 250.0))), true, false), "nothing seen before");
+        assert!(!user_scrolled(Some(at(5, None)), at(5, Some((1.0, 1.0))), true, false), "scrolled back into view");
     }
 
     #[test]

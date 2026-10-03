@@ -560,23 +560,33 @@ fn window_rect(h: HWND) -> Rect {
     }
 }
 
-/// The window under the point (or an ancestor) is an Acrobat view (`AVL_AVView`) and
-/// its process image is `Acrobat.exe` or `AcroRd32.exe`.
-pub fn is_acrobat_view(hwnd: isize) -> bool {
+/// A window chain (the window under the point, then its ancestors: class, text) is
+/// inside an Acrobat page view: an `AVL_AVView` whose text is `AVPageView`. Acrobat
+/// uses `AVL_AVView` for scroll bars, toolbars, thumbnails and side panes too; those
+/// are ordinary windows (UIA, the app-chrome gate, click checks). Pure, so it is
+/// unit-tested.
+pub(crate) fn is_page_chain(chain: &[(&str, &str)]) -> bool {
+    chain.iter().any(|&(class, text)| class == VIEW_CLASS && text == PAGE_VIEW_TEXT)
+}
+
+/// The window under the point (or an ancestor) is an Acrobat page view and its
+/// process image is `Acrobat.exe` or `AcroRd32.exe`.
+pub fn is_acrobat_page(hwnd: isize) -> bool {
     let start = HWND(hwnd as *mut _);
+    let mut chain: Vec<(String, String)> = Vec::new();
     let mut h = start;
-    let mut view = false;
     for _ in 0..64 {
         if h.is_invalid() {
             break;
         }
-        if class_of(h) == VIEW_CLASS {
-            view = true;
-            break;
-        }
+        let class = class_of(h);
+        // only a view's text matters (and is worth the call)
+        let text = if class == VIEW_CLASS { text_of(h) } else { String::new() };
+        chain.push((class, text));
         h = unsafe { GetAncestor(h, GA_PARENT) };
     }
-    view && process_image(pid_of(start)).is_some_and(|p| is_acrobat_image(&p))
+    let chain: Vec<(&str, &str)> = chain.iter().map(|(c, t)| (c.as_str(), t.as_str())).collect();
+    is_page_chain(&chain) && process_image(pid_of(start)).is_some_and(|p| is_acrobat_image(&p))
 }
 
 /// All Acrobat page views under the frame: (hwnd, visible, screen rect).
@@ -1083,6 +1093,22 @@ mod tests {
     }
 
     #[test]
+    fn only_a_page_view_chain_is_an_acrobat_page() {
+        const FRAME: (&str, &str) = ("AcrobatSDIWindow", "doc.pdf - Adobe Acrobat");
+        // the page itself, and a child window inside it
+        assert!(is_page_chain(&[("AVL_AVView", "AVPageView"), ("AVL_AVView", "AVSplitterView"), FRAME]));
+        assert!(is_page_chain(&[("AVL_AVPageChild", ""), ("AVL_AVView", "AVPageView"), FRAME]));
+        // other AVL_AVView panes: scroll bars, toolbars, thumbnails, side panes
+        for pane in ["AVScrollView", "AVToolBarView", "AVThumbnailView", "AVSplitterView", "AVTabView", ""] {
+            assert!(!is_page_chain(&[("AVL_AVView", pane), ("AVL_AVView", "AVDocView"), FRAME]), "{pane}");
+        }
+        assert!(!is_page_chain(&[("ScrollBar", ""), ("AVL_AVView", "AVScrollView"), FRAME]));
+        // a window titled like a page view but of another class
+        assert!(!is_page_chain(&[("Static", "AVPageView"), FRAME]));
+        assert!(!is_page_chain(&[]));
+    }
+
+    #[test]
     fn acrobat_images_are_recognised() {
         assert!(is_acrobat_image(r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe"));
         assert!(is_acrobat_image(r"C:\Program Files (x86)\Adobe\Reader\AcroRd32.exe"));
@@ -1346,7 +1372,7 @@ mod live {
         println!("document ready after {} ms", t0.elapsed().as_millis());
         let (cx, cy) = center(&wr);
         println!("target word {word:?} at {wr:?}");
-        assert!(is_acrobat_view(pv), "is_acrobat_view(page view)");
+        assert!(is_acrobat_page(pv), "is_acrobat_page(page view)");
 
         // Acrobat ignores HWND_TOPMOST, so a foreground window of the user's (never
         // touched) may cover it. Uncovered: the full point-based path. Covered: the
@@ -1412,7 +1438,7 @@ mod live {
             AcroRead::pick_in(frame, pv, cx, cy)
         } else {
             let under = unsafe { WindowFromPoint(POINT { x: cx, y: cy }) };
-            assert!(is_acrobat_view(under.0 as isize), "is_acrobat_view(point)");
+            assert!(is_acrobat_page(under.0 as isize), "is_acrobat_page(point)");
             AcroRead::pick(cx, cy)
         };
         let (mut rd, toks) = picked.expect("pick");

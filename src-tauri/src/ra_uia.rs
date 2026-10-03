@@ -648,7 +648,7 @@ fn ocr_ok_at(st: &State, x: i32, y: i32) -> bool {
 /// The window under the point is an Acrobat page view.
 fn acrobat_at(x: i32, y: i32) -> bool {
     let w = unsafe { WindowFromPoint(POINT { x, y }) };
-    !w.is_invalid() && ra_acro::is_acrobat_view(w.0 as isize)
+    !w.is_invalid() && ra_acro::is_acrobat_page(w.0 as isize)
 }
 
 /// Top-level window under the point, unless it is one of ours or there is none.

@@ -23,6 +23,11 @@ html.ra-window, html.ra-window body, html.ra-window #root { background: transpar
 .ra-speed button { width: 44px; height: 44px; border: none; background: transparent; color: #a6a6ab; cursor: pointer; font-size: 16px; }
 .ra-speed button:hover { color: #fff; }
 .ra-speed span { min-width: 46px; text-align: center; }
+.ra-sentrow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ra-sentrow .ra-sentence { flex: 1; min-width: 0; }
+.ra-goto { flex: none; display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid #fff; border-radius: 14px; background: transparent; color: #fff; font: 12px var(--font-sans); cursor: pointer; white-space: nowrap; }
+.ra-goto:hover { background: #fff; color: #000; }
+.ra-goto:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .ra-sentence { font: 15px/1.45 var(--font-display), Georgia, serif; color: #a6a6ab; padding: 0 6px 0 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ra-sentence .done { color: #e4e4e6; }
 .ra-sentence .cur { color: #fff; background: rgba(200,151,63,0.42); border-radius: 3px; box-shadow: 0 0 0 2px rgba(200,151,63,0.42); }

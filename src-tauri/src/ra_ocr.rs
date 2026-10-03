@@ -70,6 +70,8 @@ pub struct OcrRead {
     made: Instant,
     /// Last staleness answer and when it was computed.
     memo: Cell<Option<(Instant, bool)>>,
+    /// Hover cache only: re-OCRs of this window in a row with no use in between.
+    rebuilds: u32,
 }
 
 impl OcrRead {
@@ -226,6 +228,7 @@ impl OcrRead {
             strip,
             made: Instant::now(),
             memo: Cell::new(None),
+            rebuilds: 0,
         })
     }
 
@@ -301,19 +304,31 @@ pub(crate) fn span_of(words: &[OcrWord], reg_y: f64, reg_h: u32) -> (u32, u32) {
 pub(crate) enum HoverPlan {
     /// The cached OCR is current: look the point up in it.
     Use,
-    /// Stale, but re-OCR'd less than 500 ms ago: no box for now.
+    /// Stale, but re-OCR'd too recently (`rebuild_wait`): no box for now.
     NoBox,
     /// Another window, no cache, or stale and old enough: OCR again.
     Rebuild,
 }
 
+/// Longest wait between re-OCRs of a window that keeps changing.
+const REBUILD_MAX: Duration = Duration::from_secs(4);
+
+/// How long a stale hover cache waits before it is OCR'd again, after `rebuilds`
+/// re-OCRs in a row that went stale before the hover ever used them (video, an
+/// animation): 0.5 s, then 1, 2, 4 s. A window that changed once (a scroll) is
+/// re-OCR'd after 0.5 s as before.
+pub(crate) fn rebuild_wait(rebuilds: u32) -> Duration {
+    STALE_EVERY.saturating_mul(1u32 << rebuilds.min(3)).min(REBUILD_MAX)
+}
+
 /// Hover's cache decision. `stale` is only asked when the cache is for this window.
-pub(crate) fn hover_plan(same_window: bool, stale: impl FnOnce() -> bool, age: Duration) -> HoverPlan {
+/// `rebuilds`: the cache's re-OCRs in a row (see `rebuild_wait`).
+pub(crate) fn hover_plan(same_window: bool, stale: impl FnOnce() -> bool, age: Duration, rebuilds: u32) -> HoverPlan {
     if !same_window {
         HoverPlan::Rebuild
     } else if !stale() {
         HoverPlan::Use
-    } else if age < STALE_EVERY {
+    } else if age < rebuild_wait(rebuilds) {
         HoverPlan::NoBox
     } else {
         HoverPlan::Rebuild
@@ -335,31 +350,42 @@ impl OcrRead {
             strip: (0, 0, 0, 0),
             made: Instant::now(),
             memo: Cell::new(None),
+            rebuilds: 0,
         }
     }
 }
 
 /// Hover in pick mode: the box of the OCR word under the point. OCRs once per window;
-/// a stale cache is re-OCR'd at most every 500 ms (until then: no box). A failed OCR
-/// is cached too (as an empty read: `None` now, then no box until it is retried).
+/// a stale cache is re-OCR'd after 500 ms, backing off up to 4 s while the window keeps
+/// changing (`rebuild_wait`; until then: no box). A failed OCR is cached too (as an
+/// empty read: `None` now, then no box until it is retried).
 pub fn hover_cached(cache: &mut Option<OcrRead>, hwnd: isize, x: i32, y: i32) -> Option<Vec<Rect>> {
     let plan = match cache.as_ref() {
-        Some(c) => hover_plan(c.hwnd == hwnd, || c.stale(), c.made.elapsed()),
+        Some(c) => hover_plan(c.hwnd == hwnd, || c.stale(), c.made.elapsed(), c.rebuilds),
         None => HoverPlan::Rebuild,
     };
     match plan {
         HoverPlan::NoBox => return Some(Vec::new()),
-        HoverPlan::Use => {}
+        HoverPlan::Use => {
+            if let Some(c) = cache.as_mut() {
+                c.rebuilds = 0; // seen current: the next change re-OCRs quickly again
+            }
+        }
         HoverPlan::Rebuild => {
+            let rebuilds = cache.as_ref().filter(|c| c.hwnd == hwnd).map_or(0, |c| c.rebuilds.saturating_add(1));
             *cache = None;
-            *cache = Some(match OcrRead::build(hwnd) {
+            let mut r = match OcrRead::build(hwnd) {
                 Ok(r) => r,
                 Err(e) => {
                     log::info!("read-aloud: OCR hover: {e}");
-                    *cache = Some(OcrRead::failed(hwnd));
+                    let mut f = OcrRead::failed(hwnd);
+                    f.rebuilds = rebuilds;
+                    *cache = Some(f);
                     return None;
                 }
-            });
+            };
+            r.rebuilds = rebuilds;
+            *cache = Some(r);
         }
     }
     let c = cache.as_ref()?;
@@ -953,10 +979,27 @@ mod tests {
     fn hover_plan_decisions() {
         let young = Duration::from_millis(100);
         let old = Duration::from_millis(600);
-        assert_eq!(hover_plan(false, || panic!("not asked"), young), HoverPlan::Rebuild);
-        assert_eq!(hover_plan(true, || false, old), HoverPlan::Use);
-        assert_eq!(hover_plan(true, || true, young), HoverPlan::NoBox);
-        assert_eq!(hover_plan(true, || true, old), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(false, || panic!("not asked"), young, 0), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(true, || false, old, 0), HoverPlan::Use);
+        assert_eq!(hover_plan(true, || true, young, 0), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, old, 0), HoverPlan::Rebuild);
+    }
+
+    #[test]
+    fn a_window_that_keeps_changing_is_reocrd_less_and_less_often() {
+        let ms = Duration::from_millis;
+        assert_eq!(rebuild_wait(0), ms(500), "a one-off change (scroll): 0.5 s as before");
+        assert_eq!(rebuild_wait(1), ms(1000));
+        assert_eq!(rebuild_wait(2), ms(2000));
+        assert_eq!(rebuild_wait(3), ms(4000));
+        assert_eq!(rebuild_wait(u32::MAX), ms(4000), "capped");
+        assert_eq!(hover_plan(true, || true, ms(600), 1), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, ms(1100), 1), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(true, || true, ms(3900), 9), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, ms(4100), 9), HoverPlan::Rebuild);
+        // another window or a current cache: no waiting at all
+        assert_eq!(hover_plan(false, || true, ms(0), 9), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(true, || false, ms(0), 9), HoverPlan::Use);
     }
 
     #[test]
@@ -964,8 +1007,8 @@ mod tests {
         // a failed OCR is kept (hover returns early without re-OCR) until 500 ms pass
         let f = OcrRead::failed(12345);
         assert!(f.words.is_empty() && f.toks.is_empty());
-        assert_eq!(hover_plan(f.hwnd == 12345, || true, f.made.elapsed()), HoverPlan::NoBox);
-        assert_eq!(hover_plan(true, || true, Duration::from_millis(501)), HoverPlan::Rebuild);
+        assert_eq!(hover_plan(f.hwnd == 12345, || true, f.made.elapsed(), f.rebuilds), HoverPlan::NoBox);
+        assert_eq!(hover_plan(true, || true, Duration::from_millis(501), 0), HoverPlan::Rebuild);
     }
 
     #[test]
@@ -1456,6 +1499,10 @@ mod tests {
 
         // a window that changes every 100 ms (video, animation): hover every 33 ms
         let (h, win) = open_bench_window(100);
+        // control: the same 6 s with no hovering (the window's own painting, in this process)
+        let (t0, c0) = (Instant::now(), process_cpu());
+        std::thread::sleep(Duration::from_secs(6));
+        let base = ms(process_cpu() - c0) / ms(t0.elapsed());
         let mut cache: Option<OcrRead> = None;
         let (t0, c0) = (Instant::now(), process_cpu());
         let (mut rebuilds, mut last_made, mut boxes, mut calls) = (0, None, 0, Vec::new());
@@ -1476,9 +1523,10 @@ mod tests {
         close_live(h, win);
         println!("  changing window, hover call {}; frames painted {}", pct(&calls), BENCH_FRAME.load(std::sync::atomic::Ordering::Relaxed));
         println!(
-            "  changing window, 6 s of hover: {rebuilds} OCR builds, {boxes} hovers with a box, CPU {cpu:.0} ms = {:.2} cores ({:.1}% of the machine)",
+            "  changing window, 6 s of hover: {rebuilds} OCR builds, {boxes} hovers with a box, CPU {cpu:.0} ms = {:.2} cores; minus the window's own painting ({base:.3} cores): {:.3} cores ({:.2}% of the machine)",
             cpu / wall,
-            cpu / wall * 100.0 / cores() as f64
+            cpu / wall - base,
+            (cpu / wall - base) * 100.0 / cores() as f64
         );
     }
 }

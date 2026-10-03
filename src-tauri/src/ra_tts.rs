@@ -8,17 +8,18 @@
 //! the engine falls back to CPU by itself.
 use crate::{
     ra_g2pen::G2pEn,
-    ra_model,
+    ra_homograph, ra_model,
     ra_names::{Lts, NameFallback, Names},
-    ra_text,
+    ra_norm, ra_text,
     ra_timing::{self, WordTime},
     ra_wsola,
 };
-use misaki_rs::{Language, Lexicon, G2P};
+use misaki_rs::{Language, Lexicon, MToken, G2P};
 use ort::{ep, session::Session, value::Tensor};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -560,25 +561,10 @@ impl Engine {
     fn synth_inner(l: &mut Loaded, words: &[&str], rate: f32, map_joined: bool) -> Result<ChunkAudio, String> {
         let device = l.device;
         let rate = effective_rate(rate);
-        let empty = || ChunkAudio { pcm: Vec::new(), words: Vec::new(), device, covered: words.len() };
-        let fed = g2p_words(&l.g2p, &l.names, words);
-        // align against the words as misaki tokenizes them (hand-list overrides stripped)
-        let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
-        let plain: Vec<&str> = plain.iter().map(|w| w.as_ref()).collect();
-        let fed: Vec<&str> = fed.iter().map(|w| w.as_ref()).collect();
-        let text = fed.join(" ");
-        if text.trim().is_empty() {
-            return Ok(empty());
-        }
-        let (_, tokens) = l.g2p.g2p(&text).map_err(|e| format!("g2p: {e:?}"))?;
-        let toks: Vec<(&str, Option<&str>, bool)> =
-            tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
-        let tok_text: Vec<&str> = toks.iter().map(|t| t.0).collect();
-        // `plain` keeps the word count and order of `words`, so indices line up
-        let owner = ra_timing::align(&plain, &tok_text);
-        let ph = token_phonemes(&toks, &owner);
-        let (ids, spans, covered) = build_ids_with(&ph, &l.vocab, words.len(), map_joined);
-        let covered = covered.min(words.len());
+        let empty = || empty_audio(device, words.len());
+        let p = prepare_chunk(&l.g2p, &l.names, words)?;
+        let (ids, spans, covered) = build_ids_with(&p.ph, &l.vocab, words.len(), map_joined);
+        let covered = cover_spans(covered, &p.inner).min(words.len());
         if ids.is_empty() {
             return Ok(empty());
         }
@@ -611,15 +597,7 @@ impl Engine {
         if dur.len() != n_in {
             return Err(format!("model output: {} durations for {} ids", dur.len(), n_in));
         }
-        // one span per word: merge consecutive token spans of the same word, drop unowned
-        let mut merged: Vec<(usize, usize, usize)> = Vec::new();
-        for sp in spans.into_iter().filter(|sp| sp.0 != NO_WORD) {
-            match merged.last_mut() {
-                Some(m) if m.0 == sp.0 => m.2 = sp.2,
-                _ => merged.push(sp),
-            }
-        }
-        let words_t = ra_timing::word_times(&dur, &merged, wav.len(), OFFSET_MS, rate);
+        let words_t = chunk_word_times(&dur, spans, wav.len(), rate, covered);
         let pcm = ra_wsola::stretch(&wav, rate, ra_timing::SR);
         Ok(ChunkAudio { pcm, words: words_t, device, covered })
     }
@@ -636,7 +614,150 @@ fn build_g2p() -> (G2P, Arc<Names>) {
     (g2p, names)
 }
 
+/// No audio for a chunk (nothing speakable, e.g. only emoji): every word still gets
+/// one zero-length timing entry, so the highlight passes over it.
+fn empty_audio(device: Device, n_words: usize) -> ChunkAudio {
+    let words = (0..n_words).map(|word| WordTime { word, start: 0, end: 0 }).collect();
+    ChunkAudio { pcm: Vec::new(), words, device, covered: n_words }
+}
+
+/// One chunk through G2P, as the model is fed it.
+struct Prepared {
+    /// `g2p_words` output, one entry per word ("" for a word inside a span).
+    #[cfg_attr(not(test), allow(dead_code))] // read by the glitch hunt
+    fed: Vec<String>,
+    /// misaki's tokens (homographs applied) and the word each belongs to.
+    #[cfg_attr(not(test), allow(dead_code))] // read by the glitch hunt
+    tokens: Vec<MToken>,
+    #[cfg_attr(not(test), allow(dead_code))] // read by the glitch hunt
+    owner: Vec<Option<usize>>,
+    /// (word or NO_WORD, phonemes, followed-by-whitespace) per model token.
+    ph: Vec<(usize, String, bool)>,
+    /// The words inside multi-word spans (`$5 billion` -> the "billion" index). They
+    /// have no audio: their span is said on its first word.
+    inner: Vec<Range<usize>>,
+    /// Every applied span: (start, end, spoken text).
+    #[cfg_attr(not(test), allow(dead_code))] // read by the glitch hunt
+    spoken: Vec<(usize, usize, String)>,
+}
+
+/// Runs a chunk through the pre-pass, misaki, alignment and the homograph table.
+/// `synth_inner` and the glitch hunt both use it, so the hunt measures what is spoken.
+fn prepare_chunk(g: &G2P, names: &Names, words: &[&str]) -> Result<Prepared, String> {
+    let fed = g2p_chunk(g, names, words, 0);
+    // align against the words as misaki tokenizes them (overrides stripped)
+    let plain: Vec<Cow<str>> = fed.words.iter().map(|w| plain_word(w)).collect();
+    let plain: Vec<&str> = plain.iter().map(|w| w.as_ref()).collect();
+    let text = fed.words.iter().map(|w| w.as_ref()).collect::<Vec<&str>>().join(" ");
+    let mut tokens = if text.trim().is_empty() {
+        Vec::new()
+    } else {
+        run_g2p(g, &text)?
+    };
+    let tok_text: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+    // `plain` keeps the word count and order of `words`, so indices line up
+    let owner = ra_timing::align(&plain, &tok_text);
+    // a span or hand-list override already says the word: no homograph swap there
+    let overridden: Vec<bool> =
+        owner.iter().map(|o| o.and_then(|w| fed.words.get(w)).is_some_and(|f| f.contains("](/"))).collect();
+    apply_homographs(&mut tokens, &overridden);
+    let toks: Vec<(&str, Option<&str>, bool)> =
+        tokens.iter().map(|t| (t.text.as_str(), t.phonemes.as_deref(), !t.whitespace.is_empty())).collect();
+    let ph = token_phonemes(&toks, &owner);
+    drop(toks);
+    Ok(Prepared { fed: fed.words.into_iter().map(Cow::into_owned).collect(), tokens, owner, ph, inner: fed.inner, spoken: fed.spoken })
+}
+
+fn run_g2p(g: &G2P, text: &str) -> Result<Vec<MToken>, String> {
+    g.g2p(text).map(|(_, t)| t).map_err(|e| format!("g2p: {e:?}"))
+}
+
+/// Homographs (spec §2): after misaki has tagged the chunk, a table word gets the
+/// reading its tag and one word of context on each side pick (`I have read it`).
+/// Tokens marked in `skip` (their word is an override) keep their phonemes.
+fn apply_homographs(toks: &mut [MToken], skip: &[bool]) {
+    for i in 0..toks.len() {
+        if skip.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let pick = {
+            let Some(t) = toks.get(i) else { break };
+            // table words are 3-8 ASCII letters: skip everything else without allocating
+            if !(3..=8).contains(&t.text.len()) || !t.text.bytes().all(|b| b.is_ascii_alphabetic()) {
+                continue;
+            }
+            let prev = i.checked_sub(1).and_then(|j| toks.get(j)).map(|p| p.text.as_str());
+            let next = toks.get(i + 1).map(|n| n.text.as_str());
+            ra_homograph::reading(&t.text.to_ascii_lowercase(), &t.tag, prev, next)
+        };
+        if let (Some(r), Some(t)) = (pick, toks.get_mut(i)) {
+            t.phonemes = Some(r.to_string());
+        }
+    }
+}
+
+/// `covered` (leading words fully synthesized) never stops inside a span: the
+/// span's first word speaks all of it, so its inner words are covered with it.
+fn cover_spans(covered: usize, inner: &[Range<usize>]) -> usize {
+    inner.iter().fold(covered, |c, r| if c >= r.start && c < r.end { r.end } else { c })
+}
+
+/// Per-word times from the model's durations: token spans merged per word, then
+/// one entry for every word `0..covered`, in order. A word with no audio of its
+/// own (inside a span, or a lone dash) gets a zero-length entry where the word
+/// before it ends, so the highlight passes over it and never moves backwards.
+fn chunk_word_times(dur: &[f32], spans: Vec<(usize, usize, usize)>, n_samples: usize, rate: f32, covered: usize) -> Vec<WordTime> {
+    // one span per word: merge consecutive token spans of the same word, drop unowned
+    let mut merged: Vec<(usize, usize, usize)> = Vec::new();
+    for sp in spans.into_iter().filter(|sp| sp.0 != NO_WORD) {
+        match merged.last_mut() {
+            Some(m) if m.0 == sp.0 => m.2 = sp.2,
+            _ => merged.push(sp),
+        }
+    }
+    let timed = ra_timing::word_times(dur, &merged, n_samples, OFFSET_MS, rate);
+    let mut out = Vec::with_capacity(covered.max(timed.len()));
+    let mut it = timed.into_iter().peekable();
+    let mut last_end: Option<u64> = None;
+    for w in 0..covered {
+        let mut found = false;
+        while let Some(e) = it.next_if(|e| e.word <= w) {
+            found |= e.word == w;
+            last_end = Some(e.end);
+            out.push(e);
+        }
+        if !found {
+            let at = last_end.or_else(|| it.peek().map(|e| e.start)).unwrap_or(0);
+            out.push(WordTime { word: w, start: at, end: at });
+        }
+    }
+    out.extend(it);
+    out
+}
+
+/// `g2p_chunk` at depth 0, words only (tests and the glitch hunt).
+#[cfg(test)]
+fn g2p_words<'a>(g: &G2P, names: &Names, words: &[&'a str]) -> Vec<Cow<'a, str>> {
+    g2p_chunk(g, names, words, 0).words
+}
+
+struct Fed<'a> {
+    words: Vec<Cow<'a, str>>,
+    inner: Vec<Range<usize>>,
+    spoken: Vec<(usize, usize, String)>,
+}
+
 /// G2P input for a chunk, one entry per word (same count and order):
+/// - **pre-pass** (`ra_norm`, spec §2): curly apostrophes and Unicode hyphens are
+///   fixed first; then every span of words that normalises (`$3.2B`, `$5 billion`,
+///   `U.S.`, `1990,`) is said on its first word as `[key](/phonemes/)`, where the
+///   phonemes are the span's spoken text through this same G2P (depth 1: no
+///   pre-pass again) and `key` is that word's letters and digits (one plain misaki
+///   token, so alignment stays one token group per word). The span's trailing
+///   punctuation stays outside, so its pause or sentence period survives. The other
+///   words of the span are fed as "" (no tokens: alignment skips them and timing
+///   gives them zero length); the simpler choice over empty overrides, which
+///   misaki would still tokenize.
 /// - a hand-list word (Xi, Nguyen) becomes misaki's `[word](/phonemes/)` override,
 ///   so the hand list wins even where misaki has its own reading;
 /// - ALL-CAPS words are lowercased when misaki or the names dictionary knows them,
@@ -644,29 +765,158 @@ fn build_g2p() -> (G2P, Arc<Names>) {
 /// - page `[` `]` become `(` `)`, so page text is never read as override syntax
 ///   (Kokoro has no bracket symbols; parens give the same pause).
 /// Hyphen-joined parts are handled one by one. Use `plain_word` for alignment.
-fn g2p_words<'a>(g: &G2P, names: &Names, words: &[&'a str]) -> Vec<Cow<'a, str>> {
-    let known = |w: &str| lexicon_knows(&g.lexicon, w);
-    let names_knows = |w: &str| names.knows(w);
-    let part = |p: &'a str| -> Cow<'a, str> {
+///
+/// Context limit: only the chunk's words are seen, so its last word is read as a
+/// sentence end. `ra_text::chunk` cuts at sentence ends and clause marks (and never
+/// after a title such as `Sen.`); only a hard length cut mid-sentence can add a
+/// period after an initialism or leave a title unexpanded at the chunk's end.
+///
+/// Returns the span ranges too. `depth` 0 runs the pre-pass; depth 1 (a span's
+/// spoken text) does not, so phonemising never recurses further.
+fn g2p_chunk<'a>(g: &G2P, names: &Names, words: &[&'a str], depth: u8) -> Fed<'a> {
+    let prepared: Vec<Cow<'a, str>> = words.iter().map(|w| ra_norm::prepare(w)).collect();
+    let mut out: Vec<Option<Cow<'a, str>>> = vec![None; words.len()];
+    let mut inner = Vec::new();
+    let mut spoken = Vec::new();
+    if depth == 0 {
+        let refs: Vec<&str> = prepared.iter().map(|c| c.as_ref()).collect();
+        let spans = ra_norm::spans(&refs);
+        // one misaki call for every span of the chunk (see `spans_phonemes`)
+        let edges: Vec<(&str, &str, &str)> = spans.iter().map(|sp| split_edges(&sp.spoken)).collect();
+        let cores: Vec<&str> = edges.iter().map(|e| e.1).collect();
+        let phs = spans_phonemes(g, names, &cores);
+        for ((sp, (lead, _, trail)), ph) in spans.iter().zip(&edges).zip(phs) {
+            let (Some(first), Some(ph)) = (refs.get(sp.start), ph) else {
+                log::debug!("ra_tts: no phonemes for span {:?}; old path", sp.spoken);
+                continue;
+            };
+            let Some(slots) = out.get_mut(sp.start..sp.end) else { continue };
+            let o = span_override(first, lead, &ph, trail);
+            for (k, slot) in slots.iter_mut().enumerate() {
+                *slot = Some(if k == 0 { Cow::Owned(o.clone()) } else { Cow::Borrowed("") });
+            }
+            if sp.end - sp.start > 1 {
+                inner.push(sp.start + 1..sp.end);
+            }
+            spoken.push((sp.start, sp.end, sp.spoken.clone()));
+        }
+    }
+    let words = out
+        .into_iter()
+        .zip(prepared)
+        .map(|(o, p)| match (o, p) {
+            (Some(o), _) => o,
+            (None, Cow::Borrowed(b)) => word_path(g, names, b),
+            (None, Cow::Owned(s)) => Cow::Owned(word_path(g, names, &s).into_owned()),
+        })
+        .collect();
+    Fed { words, inner, spoken }
+}
+
+/// The pre-existing per-word path: hand override, caps rule, page brackets.
+fn word_path<'b>(g: &G2P, names: &Names, w: &'b str) -> Cow<'b, str> {
+    let known = |x: &str| lexicon_knows(&g.lexicon, x);
+    let names_knows = |x: &str| names.knows(x);
+    let part = |p: &'b str| -> Cow<'b, str> {
         match hand_override(p, names) {
             Some(o) => Cow::Owned(o),
             None => unbracket(ra_text::speakable_caps(p, &known, &names_knows)),
         }
     };
-    words
-        .iter()
-        .map(|w| {
-            if !w.contains('-') {
-                return part(w);
-            }
-            let parts: Vec<Cow<str>> = w.split('-').map(part).collect();
-            if parts.iter().all(|p| matches!(p, Cow::Borrowed(_))) {
-                Cow::Borrowed(*w)
-            } else {
-                Cow::Owned(parts.join("-"))
-            }
+    if !w.contains('-') {
+        return part(w);
+    }
+    let parts: Vec<Cow<str>> = w.split('-').map(part).collect();
+    if parts.iter().all(|p| matches!(p, Cow::Borrowed(_))) {
+        Cow::Borrowed(w)
+    } else {
+        Cow::Owned(parts.join("-"))
+    }
+}
+
+/// `spoken` split into (leading punctuation, words, trailing punctuation).
+fn split_edges(s: &str) -> (&str, &str, &str) {
+    let start = s.find(char::is_alphanumeric).unwrap_or(s.len());
+    let end = s.char_indices().rev().find(|(_, c)| c.is_alphanumeric()).map_or(start, |(i, c)| i + c.len_utf8());
+    (s.get(..start).unwrap_or(""), s.get(start..end).unwrap_or(""), s.get(end..).unwrap_or(""))
+}
+
+/// The override that says a span on its first word: `{lead}[key](/P/){trail}`.
+/// `key` is the word's letters and digits (one plain misaki token; "x" for a
+/// symbol-only word such as `&`), so alignment sees one token group per word.
+fn span_override(first: &str, lead: &str, ph: &str, trail: &str) -> String {
+    let key: String = first.chars().filter(|c| c.is_alphanumeric()).collect();
+    let key = if key.is_empty() { "x" } else { key.as_str() };
+    let lead = unbracket(Cow::Borrowed(lead));
+    let trail = unbracket(Cow::Borrowed(trail));
+    format!("{lead}[{key}](/{ph}/){trail}")
+}
+
+/// Phonemes for each span's spoken words (`cores`), through the same G2P (hand list,
+/// caps rule, misaki, names fallback) at depth 1, in ONE misaki call for the chunk:
+/// misaki compiles a regex on every call (~0.1 ms), so a call per span broke the
+/// 1 ms budget. Tokens are mapped back to their span by aligning on the words; a
+/// punctuation token between two words of one span ("fourteenth, twenty") stays
+/// with it. Pause-only tokens are dropped, runs of spaces collapse, and override
+/// syntax characters never appear. `None` for a span with nothing speakable.
+fn spans_phonemes(g: &G2P, names: &Names, cores: &[&str]) -> Vec<Option<String>> {
+    let mut words: Vec<&str> = Vec::new();
+    let mut span_of: Vec<usize> = Vec::new();
+    for (k, c) in cores.iter().enumerate() {
+        for w in c.split_whitespace() {
+            words.push(w);
+            span_of.push(k);
+        }
+    }
+    let mut out = vec![String::new(); cores.len()];
+    if words.is_empty() {
+        return vec![None; cores.len()];
+    }
+    let fed = g2p_chunk(g, names, &words, 1).words;
+    let plain: Vec<Cow<str>> = fed.iter().map(|w| plain_word(w)).collect();
+    let plain: Vec<&str> = plain.iter().map(|w| w.as_ref()).collect();
+    let text = fed.iter().map(|w| w.as_ref()).collect::<Vec<&str>>().join(" ");
+    let Ok(toks) = run_g2p(g, &text) else { return vec![None; cores.len()] };
+    let tt: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+    let owner = ra_timing::align(&plain, &tt);
+    let span_at: Vec<Option<usize>> = owner.iter().map(|o| o.and_then(|w| span_of.get(w).copied())).collect();
+    for (i, t) in toks.iter().enumerate() {
+        let k = span_at.get(i).copied().flatten().or_else(|| {
+            let before = span_at.get(..i)?.iter().rev().find_map(|x| *x);
+            let after = span_at.get(i + 1..)?.iter().find_map(|x| *x);
+            before.filter(|b| Some(*b) == after)
+        });
+        let (Some(o), Some(p)) = (k.and_then(|k| out.get_mut(k)), t.phonemes.as_deref().map(str::trim)) else {
+            continue;
+        };
+        if p.is_empty() {
+            continue;
+        }
+        if !o.is_empty() {
+            o.push(' ');
+        }
+        o.extend(p.chars().filter(|c| !matches!(c, '[' | ']' | '(' | ')' | '/')));
+    }
+    out.into_iter()
+        .map(|o| {
+            let o = collapse_spaces(o.trim()).into_owned();
+            (!o.trim().is_empty()).then_some(o)
         })
         .collect()
+}
+
+/// Runs of spaces become one space (misaki writes number words as "twenty   five").
+fn collapse_spaces(p: &str) -> Cow<'_, str> {
+    if !p.contains("  ") {
+        return Cow::Borrowed(p);
+    }
+    let mut out = String::with_capacity(p.len());
+    for c in p.chars() {
+        if !(c == ' ' && out.ends_with(' ')) {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// `[` / `]` -> `(` / `)`.
@@ -740,9 +990,12 @@ fn is_hyphen(s: &str) -> bool {
 }
 
 /// (word or NO_WORD, phonemes, followed-by-whitespace) per G2P token. Every token
-/// with phonemes feeds the model (punctuation shapes prosody), except a hyphen
-/// inside one word ("mid-year"): misaki gives it a space phoneme, which would
-/// add a long pause between the halves.
+/// with phonemes feeds the model (punctuation shapes prosody), except:
+/// - a hyphen inside one word ("mid-year"): misaki gives it a space phoneme, which
+///   would add a long pause between the halves;
+/// - a token with empty phonemes: the subtokens an override blanked (`[32B](/…/)`
+///   -> "32" speaks, "B" is ""), whose whitespace alone would add a pause.
+/// Runs of spaces inside one token's phonemes collapse to one ("twenty   five").
 fn token_phonemes(toks: &[(&str, Option<&str>, bool)], owner: &[Option<usize>]) -> Vec<(usize, String, bool)> {
     let own = |i: Option<usize>| i.and_then(|i| owner.get(i).copied().flatten());
     toks.iter()
@@ -756,13 +1009,20 @@ fn token_phonemes(toks: &[(&str, Option<&str>, bool)], owner: &[Option<usize>]) 
                 && own(i.checked_sub(1)) == own(Some(i + 1));
             !inner
         })
-        .filter_map(|(_, ((_, p, ws), o))| Some((o.unwrap_or(NO_WORD), (*p)?.to_string(), *ws)))
+        .filter_map(|(_, ((_, p, ws), o))| {
+            let p = (*p).filter(|p| !p.is_empty())?;
+            Some((o.unwrap_or(NO_WORD), collapse_spaces(p).into_owned(), *ws))
+        })
         .collect()
 }
 
 #[cfg(test)]
 #[path = "ra_tts_bench.rs"]
 mod bench;
+
+#[cfg(test)]
+#[path = "ra_glitch_hunt.rs"]
+mod glitch_hunt;
 
 #[cfg(test)]
 mod tests {
@@ -812,6 +1072,243 @@ mod tests {
         // edge positions never panic
         assert_eq!(token_phonemes(&[("-", Some(" "), true)], &[None]).len(), 1);
         assert!(token_phonemes(&[], &[]).is_empty());
+    }
+
+    // ---------------------------------------------------------------- phase 3 pre-pass
+
+    /// Pause guard: subtokens an override blanked ("$3.2B" -> "3.2" gets the phonemes,
+    /// "B" comes back empty) add no whitespace of their own.
+    #[test]
+    fn empty_subtokens_of_one_word_add_no_pause() {
+        let toks = [("cost", Some("kˈɔst"), true), ("32", Some("θɹˈi"), true), ("B", Some(""), true), ("today", Some("tədˈA"), false)];
+        let owner = [Some(0), Some(1), Some(1), Some(2)];
+        assert_eq!(joined(&token_phonemes(&toks, &owner)), "kˈɔst θɹˈi tədˈA");
+        // an unowned blank ("." inside "U.S") is collapsed the same way
+        let toks = [("U", Some("jˈu ˈɛs"), true), (".", Some(""), true), ("S", Some(""), true), (".", Some("."), true)];
+        let owner = [Some(0), None, Some(0), None];
+        assert_eq!(joined(&token_phonemes(&toks, &owner)), "jˈu ˈɛs . ");
+    }
+
+    #[test]
+    fn runs_of_spaces_inside_one_token_collapse() {
+        let toks = [("2025", Some("twˈɛnti   twˈɛnti  fˈIv"), true), ("-", Some(" "), true), ("x", Some("ˈɛks"), false)];
+        let owner = [Some(0), None, Some(2)];
+        let s = joined(&token_phonemes(&toks, &owner));
+        assert!(s.starts_with("twˈɛnti twˈɛnti fˈIv "), "{s:?}");
+        // a lone pause token keeps its single space
+        assert_eq!(token_phonemes(&toks, &owner)[1].1, " ");
+    }
+
+    /// The chunk as synth feeds it: (word, phonemes, ws) per model token.
+    fn chunk_ph(words: &[&str]) -> Vec<(usize, String, bool)> {
+        prepare_chunk(test_g2p(), test_names(), words).expect("g2p").ph
+    }
+
+    fn word_ph(ph: &[(usize, String, bool)], w: usize) -> String {
+        ph.iter().filter(|p| p.0 == w).map(|p| kokoro_phonemes(&p.1)).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn money_span_has_no_gap_before_the_next_word() {
+        let ph = chunk_ph(&["it", "cost", "$3.2B", "today"]);
+        let s = joined(&ph);
+        assert!(!s.contains("  "), "multi-space gap: {s:?}");
+        let money = word_ph(&ph, 2);
+        assert!(money.contains("bˈɪliən") && money.contains("dˈɑːlɚz"), "{money:?}");
+        assert!(money.contains("pˈYnt"), "{money:?}");
+    }
+
+    #[test]
+    fn multi_word_span_speaks_once_on_its_first_word() {
+        let words = ["It", "cost", "$5", "billion", "in", "World", "War", "II."];
+        let p = prepare_chunk(test_g2p(), test_names(), &words).expect("g2p");
+        assert_eq!(p.inner, vec![3..4], "\"billion\" is inside the $5 span");
+        let money = word_ph(&p.ph, 2);
+        assert_eq!(money.matches("bˈɪliən").count(), 1, "{money:?}");
+        assert!(money.contains("dˈɑːlɚz"), "{money:?}");
+        assert!(word_ph(&p.ph, 3).is_empty(), "billion has no audio of its own");
+        assert!(word_ph(&p.ph, 7).contains("tˈu"), "II -> two: {:?}", word_ph(&p.ph, 7));
+        assert_eq!(p.ph.last().map(|t| t.1.as_str()), Some("."), "sentence period kept");
+    }
+
+    // Review Focus 3: one timing entry per word, zero length inside a span, never backwards.
+    #[test]
+    fn span_words_get_zero_length_entries_at_the_span_end() {
+        let words = ["It", "cost", "$5", "billion", "in", "World", "War", "II."];
+        let p = prepare_chunk(test_g2p(), test_names(), &words).expect("g2p");
+        let s = joined(&p.ph);
+        let v: HashMap<char, i64> = s.chars().filter(|c| *c != ' ').map(|c| (c, 1)).chain([(' ', 16)]).collect();
+        let (ids, spans, covered) = build_ids(&p.ph, &v, words.len());
+        let covered = cover_spans(covered, &p.inner);
+        // fake duration model: 2 frames per id (plus the two pads)
+        let dur = vec![2.0f32; ids.len() + 2];
+        let n = dur.len() * 2 * 600;
+        let t = chunk_word_times(&dur, spans, n, 1.0, covered);
+        assert_eq!(t.len(), 8, "{t:?}");
+        assert_eq!(t.iter().map(|w| w.word).collect::<Vec<_>>(), (0..8).collect::<Vec<_>>());
+        let billion = &t[3];
+        assert_eq!(billion.start, billion.end, "billion is zero length: {t:?}");
+        assert_eq!(billion.start, t[2].end, "at the end of the $5 span");
+        assert!(t[2].end > t[2].start, "$5 itself is spoken");
+        assert!(t[7].end > t[7].start, "II is its own (one-word) span and is spoken");
+        assert!(t.windows(2).all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end && w[0].end <= w[1].start), "{t:?}");
+    }
+
+    #[test]
+    fn covered_never_ends_inside_a_span() {
+        // inner 3..5: word 2 speaks the span
+        assert_eq!(cover_spans(2, &[3..5]), 2);
+        assert_eq!(cover_spans(3, &[3..5]), 5);
+        assert_eq!(cover_spans(4, &[3..5]), 5);
+        assert_eq!(cover_spans(4, &[1..2, 3..6]), 6);
+        assert_eq!(cover_spans(6, &[3..6]), 6);
+        assert_eq!(cover_spans(2, &[]), 2);
+    }
+
+    #[test]
+    fn every_word_gets_one_timing_entry() {
+        // words with no audio (a lone dash) still get a zero-length entry
+        let dur = vec![2.0f32; 8];
+        let t = chunk_word_times(&dur, vec![(0, 0, 2), (2, 3, 6)], 8 * 2 * 600, 1.0, 4);
+        assert_eq!(t.iter().map(|w| w.word).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        assert_eq!((t[1].start, t[1].end), (t[0].end, t[0].end));
+        assert_eq!((t[3].start, t[3].end), (t[2].end, t[2].end));
+        assert!(chunk_word_times(&dur, vec![], 100, 1.0, 0).is_empty());
+    }
+
+    #[test]
+    fn homographs_never_replace_override_phonemes() {
+        let (_, mut toks) = test_g2p().g2p("I have read it").unwrap();
+        let before: Vec<Option<String>> = toks.iter().map(|t| t.phonemes.clone()).collect();
+        apply_homographs(&mut toks, &[true, true, true, true]);
+        assert_eq!(toks.iter().map(|t| t.phonemes.clone()).collect::<Vec<_>>(), before, "overridden tokens kept");
+        apply_homographs(&mut toks, &[false, false, false, false]);
+        assert_eq!(toks[2].phonemes.as_deref(), Some("ɹˈɛd"));
+    }
+
+    #[test]
+    fn unspeakable_chunk_still_times_every_word() {
+        let a = empty_audio(Device::Cpu, 3);
+        assert_eq!(a.covered, 3);
+        assert_eq!(a.words.iter().map(|w| (w.word, w.start, w.end)).collect::<Vec<_>>(), vec![(0, 0, 0), (1, 0, 0), (2, 0, 0)]);
+        // reachable: emoji only give no model ids
+        let p = prepare_chunk(test_g2p(), test_names(), &["😀", "🙂"]).expect("g2p");
+        let v: HashMap<char, i64> = [('a', 1), (' ', 16)].into_iter().collect();
+        assert!(build_ids(&p.ph, &v, 2).0.iter().all(|&i| i == 16) || build_ids(&p.ph, &v, 2).0.is_empty());
+    }
+
+    #[test]
+    fn homograph_is_applied() {
+        let ph = chunk_ph(&["I", "have", "read", "it"]);
+        assert_eq!(word_ph(&ph, 2), "ɹˈɛd");
+        let ph = chunk_ph(&["I", "will", "read", "it"]);
+        assert_eq!(word_ph(&ph, 2), "ɹˈiːd");
+    }
+
+    // Review Focus 4: a sentence-final initialism keeps the sentence's own period.
+    #[test]
+    fn initialism_at_chunk_end_keeps_the_final_period() {
+        let p = prepare_chunk(test_g2p(), test_names(), &["moved", "to", "the", "U.S."]).expect("g2p");
+        assert_eq!(p.ph.last().map(|t| (t.0, t.1.as_str())), Some((NO_WORD, ".")), "{:?}", p.ph);
+        let us = word_ph(&p.ph, 3);
+        assert!(us.contains("jˈu") && us.contains("ˈɛs"), "U S: {us:?}");
+        assert!(!joined(&p.ph).contains("  "), "{:?}", joined(&p.ph));
+    }
+
+    #[test]
+    fn lone_symbols_are_never_silent() {
+        let words = ["pay", "$", "now", ".", "and", "§230", "&", "5%"];
+        let p = prepare_chunk(test_g2p(), test_names(), &words).expect("g2p");
+        for w in [1, 5, 6, 7] {
+            assert!(!word_ph(&p.ph, w).trim().is_empty(), "{} silent: {:?}", words[w], p.ph);
+        }
+    }
+
+    /// Chunk boundaries: g2p_words sees the chunk only, so the chunk's last word is
+    /// read as a sentence end (ra_text::chunk cuts at sentence ends, clause marks or,
+    /// rarely, a hard limit). A hard cut mid-sentence adds a period after an
+    /// initialism and leaves a title unexpanded. Documented limitation.
+    #[test]
+    fn chunk_end_is_read_as_a_sentence_end() {
+        let fed = g2p_words(test_g2p(), test_names(), &["the", "U.S."]);
+        assert!(plain_word(&fed[1]).ends_with('.'), "{fed:?}");
+        let fed = g2p_words(test_g2p(), test_names(), &["met", "Sen."]);
+        assert_eq!(fed[1], "Sen.", "no next word: the title stays as written");
+    }
+
+    /// Spec §3 acronym and CamelCase rows end to end. Needs Task 3 (ra_names acronym
+    /// stems and CamelCase split): the controller re-enables it after that merge.
+    #[test]
+    #[ignore = "needs phase 3 Task 3 (ra_names acronyms + CamelCase)"]
+    fn acronyms_and_camel_case_end_to_end() {
+        let words = ["The", "SEC's", "AWS", "GPUs", "and", "TechReview", "rose."];
+        let ph = chunk_ph(&words);
+        let marks = |w: usize| word_ph(&ph, w).matches(['ˈ', 'ˌ']).count();
+        assert!(marks(1) >= 3, "SEC's spelled: {}", word_ph(&ph, 1));
+        assert!(marks(2) >= 3, "AWS spelled: {}", word_ph(&ph, 2));
+        assert!(marks(3) >= 3, "GPUs spelled: {}", word_ph(&ph, 3));
+        assert!(marks(5) <= 3, "TechReview as two words, not letters: {}", word_ph(&ph, 5));
+    }
+
+    /// The real CPU model on a chunk with a multi-word span: one entry per word,
+    /// "billion" zero length at the $5 span's end, never backwards.
+    /// cargo test --release span_synth_real -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn span_synth_real() {
+        let e = Engine::new(dirs::data_dir().unwrap().join("ALAN Echo"));
+        e.preload("af_heart", "cpu");
+        let words = ["It", "cost", "$5", "billion", "in", "World", "War", "II."];
+        let a = e.synth(&words, 2.2).unwrap();
+        println!("{:?}", a.words);
+        assert_eq!(a.covered, 8);
+        assert_eq!(a.words.iter().map(|w| w.word).collect::<Vec<_>>(), (0..8).collect::<Vec<_>>());
+        assert_eq!(a.words[3].start, a.words[3].end);
+        assert_eq!(a.words[3].start, a.words[2].end);
+        assert!(a.words.windows(2).all(|w| w[0].start <= w[1].start && w[0].end <= w[1].start));
+        println!("wav: {}", write_wav_as(&a.pcm, "ra_span_sample.wav").display());
+    }
+
+    /// Pre-pass budget (spec §5): spans + phonemising the spoken text adds <= 1 ms per
+    /// 30-word chunk. cargo test --release prepass_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn prepass_cost_per_chunk() {
+        let text = "On March 3, 2025 the U.S. Senate passed a $3.2B bill, up 8.6% from 2024, \
+                    after Sen. Warren spoke at 7:30pm in Washington about World War II and the 1990s. \
+                    Shares of Microsoft rose 2.5% to $480 while about 1,500 workers in St. Louis \
+                    read the 21st report on the company’s 5 km site at No. 10 Main St. today.";
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let chunks: Vec<&[&str]> = words.chunks(30).collect();
+        let (g, names) = (test_g2p(), test_names());
+        let n = 300;
+        let time = |depth: u8| {
+            let t = Instant::now();
+            for _ in 0..n {
+                for c in &chunks {
+                    std::hint::black_box(g2p_chunk(g, names, c, depth));
+                }
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / (n * chunks.len()) as f64
+        };
+        let _ = (time(0), time(1)); // warm
+        let with = time(0);
+        let without = time(1);
+        let spans_only = {
+            let t = Instant::now();
+            for _ in 0..n {
+                for c in &chunks {
+                    std::hint::black_box(crate::ra_norm::spans(c));
+                }
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / (n * chunks.len()) as f64
+        };
+        println!(
+            "g2p_words per 30-word chunk: {with:.3} ms with pre-pass, {without:.3} ms without; \
+             pre-pass adds {:.3} ms (spans alone {spans_only:.4} ms)",
+            with - without
+        );
+        assert!(with - without <= 1.0, "pre-pass adds {:.3} ms per chunk", with - without);
     }
 
     /// The engine's real G2P + names (CMUdict + g2p_en fallback), built once per test run.
@@ -916,8 +1413,9 @@ mod tests {
         let words = ["[1](2)", "[Xi", "x](/ʒʒʒ/)", "](", "[", "]", "🙂", "東京", "a[b](/zz/)c", "Xi](/x/)", "[[Xi]]", "word"];
         let fed = g2p_words(g, test_names(), &words);
         for (w, f) in words.iter().zip(&fed) {
+            // any bracket left is an override we wrote: stripping ours leaves none
             if !w.contains("Xi") {
-                assert!(!f.contains(['[', ']']), "{w:?} -> {f:?}");
+                assert!(!plain_word(f).contains(['[', ']']), "{w:?} -> {f:?}");
             }
         }
         let fed: Vec<&str> = fed.iter().map(|c| c.as_ref()).collect();

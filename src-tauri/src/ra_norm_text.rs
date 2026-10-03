@@ -11,7 +11,6 @@
 //!
 //! Pure: static sorted tables (binary search), no regex, no allocation at rest, and
 //! no byte slicing except at `char_indices` boundaries via `str::get`.
-#![cfg_attr(not(test), allow(dead_code))] // wired into ra_tts::g2p_words by Task 5
 
 use std::borrow::Cow;
 
@@ -489,6 +488,21 @@ fn unit(key: &str) -> Option<(&'static str, &'static str, bool)> {
     UNITS.get(i).map(|e| (e.1, e.2, e.3))
 }
 
+/// A unit that may be glued to its number (`5km`, `3kWh`): (singular, plural).
+/// The number pass (`ra_norm_num`) reads glued units with this table, so glued and
+/// spaced units share one list.
+pub fn glued_unit(key: &str) -> Option<(&'static str, &'static str)> {
+    unit(key).filter(|u| u.2).map(|u| (u.0, u.1))
+}
+
+/// An abbreviation that never ends a sentence: a title (`Sen.`, `Gen.`), `Dr.`,
+/// `St.`, `v.`, or one that needs a number after it (`Fig.`, `Vol.`). Used by
+/// `ra_text::chunk`, so a chunk never ends on one and loses its expansion.
+pub fn never_ends_sentence(word: &str) -> bool {
+    abbrev(split(word).core)
+        .is_some_and(|(_, r)| matches!(r, Rule::Title | Rule::Dr | Rule::St | Rule::Versus | Rule::Number))
+}
+
 // ---------------------------------------------------------------- words
 
 /// A source word split into its core and the closing punctuation after it.
@@ -602,108 +616,11 @@ fn finish(mut spoken: String, trail: &str, period: bool) -> String {
 
 // ---------------------------------------------------------------- number words
 
-const ONES: [&str; 20] = [
-    "zero",
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "ten",
-    "eleven",
-    "twelve",
-    "thirteen",
-    "fourteen",
-    "fifteen",
-    "sixteen",
-    "seventeen",
-    "eighteen",
-    "nineteen",
-];
-const TENS: [&str; 10] = [
-    "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
-];
+use crate::ra_numwords::{cardinal, digits as digit_words, ordinal};
 
-fn under_1000(n: u64, out: &mut Vec<&'static str>) {
-    let h = n / 100;
-    let r = n % 100;
-    if h > 0 {
-        out.push(ONES.get(h as usize).copied().unwrap_or(""));
-        out.push("hundred");
-    }
-    if r >= 20 {
-        out.push(TENS.get((r / 10) as usize).copied().unwrap_or(""));
-        if r % 10 > 0 {
-            out.push(ONES.get((r % 10) as usize).copied().unwrap_or(""));
-        }
-    } else if r > 0 || h == 0 {
-        out.push(ONES.get(r as usize).copied().unwrap_or(""));
-    }
-}
-
-/// Hyphen-free cardinal words below 10^15 ("fifty eight").
-fn cardinal(n: u64) -> String {
-    if n == 0 {
-        return "zero".into();
-    }
-    let mut out = Vec::new();
-    let mut rest = n;
-    for (scale, name) in [
-        (1_000_000_000_000u64, "trillion"),
-        (1_000_000_000, "billion"),
-        (1_000_000, "million"),
-        (1_000, "thousand"),
-    ] {
-        let q = rest / scale;
-        if q > 0 {
-            under_1000(q % 1000, &mut out);
-            out.push(name);
-            rest %= scale;
-        }
-    }
-    if rest > 0 {
-        under_1000(rest, &mut out);
-    }
-    out.retain(|w| !w.is_empty());
-    out.join(" ")
-}
-
-fn ordinal(n: u64) -> String {
-    let c = cardinal(n);
-    let (head, last) = match c.rsplit_once(' ') {
-        Some((h, l)) => (Some(h), l),
-        None => (None, c.as_str()),
-    };
-    let ord = match last {
-        "one" => "first".to_string(),
-        "two" => "second".to_string(),
-        "three" => "third".to_string(),
-        "five" => "fifth".to_string(),
-        "eight" => "eighth".to_string(),
-        "nine" => "ninth".to_string(),
-        "twelve" => "twelfth".to_string(),
-        l if l.ends_with('y') => format!("{}ieth", l.trim_end_matches('y')),
-        l => format!("{l}th"),
-    };
-    match head {
-        Some(h) => format!("{h} {ord}"),
-        None => ord,
-    }
-}
-
-fn digit_words(s: &str) -> String {
-    s.chars()
-        .filter_map(|c| c.to_digit(10))
-        .filter_map(|d| ONES.get(d as usize).copied())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Words for a plain written number: `5`, `1,000`, `2.5`, `.5`. `None` otherwise.
+/// Words for a plain written number: `5`, `1,000`, `2.5`, `.5`. `None` otherwise
+/// (stray or doubled commas, a bare `.`, a non-digit fraction). The words come
+/// from `ra_numwords`; numbers too long for it are read digit by digit.
 fn number_words(s: &str) -> Option<String> {
     let (int, frac) = match s.split_once('.') {
         Some((a, b)) => (a, Some(b)),
@@ -718,25 +635,11 @@ fn number_words(s: &str) -> Option<String> {
     if !int.chars().all(|c| c.is_ascii_digit() || c == ',') {
         return None;
     }
-    let digits: String = int.chars().filter(char::is_ascii_digit).collect();
-    let mut out = if digits.is_empty() {
-        String::new()
-    } else if digits.len() > 15 || (digits.len() > 1 && digits.starts_with('0')) {
-        digit_words(&digits)
-    } else {
-        cardinal(digits.parse().ok()?)
-    };
-    if let Some(f) = frac {
-        if f.is_empty() || !f.chars().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str("point ");
-        out.push_str(&digit_words(f));
+    match frac {
+        Some(f) if f.is_empty() || !f.chars().all(|c| c.is_ascii_digit()) => None,
+        Some(f) => Some(crate::ra_numwords::decimal(int, f)),
+        None => Some(crate::ra_numwords::integer(int)),
     }
-    Some(out)
 }
 
 // ---------------------------------------------------------------- pieces
@@ -1091,81 +994,6 @@ fn roman(w: &[&str], i: usize, numeral: &str) -> Option<String> {
 
 // ---------------------------------------------------------------- symbols, units
 
-/// `3×4`, `2+2=4`: numbers joined by math symbols, read in full.
-fn glued_math(s: &str) -> Option<String> {
-    let op = |c: char| match c {
-        '×' | '*' => Some("times"),
-        '÷' => Some("divided by"),
-        '=' => Some("equals"),
-        '+' => Some("plus"),
-        '−' => Some("minus"),
-        '≈' => Some("approximately"),
-        '<' => Some("less than"),
-        '>' => Some("greater than"),
-        '≤' => Some("less than or equal to"),
-        '≥' => Some("greater than or equal to"),
-        '≠' => Some("does not equal"),
-        _ => None,
-    };
-    let mut out: Vec<String> = Vec::new();
-    let mut start = 0usize;
-    let mut ops = 0;
-    for (k, c) in s.char_indices() {
-        if let Some(word) = op(c) {
-            out.push(number_words(s.get(start..k)?)?);
-            out.push(word.to_string());
-            start = k + c.len_utf8();
-            ops += 1;
-        }
-    }
-    if ops == 0 {
-        return None;
-    }
-    out.push(number_words(s.get(start..)?)?);
-    Some(out.join(" "))
-}
-
-/// `±2`, `√2`, `≈5`, `§230`, `−5`: a prefix symbol glued to a number.
-fn prefixed_number(s: &str) -> Option<String> {
-    let c = first_char(s)?;
-    let word = match c {
-        '±' => "plus or minus",
-        '√' => "square root of",
-        '≈' | '~' => "approximately",
-        '§' => "section",
-        '−' => "minus",
-        '≤' => "less than or equal to",
-        '≥' => "greater than or equal to",
-        '<' => "less than",
-        '>' => "greater than",
-        _ => return None,
-    };
-    Some(format!("{word} {}", number_words(s.get(c.len_utf8()..)?)?))
-}
-
-/// `20°C`, `2.5GHz`, `5km`: a number glued to a unit that may be glued.
-fn glued_unit(s: &str) -> Option<String> {
-    let (minus, body) = match s.strip_prefix(['-', '−']) {
-        Some(b) => (true, b),
-        None => (false, s),
-    };
-    let split_at = body
-        .char_indices()
-        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == ','))
-        .map(|(k, _)| k)?;
-    let (num, u) = (body.get(..split_at)?, body.get(split_at..)?);
-    if num.is_empty() {
-        return None;
-    }
-    let (one, many, glue) = unit(u)?;
-    if !glue {
-        return None;
-    }
-    let n = number_words(num)?;
-    let form = if num == "1" { one } else { many };
-    Some(format!("{}{n} {form}", if minus { "minus " } else { "" }))
-}
-
 /// `km/h` → kilometers per hour, `and/or` → "and or", `P/E` → "P E".
 fn slash_words(s: &str) -> Option<String> {
     match s {
@@ -1370,12 +1198,8 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             return one((if singular { one_u } else { many }).to_string(), period);
         }
     }
-    if let Some(said) = glued_unit(body)
-        .or_else(|| prefixed_number(body))
-        .or_else(|| glued_math(body))
-    {
-        return one(said, period);
-    }
+    // A symbol or unit glued to a number (`±2`, `§230`, `5km`, `3×4`) is a number
+    // span: the number pass reads it, and numbers win the merge (`ra_norm`).
 
     if let Some(said) = roman(w, i, body) {
         return one(said, period);
@@ -1616,8 +1440,9 @@ mod tests {
         assert_eq!(render("1 km"), "1 kilometer");
         assert_eq!(render("8 TB"), "8 terabytes");
         assert_eq!(render("3 GHz"), "3 gigahertz");
-        assert_eq!(render("20°C"), "twenty degrees Celsius");
-        assert_eq!(render("2.5GHz chip"), "two point five gigahertz chip");
+        // glued units belong to the number pass (ra_norm::glued_and_spaced_units_read_alike)
+        assert_eq!(render("20°C"), "20°C");
+        assert_eq!(render("2.5GHz chip"), "2.5GHz chip");
         assert_eq!(render("10 sq ft"), "10 square feet");
         assert_eq!(render("five km away"), "five kilometers away");
     }
@@ -1634,7 +1459,8 @@ mod tests {
     fn math() {
         assert_eq!(render("a = b"), "a equals b");
         assert_eq!(render("3 × 4"), "3 times 4");
-        assert_eq!(render("±2"), "plus or minus two");
+        // a sign glued to a number belongs to the number pass (ra_norm tests)
+        assert_eq!(render("±2"), "±2");
         assert_eq!(render("x ≈ 5"), "x approximately 5");
         assert_eq!(render("6 ÷ 2"), "6 divided by 2");
         assert_eq!(render("§ 230"), "section 230");
@@ -1773,7 +1599,7 @@ mod tests {
         assert_eq!(render("5 m tall"), "5 meters tall");
         assert_eq!(render("$5 m deal"), "$5 m deal");
         assert_eq!(render("6 ft."), "6 feet.");
-        assert_eq!(render("-5°C"), "minus five degrees Celsius");
+        assert_eq!(render("-5°C"), "-5°C", "the number pass owns it");
         assert_eq!(render("m/s"), "meters per second");
     }
 

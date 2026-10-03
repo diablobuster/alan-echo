@@ -6,8 +6,6 @@
 //! is kept on the spoken text so the sentence pause survives the override.
 //! Every word that contains an ASCII digit gets a non-empty span.
 
-#![cfg_attr(not(test), allow(dead_code))] // wired into g2p by phase 3 Task 5
-
 use crate::ra_numwords::{cardinal, decimal, digits, integer, ordinal, ordinalize, year};
 
 static MONTHS: [&str; 12] = [
@@ -50,26 +48,12 @@ static COUNT_NEXT: [&str; 84] = [
     "students", "times", "tonnes", "tons", "troops", "units", "users", "vehicles", "votes",
     "weeks", "women", "words", "workers", "yards", "years",
 ];
-/// Glued units after a number: (suffix, singular, plural). Case-sensitive.
-static UNITS: [(&str, &str, &str); 35] = [
-    ("Gbps", "gigabit per second", "gigabits per second"),
-    ("Mbps", "megabit per second", "megabits per second"),
-    ("kbps", "kilobit per second", "kilobits per second"),
-    ("fps", "frame per second", "frames per second"),
-    ("GB", "gigabyte", "gigabytes"), ("GHz", "gigahertz", "gigahertz"),
-    ("GW", "gigawatt", "gigawatts"), ("Hz", "hertz", "hertz"), ("KB", "kilobyte", "kilobytes"),
-    ("MB", "megabyte", "megabytes"), ("MHz", "megahertz", "megahertz"),
-    ("MW", "megawatt", "megawatts"), ("TB", "terabyte", "terabytes"),
-    ("cm", "centimeter", "centimeters"), ("ft", "foot", "feet"), ("kB", "kilobyte", "kilobytes"),
-    ("kHz", "kilohertz", "kilohertz"), ("kW", "kilowatt", "kilowatts"),
-    ("kWh", "kilowatt hour", "kilowatt hours"), ("kg", "kilogram", "kilograms"),
-    ("km", "kilometer", "kilometers"), ("km/h", "kilometer per hour", "kilometers per hour"),
-    ("kph", "kilometer per hour", "kilometers per hour"), ("lb", "pound", "pounds"),
-    ("lbs", "pound", "pounds"), ("mL", "milliliter", "milliliters"),
-    ("ml", "milliliter", "milliliters"), ("mm", "millimeter", "millimeters"),
-    ("mph", "mile per hour", "miles per hour"), ("ms", "millisecond", "milliseconds"),
-    ("oz", "ounce", "ounces"), ("x", "times", "times"), ("°", "degree", "degrees"),
-    ("°C", "degree Celsius", "degrees Celsius"), ("°F", "degree Fahrenheit", "degrees Fahrenheit"),
+/// Glued units only the number pass knows: (suffix, singular, plural). Every other
+/// glued unit (`5km`, `3kWh`, `20°C`) comes from the text pass's unit table
+/// (`ra_norm_text::glued_unit`), so the two passes read units alike.
+static UNITS: [(&str, &str, &str); 2] = [
+    ("km/h", "kilometer per hour", "kilometers per hour"),
+    ("x", "times", "times"),
 ];
 
 fn has_digit(s: &str) -> bool {
@@ -448,7 +432,10 @@ fn sign_word(c: char) -> Option<&'static str> {
         '>' => "more than",
         '≤' => "at most",
         '≥' => "at least",
-        '#' => "number",
+        '#' | '№' => "number",
+        '§' => "section",
+        '¶' => "paragraph",
+        '√' => "square root of",
         _ => return None,
     })
 }
@@ -664,7 +651,11 @@ fn number_unit(core: &str) -> Option<String> {
         .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == ','))
         .map(|(i, _)| i)?;
     let (num, suf) = core.split_at(end);
-    let (_, one, many) = UNITS.iter().find(|(s, _, _)| *s == suf)?;
+    let (one, many) = UNITS
+        .iter()
+        .find(|(s, _, _)| *s == suf)
+        .map(|(_, o, m)| (*o, *m))
+        .or_else(|| crate::ra_norm_text::glued_unit(suf))?;
     let words = plain_number(num)?;
     Some(format!("{words} {}", if words == "one" { one } else { many }))
 }
@@ -723,7 +714,8 @@ fn generic(core: &str) -> String {
                 '#' => "number",
                 '=' => "equals",
                 '°' => "degrees",
-                '×' => "by",
+                '×' => "times",
+                '÷' => "divided by",
                 '½' => "and a half",
                 '¼' => "and a quarter",
                 '¾' => "and three quarters",

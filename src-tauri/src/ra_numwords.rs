@@ -2,8 +2,6 @@
 //! Style: lowercase, single spaces, no hyphens, no "and" ("one hundred five").
 //! Pure and panic-free.
 
-#![cfg_attr(not(test), allow(dead_code))] // wired into g2p by phase 3 Task 5
-
 static ONES: [&str; 20] = [
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
     "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",

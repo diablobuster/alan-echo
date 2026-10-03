@@ -11,3 +11,19 @@ src-tauri/resources/models/
 
 # Generated names A/B listening board (links to local %TEMP% WAVs)
 tools/read-aloud/names_ab.html
+
+# Glitch hunt: fetched corpus (Wikipedia is CC BY-SA, never committed), cache and outputs
+tools/read-aloud/glitch-hunt/cache/
+tools/read-aloud/glitch-hunt/__pycache__/
+tools/read-aloud/glitch-hunt/corpus.tsv
+tools/read-aloud/glitch-hunt/corpus.txt
+tools/read-aloud/glitch-hunt/wav/
+tools/read-aloud/glitch-hunt/static.jsonl
+tools/read-aloud/glitch-hunt/static.csv
+tools/read-aloud/glitch-hunt/static_summary.json
+tools/read-aloud/glitch-hunt/sample.tsv
+tools/read-aloud/glitch-hunt/transcripts.jsonl
+tools/read-aloud/glitch-hunt/roundtrip.csv
+tools/read-aloud/glitch-hunt/roundtrip_summary.json
+tools/read-aloud/glitch-hunt/current.json
+tools/read-aloud/glitch-hunt/baseline.json

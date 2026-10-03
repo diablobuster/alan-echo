@@ -28,11 +28,15 @@ static YEAR_PREV: [&str; 25] = [
     "till", "until", "winter", "year", "years",
 ];
 /// Words before a number that make it a quantity or a label (never a year). Sorted.
-static CARD_PREV: [&str; 30] = [
-    "about", "almost", "approx", "approximately", "exactly", "flight", "highway", "interstate",
-    "just", "least", "model", "more", "most", "nearly", "no", "nos", "number", "only", "over",
-    "p", "page", "pages", "pp", "rank", "room", "roughly", "route", "some", "than", "total",
+static CARD_PREV: [&str; 38] = [
+    "about", "almost", "approx", "approximately", "apt", "bus", "channel", "exactly", "ext",
+    "flight", "gate", "highway", "interstate", "just", "least", "model", "more", "most",
+    "nearly", "no", "nos", "number", "only", "over", "p", "page", "pages", "pp", "rank",
+    "room", "roughly", "route", "some", "suite", "than", "total", "unit", "version",
 ];
+/// Lowercase words between a number and a count noun that keep it a quantity
+/// ("2050 new jobs"). Sorted.
+static COUNT_ADJ: [&str; 7] = ["additional", "extra", "fewer", "more", "new", "other", "total"];
 /// Unit and count nouns after a number that make it a quantity. Sorted.
 static COUNT_NEXT: [&str; 84] = [
     "acres", "aircraft", "beds", "buildings", "calories", "cars", "cases", "characters",
@@ -253,6 +257,14 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
     let year_hint =
         in_sorted(&YEAR_PREV, &prev) || after_month || after_month_day || range_tail || parens;
     let card_hint = in_sorted(&CARD_PREV, &prev) || prev == "#" || in_sorted(&COUNT_NEXT, &next);
+    // "2050 new jobs": a lowercase adjective, then a count noun. This overrides only the
+    // default year reading, not an explicit cue ("In 2020 new cases rose").
+    let next_raw = words.get(i + 1).map(|w| split_punct(w).1).unwrap_or("");
+    let next2 = words.get(i + 2).map(|w| lc_core(w)).unwrap_or_default();
+    let adj_count = next_raw.chars().next().is_some_and(|c| c.is_lowercase())
+        && in_sorted(&COUNT_ADJ, next_raw)
+        && in_sorted(&COUNT_NEXT, &next2);
+    let card_hint = card_hint || (adj_count && !year_hint);
 
     // The sentence around word i: back to the last terminal, forward through the next one.
     let mut s = i;
@@ -318,7 +330,7 @@ fn currency_prefix(core: &str) -> Option<(&'static Currency, &str)> {
 fn scale_suffix(s: &str) -> Option<&'static str> {
     Some(match s {
         "K" | "k" => "thousand",
-        "M" | "m" | "mn" | "MM" => "million",
+        "M" | "m" | "mn" | "MM" | "mm" => "million",
         "B" | "b" | "bn" | "Bn" | "BN" => "billion",
         "T" | "tn" | "Tn" => "trillion",
         _ => return None,
@@ -734,30 +746,143 @@ fn generic(core: &str) -> String {
 }
 
 /// Spoken text for one word's core (punctuation already split off).
+///
+/// Recursion stays shallow: signs and `%` are stripped in loops here, and the
+/// only re-entry is `dash_number` -> `read_core` on a part that has no dashes.
 fn read_core(core: &str, ctx: &Ctx) -> String {
+    if !has_digit(core) {
+        return core.to_string();
+    }
+    // Sign or comparison prefixes: -5, −5, ±2, ~5, #1. A run of one sign is said once.
+    // Byte positions of the first and last digit: one scan, so the loops stay linear.
+    let first_digit = core.bytes().position(|b| b.is_ascii_digit()).unwrap_or(0);
+    let last_digit = core.bytes().rposition(|b| b.is_ascii_digit()).unwrap_or(0);
+    let mut signs: Vec<&'static str> = Vec::new();
+    let mut start = 0;
+    while let Some(c) = core[start..].chars().next() {
+        let Some(w) = sign_word(c) else { break };
+        let next = start + c.len_utf8();
+        if next > first_digit || core[next..].starts_with(char::is_alphabetic) {
+            break;
+        }
+        if signs.last() != Some(&w) {
+            signs.push(w);
+        }
+        start = next;
+    }
+    // Percent suffixes: 8.6%, 5%% (said once).
+    let mut end = core.len();
+    let mut pct = false;
+    while end > last_digit + 1 && core.as_bytes().get(end - 1) == Some(&b'%') {
+        pct = true;
+        end -= 1;
+    }
+    let rest = &core[start..end];
+    if signs.is_empty() && !pct {
+        return read_body(core, ctx);
+    }
+    let mut out = signs.join(" ");
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(&read_body(rest, &plain()));
+    if pct {
+        out.push_str(" percent");
+    }
+    out
+}
+
+/// Per-unit words after a slash: `$20/hr` -> "per hour".
+fn per_unit(u: &str) -> Option<&'static str> {
+    Some(match u.to_ascii_lowercase().as_str() {
+        "hr" | "hrs" | "h" | "hour" => "hour",
+        "mo" | "mos" | "month" => "month",
+        "yr" | "yrs" | "year" | "annum" => "year",
+        "wk" | "wks" | "week" => "week",
+        "day" | "d" => "day",
+        "share" | "sh" => "share",
+        "unit" => "unit",
+        "person" => "person",
+        "night" => "night",
+        _ => return None,
+    })
+}
+
+/// A currency amount followed by something the plain parse rejects: `$20/hr`,
+/// `$9.99/mo`, `$1.5-trillion`, `$10-a-share`. None for anything else, so
+/// `$5-$10` still reads as a range. Never recurses.
+fn currency_with_tail(cur: &Currency, rest: &str) -> Option<String> {
+    let end = rest
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == ','))
+        .map(|(i, _)| i)?;
+    let (amt, suf) = rest.split_at(end);
+    let (ip, fp) = number_parts(amt)?;
+    let alpha_end = |s: &str| s.find(|c: char| !c.is_alphabetic()).unwrap_or(s.len());
+    // A scale glued (`5mm/yr`) or after a dash (`1.5-trillion`).
+    let mut scale = None;
+    let mut tail = suf;
+    let a = alpha_end(suf);
+    if a > 0 {
+        if let Some(sc) = scale_suffix(&suf[..a]) {
+            scale = Some(sc);
+            tail = &suf[a..];
+        }
+    } else if let Some(d) = suf.chars().next().filter(|c| is_dash(*c)) {
+        let after = &suf[d.len_utf8()..];
+        let a2 = alpha_end(after);
+        if let Some(sc) = scale_word(&after[..a2].to_ascii_lowercase()) {
+            scale = Some(sc);
+            tail = &after[a2..];
+        }
+    }
+    let ok_tail = match tail.chars().next() {
+        None | Some('/') => true,
+        Some(c) if c.is_alphabetic() => true,
+        Some(c) if is_dash(c) => tail[c.len_utf8()..].starts_with(char::is_alphabetic),
+        _ => false,
+    };
+    if !ok_tail {
+        return None;
+    }
+    let money = if tail.starts_with('/') && scale.is_none() {
+        // A rate reads the amount as a plain decimal: "nine point nine nine dollars per month".
+        let name = if ip == "1" && fp.is_empty() { cur.one } else { cur.many };
+        format!("{} {name}", decimal(ip, fp))
+    } else {
+        say_currency(cur, amt, scale)?
+    };
+    if tail.is_empty() {
+        return Some(money);
+    }
+    if let Some(u) = tail.strip_prefix('/') {
+        let unit = per_unit(u).map(str::to_string).unwrap_or_else(|| generic(u));
+        return Some(format!("{money} per {unit}").trim_end().to_string());
+    }
+    // Text after the amount: words kept as they are, digits read.
+    let more = if has_digit(tail) {
+        generic(tail)
+    } else {
+        let w: Vec<&str> = tail.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        w.join(" ")
+    };
+    Some(format!("{money} {more}").trim_end().to_string())
+}
+
+/// `read_core` after the sign and percent handling.
+fn read_body(core: &str, ctx: &Ctx) -> String {
     if !has_digit(core) {
         return core.to_string();
     }
     if let Some(s) = decade(core) {
         return s;
     }
-    // A sign or comparison prefix: -5, −5, ±2, ~5, #1.
-    if let Some(c) = core.chars().next() {
-        if let Some(w) = sign_word(c) {
-            let rest = &core[c.len_utf8()..];
-            if has_digit(rest) && !rest.starts_with(char::is_alphabetic) {
-                return format!("{w} {}", read_core(rest, &plain()));
-            }
-        }
-    }
     if let Some((cur, rest)) = currency_prefix(core) {
         if let Some(s) = amount_and_scale(rest).and_then(|(a, sc)| say_currency(cur, a, sc)) {
             return s;
         }
-    }
-    if let Some(rest) = core.strip_suffix('%') {
-        if has_digit(rest) {
-            return format!("{} percent", read_core(rest, &plain()));
+        if let Some(s) = currency_with_tail(cur, rest) {
+            return s;
         }
     }
     if let Some(p) = strip_ordinal_suffix(core) {
@@ -1293,6 +1418,63 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // ---- review fix round 1 ----
+    #[test]
+    fn many_signs_do_not_overflow_the_stack() {
+        let t = format!("{}5", "-".repeat(50_000));
+        let v = num_spans(&[&t]);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].2.ends_with("five"), "{}", &v[0].2[..40.min(v[0].2.len())]);
+        let t = format!("5{}", "%".repeat(50_000));
+        let v = num_spans(&[&t]);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].2.starts_with("five percent"));
+        let t = format!("{}5", "−±".repeat(25_000));
+        assert_eq!(num_spans(&[&t]).len(), 1);
+        let t = format!("{}5{}-5{}", "+".repeat(30_000), "%".repeat(30_000), "%".repeat(30_000));
+        assert_eq!(num_spans(&[&t]).len(), 1);
+        let t = "$5".repeat(30_000);
+        assert_eq!(num_spans(&[&t]).len(), 1);
+    }
+
+    #[test]
+    fn currency_before_a_slash_or_text() {
+        assert_eq!(one("$20/hr"), "twenty dollars per hour");
+        assert_eq!(one("$9.99/mo"), "nine point nine nine dollars per month");
+        assert_eq!(one("$5mm"), "five million dollars");
+        assert_eq!(one("$1.5-trillion"), "one point five trillion dollars");
+        assert_eq!(one("$1/yr"), "one dollar per year");
+        assert_eq!(one("€30/day"), "thirty euros per day");
+        assert_eq!(one("$4/share"), "four dollars per share");
+        assert_eq!(one("$10-a-share"), "ten dollars a share");
+        // still ranges
+        assert_eq!(one("$5-$10"), "five dollars to ten dollars");
+        // and plain mm is still millimeters
+        assert_eq!(one("5mm"), "five millimeters");
+    }
+
+    #[test]
+    fn adjective_then_count_noun_is_a_quantity() {
+        assert_eq!(at("2050 new jobs", 0), (1, "two thousand fifty".to_string()));
+        assert_eq!(at("1683 new cases", 0), (1, "one thousand six hundred eighty three".to_string()));
+        assert_eq!(at("about 1990 more workers", 1).1, "one thousand nine hundred ninety");
+        // an explicit year cue still wins
+        assert_eq!(at("In 2020 new cases rose", 1), (2, "twenty twenty".to_string()));
+        // an adjective alone is not enough
+        assert_eq!(at("The 2050 new plan", 1), (2, "twenty fifty".to_string()));
+    }
+
+    #[test]
+    fn label_words_make_a_cardinal() {
+        for w in [
+            "suite", "apt", "unit", "gate", "bus", "ext", "flight", "route", "highway",
+            "interstate", "channel", "model", "version",
+        ] {
+            let s = format!("{w} 1500");
+            assert_eq!(at(&s, 1).1, "one thousand five hundred", "{s}");
         }
     }
 

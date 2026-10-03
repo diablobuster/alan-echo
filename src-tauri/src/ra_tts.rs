@@ -26,6 +26,40 @@ const LOAD_WAIT: Duration = Duration::from_secs(60);
 const MAX_IDS: usize = 510;
 const OFFSET_MS: f32 = 36.0;
 const STYLE_DIM: usize = 256;
+/// Prefix of the error for missing model files (the controller shows a fix-it message).
+pub const MISSING: &str = "voice files missing";
+
+/// misaki-rs (espeak-derived dictionaries) writes diphthongs and affricates as two
+/// symbols joined by U+200D; Kokoro's vocab has one symbol for each (misaki's own
+/// notation). Without this, the vocab filter split them into two separate sounds.
+/// All seven targets are in Kokoro's tokenizer.json (A 24, I 25, O 31, W 39, Y 41,
+/// ʤ 82, ʧ 133).
+const JOINED: [(&str, char); 7] = [
+    ("e\u{200D}ɪ", 'A'),
+    ("a\u{200D}ɪ", 'I'),
+    ("o\u{200D}ʊ", 'O'),
+    ("a\u{200D}ʊ", 'W'),
+    ("ɔ\u{200D}ɪ", 'Y'),
+    ("d\u{200D}ʒ", 'ʤ'),
+    ("t\u{200D}ʃ", 'ʧ'),
+];
+
+/// Kokoro's phoneme spelling of a misaki-rs phoneme string: joined pairs mapped to
+/// their single vocab symbol, any other U+200D dropped.
+pub fn kokoro_phonemes(p: &str) -> String {
+    if !p.contains('\u{200D}') {
+        return p.to_string();
+    }
+    let mut s = p.to_string();
+    for (pair, one) in JOINED {
+        if s.contains(pair) {
+            s = s.replace(pair, one.encode_utf8(&mut [0; 4]));
+        }
+    }
+    s.retain(|c| c != '\u{200D}');
+    s
+}
+
 /// Marks a phoneme token (punctuation) that belongs to no word: fed to the model
 /// for prosody, but gets no span.
 const NO_WORD: usize = usize::MAX;
@@ -101,7 +135,18 @@ fn wants_gpu(pref: &str) -> bool {
 /// words fully included. Caps at 510 ids without cutting a word mid-phonemes:
 /// on overflow it stops after the last whole word, except that a first word that
 /// alone overflows is kept truncated (covered = 1) so callers always progress.
+#[cfg_attr(not(test), allow(dead_code))] // the synth path calls build_ids_with
 pub fn build_ids(ph: &[(usize, String, bool)], vocab: &HashMap<char, i64>, n_words: usize) -> (Vec<i64>, Vec<(usize, usize, usize)>, usize) {
+    build_ids_with(ph, vocab, n_words, true)
+}
+
+/// `build_ids`; `map_joined: false` reproduces the old (unmapped) ids for the A/B test.
+fn build_ids_with(
+    ph: &[(usize, String, bool)],
+    vocab: &HashMap<char, i64>,
+    n_words: usize,
+    map_joined: bool,
+) -> (Vec<i64>, Vec<(usize, usize, usize)>, usize) {
     let mut ids: Vec<i64> = Vec::new();
     let mut spans = Vec::new();
     let space = vocab.get(&' ').copied();
@@ -114,7 +159,10 @@ pub fn build_ids(ph: &[(usize, String, bool)], vocab: &HashMap<char, i64>, n_wor
             }
             cur = Some(*w);
         }
-        let tok: Vec<i64> = p.chars().filter_map(|c| vocab.get(&c).copied()).collect();
+        let tok: Vec<i64> = if map_joined { kokoro_phonemes(p) } else { p.clone() }
+            .chars()
+            .filter_map(|c| vocab.get(&c).copied())
+            .collect();
         if ids.len() + tok.len() > MAX_IDS {
             if safe.2 == 0 {
                 // nothing whole yet: keep the truncated first word to guarantee progress
@@ -172,6 +220,15 @@ fn load_vocab(path: &Path) -> Result<HashMap<char, i64>, String> {
         return Err("tokenizer.json: empty vocab".into());
     }
     Ok(vocab)
+}
+
+/// `Err("voice files missing: …")` when a model file is absent.
+fn require(p: &Path) -> Result<(), String> {
+    if p.is_file() {
+        Ok(())
+    } else {
+        Err(format!("{MISSING}: {}", p.display()))
+    }
 }
 
 fn load_voice(path: &Path) -> Result<Vec<f32>, String> {
@@ -325,12 +382,16 @@ impl Engine {
 
     fn load(&self, voice: &str, pref: &str) -> Result<Loaded, String> {
         let f = ra_model::files(&self.data_dir);
+        // the CPU model is the default and the fallback for "gpu": always required
+        for p in [&f.fp32, &f.tokenizer, &f.voices_dir.join("af_heart.bin")] {
+            require(p)?;
+        }
         let vocab = load_vocab(&f.tokenizer)?;
         let voice = load_voice_or_default(&f.voices_dir, voice)?;
         let t = Instant::now();
         // G2P init (lexicon + tagger parse) overlaps the session open
         let g2p_job = std::thread::Builder::new().name("ra-tts-g2p".into()).spawn(|| G2P::new(Language::EnglishUS)).ok();
-        let (session, device) = if wants_gpu(pref) {
+        let (session, device) = if wants_gpu(pref) && f.q8_dml.is_file() {
             match open_session(&f.q8_dml, true) {
                 Ok(s) => (s, Device::Gpu),
                 Err(e) => {
@@ -431,6 +492,10 @@ impl Engine {
     }
 
     fn synth_with(l: &mut Loaded, words: &[&str], rate: f32) -> Result<ChunkAudio, String> {
+        Self::synth_inner(l, words, rate, true)
+    }
+
+    fn synth_inner(l: &mut Loaded, words: &[&str], rate: f32, map_joined: bool) -> Result<ChunkAudio, String> {
         let device = l.device;
         let rate = effective_rate(rate);
         let empty = || ChunkAudio { pcm: Vec::new(), words: Vec::new(), device, covered: words.len() };
@@ -448,7 +513,7 @@ impl Engine {
             .zip(owner.iter())
             .filter_map(|(t, o)| Some((o.unwrap_or(NO_WORD), t.phonemes.clone()?, !t.whitespace.is_empty())))
             .collect();
-        let (ids, spans, covered) = build_ids(&ph, &l.vocab, words.len());
+        let (ids, spans, covered) = build_ids_with(&ph, &l.vocab, words.len(), map_joined);
         let covered = covered.min(words.len());
         if ids.is_empty() {
             return Ok(empty());
@@ -556,6 +621,46 @@ mod tests {
     }
 
     #[test]
+    fn joined_diphthongs_map_to_kokoro_symbols() {
+        for (src, want) in [
+            ("e\u{200D}ɪ", "A"),
+            ("a\u{200D}ɪ", "I"),
+            ("o\u{200D}ʊ", "O"),
+            ("a\u{200D}ʊ", "W"),
+            ("ɔ\u{200D}ɪ", "Y"),
+            ("d\u{200D}ʒ", "ʤ"),
+            ("t\u{200D}ʃ", "ʧ"),
+        ] {
+            assert_eq!(kokoro_phonemes(src), want, "{src:?}");
+        }
+        // whole words as misaki-rs spells them
+        assert_eq!(kokoro_phonemes("hˈo\u{200D}ʊm"), "hˈOm"); // home
+        assert_eq!(kokoro_phonemes("d\u{200D}ʒˈʌd\u{200D}ʒ"), "ʤˈʌʤ"); // judge
+        assert_eq!(kokoro_phonemes("t\u{200D}ʃˈɜːt\u{200D}ʃ"), "ʧˈɜːʧ"); // church
+        // other joined pairs: the joiner is just dropped
+        assert_eq!(kokoro_phonemes("kˈɑː\u{200D}ɹ"), "kˈɑːɹ");
+        assert_eq!(kokoro_phonemes("i\u{200D}ə"), "iə");
+        assert_eq!(kokoro_phonemes("plain"), "plain");
+    }
+
+    #[test]
+    fn build_ids_uses_one_id_per_diphthong() {
+        let v: HashMap<char, i64> = [('h', 1), ('O', 31), ('m', 3), ('o', 4), ('ʊ', 5)].into_iter().collect();
+        let (ids, spans, _) = build_ids(&[(0, "ho\u{200D}ʊm".into(), false)], &v, 1);
+        assert_eq!(ids, vec![1, 31, 3]);
+        assert_eq!(spans, vec![(0, 0, 3)]);
+        let (old, _, _) = build_ids_with(&[(0, "ho\u{200D}ʊm".into(), false)], &v, 1, false);
+        assert_eq!(old, vec![1, 4, 5, 3], "the old path split it in two");
+    }
+
+    #[test]
+    fn missing_model_files_report_the_fix_it_error() {
+        let e = Engine::new(std::env::temp_dir().join(format!("ra-tts-missing2-{}", std::process::id())));
+        let err = e.synth(&["hi"], 1.0).err().expect("must fail");
+        assert!(err.starts_with(MISSING), "{err}");
+    }
+
+    #[test]
     fn reset_to_cpu_is_noop_while_cpu_load_in_flight() {
         let e = Engine::new(std::env::temp_dir().join("ra-tts-none"));
         *e.slot.lock() = Slot::Loading { cpu: true };
@@ -621,7 +726,11 @@ mod tests {
     }
 
     fn write_wav(pcm: &[f32]) -> PathBuf {
-        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("ra_tts_sample.wav");
+        write_wav_as(pcm, "ra_tts_sample.wav")
+    }
+
+    fn write_wav_as(pcm: &[f32], name: &str) -> PathBuf {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(name);
         let spec = hound::WavSpec { channels: 1, sample_rate: ra_timing::SR, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
         let mut w = hound::WavWriter::create(&p, spec).unwrap();
         for s in pcm {
@@ -688,6 +797,33 @@ mod tests {
             println!("HOLD");
             std::thread::sleep(Duration::from_secs(3));
         }
+    }
+
+    /// I-5 A/B: the same passage without and with the U+200D diphthong mapping (CPU, 2.2x).
+    /// cargo test ra_tts::tests::joiner_ab_real -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn joiner_ab_real() {
+        let e = Engine::new(dirs::data_dir().unwrap().join("ALAN Echo"));
+        e.preload("af_heart", "cpu");
+        let text = "I go home at night. How do you say the time?";
+        let words: Vec<&str> = text.split(' ').collect();
+        let eng = e.acquire().expect("engine");
+        let mut l = eng.lock();
+        assert_eq!(l.device, Device::Cpu);
+        let (_, toks) = l.g2p.g2p(text).unwrap();
+        for t in &toks {
+            if let Some(p) = &t.phonemes {
+                println!("{:>6} {:?} -> {:?}", t.text, p, kokoro_phonemes(p));
+            }
+        }
+        let before = Engine::synth_inner(&mut l, &words, 2.2, false).unwrap();
+        let after = Engine::synth_inner(&mut l, &words, 2.2, true).unwrap();
+        println!("before: {} samples, {} words timed", before.pcm.len(), before.words.len());
+        println!("after:  {} samples, {} words timed", after.pcm.len(), after.words.len());
+        println!("wav before: {}", write_wav_as(&before.pcm, "ra_ab_before.wav").display());
+        println!("wav after:  {}", write_wav_as(&after.pcm, "ra_ab_after.wav").display());
+        assert_eq!(after.words.len(), words.len());
     }
 
     /// GPU load, then the DML-error recovery path: reset_to_cpu, next synth waits and runs on CPU.

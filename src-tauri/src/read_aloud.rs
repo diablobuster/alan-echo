@@ -2318,6 +2318,7 @@ mod session_tests {
                 text: if (i + 1) % every == 0 { format!("w{i}.") } else { format!("w{i}") },
                 src: vec![i],
                 para_break_before: false,
+                brk: Default::default(),
             })
             .collect()
     }

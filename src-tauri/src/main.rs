@@ -23,6 +23,7 @@ mod trial;
 mod updater;
 mod whisper;
 #[cfg(target_os = "windows")]
+mod ra_struct;
 mod ra_text;
 #[cfg(target_os = "windows")]
 mod ra_model;

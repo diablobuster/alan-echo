@@ -2,11 +2,16 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
+use crate::ra_struct::{self, Brk};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Word {
     pub text: String,
     pub src: Vec<usize>,
     pub para_break_before: bool,
+    /// The structural boundary before this word (natural-reading spec §1): a source
+    /// marker, else `Paragraph` at a line break, else `None`.
+    pub brk: Brk,
 }
 
 fn is_dash(s: &str) -> bool {
@@ -17,13 +22,31 @@ fn has_alnum(s: &str) -> bool {
     s.chars().any(|c| c.is_alphanumeric())
 }
 
-pub fn normalize(raw: &[String]) -> Vec<Word> {
+pub fn normalize(raw_in: &[String]) -> Vec<Word> {
+    // in-band structure markers (`ra_struct::mark`): stripped here, kept per token
+    let mut marks: Vec<Option<Brk>> = Vec::with_capacity(raw_in.len());
+    let raw: Vec<String> = raw_in
+        .iter()
+        .map(|t| {
+            let (b, rest) = ra_struct::strip_mark(t);
+            marks.push(b);
+            rest.to_string()
+        })
+        .collect();
+    let raw = &raw[..];
     let mut out: Vec<Word> = Vec::new();
     let mut pending_para = false;
     // true when the previous raw token ended without whitespace (glued to the next)
     let mut prev_glued = false;
+    // a source marker waiting for the next word (a marked token never glues on)
+    let mut pending_mark: Option<Brk> = None;
     let mut i = 0;
     while i < raw.len() {
+        if let Some(b) = marks[i] {
+            pending_mark = Some(b);
+            pending_para = true;
+            prev_glued = false;
+        }
         let tok = &raw[i];
         let breaks = tok.contains('\r') || tok.contains('\n');
         let t = tok.trim();
@@ -68,7 +91,7 @@ pub fn normalize(raw: &[String]) -> Vec<Word> {
         }
         // a currency or number sign after a space starts its own word (`cost $` `3`)
         if !prev_glued && is_prefix_symbol(t) {
-            out.push(Word { text: t.to_string(), src: vec![i], para_break_before: pending_para && !out.is_empty() });
+            out.push(Word { text: t.to_string(), src: vec![i], para_break_before: pending_para && !out.is_empty(), brk: brk_before(&mut pending_mark, pending_para && !out.is_empty()) });
             pending_para = breaks;
             prev_glued = glued;
             i += 1;
@@ -94,12 +117,18 @@ pub fn normalize(raw: &[String]) -> Vec<Word> {
                 continue;
             }
         }
-        out.push(Word { text: t.to_string(), src: vec![i], para_break_before: pending_para && !out.is_empty() });
+        out.push(Word { text: t.to_string(), src: vec![i], para_break_before: pending_para && !out.is_empty(), brk: brk_before(&mut pending_mark, pending_para && !out.is_empty()) });
         pending_para = breaks;
         prev_glued = glued;
         i += 1;
     }
     out
+}
+
+/// `Word::brk` for a new word: the source's marker, else `Paragraph` after a line
+/// break, else `None`.
+fn brk_before(pending_mark: &mut Option<Brk>, para: bool) -> Brk {
+    pending_mark.take().unwrap_or(if para { Brk::Paragraph } else { Brk::None })
 }
 
 fn breaks_before(raw: &[String], i: usize) -> bool {
@@ -507,6 +536,37 @@ fn caps_part<'a>(w: &'a str, known: &dyn Fn(&str) -> bool, names_knows: &dyn Fn(
 mod tests {
     use super::*;
 
+    #[test]
+    fn source_markers_set_brk_and_never_glue() {
+        let h = |b: Brk, t: &str| format!("{}{t}", ra_struct::mark(b));
+        let raw: Vec<String> = vec![
+            h(Brk::Heading(2), "Key "),
+            "Takeaways".into(), // no trailing space: glued to the next token
+            h(Brk::AfterHeading, "The "),
+            "company ".into(),
+            "grew.
+".into(),
+            "Then ".into(),
+            h(Brk::ListItem, ""),
+            "Apples".into(),
+        ];
+        let w = normalize(&raw);
+        let got: Vec<(&str, Brk, bool)> = w.iter().map(|w| (w.text.as_str(), w.brk, w.para_break_before)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Key", Brk::Heading(2), false),
+                ("Takeaways", Brk::None, false),
+                ("The", Brk::AfterHeading, true),
+                ("company", Brk::None, false),
+                ("grew.", Brk::None, false),
+                ("Then", Brk::Paragraph, true),
+                ("Apples", Brk::ListItem, true),
+            ]
+        );
+        assert_eq!(w[6].src, vec![7], "the empty marked token is not a word; the marker carries on");
+    }
+
     fn known(w: &str) -> bool {
         ["the", "and", "on", "for", "talks", "president", "us", "it", "who", "am", "pm", "ok", "id", "mid", "year", "NATO"]
             .contains(&w)
@@ -694,7 +754,7 @@ mod tests {
     }
 
     fn words(s: &str) -> Vec<Word> {
-        s.split(' ').enumerate().map(|(i, t)| Word { text: t.into(), src: vec![i], para_break_before: false }).collect()
+        s.split(' ').enumerate().map(|(i, t)| Word { text: t.into(), src: vec![i], para_break_before: false, brk: Brk::None }).collect()
     }
 
     #[test]

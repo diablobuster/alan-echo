@@ -350,7 +350,7 @@ struct Render {
 /// from the `Job` here.
 fn synth(e: &Arc<Engine>, ctl: u64, j: &Job) -> Result<ChunkAudio, String> {
     let words: Vec<&str> = j.words.iter().map(String::as_str).collect();
-    e.synth_job(&words, j.rate, j.pause_after_ms, ctl, j.gen)
+    e.synth_job(&words, j.rate, j.pause_after_ms, &j.inner_pauses, ctl, j.gen)
 }
 
 /// Reads `words` start to end through the real `Session` (`set_rate`, `start`,

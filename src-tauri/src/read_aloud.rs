@@ -15,6 +15,7 @@
 use crate::{
     ra_follow::{anchor_of, Decision, Guard},
     ra_hook::{ClickTracker, MouseEv, PickHook, WatchHook},
+    ra_pause,
     ra_player::Player,
     ra_text::{self, Word},
     ra_tts::{self, ChunkAudio, Device, Engine},
@@ -177,11 +178,14 @@ const REFILL_AT: usize = 150;
 const PUSH_PIECE: usize = 4800;
 
 /// One chunk to synthesize. `gen` lets the synth worker skip jobs made stale by a jump.
+/// `words` are the spoken forms (`ra_pause::speak_form`); `pause_after_ms` is the
+/// whole silence after the chunk (`ra_pause::after_ms`).
 pub struct Job {
     pub gen: u64,
     pub idx: usize,
     pub words: Vec<String>,
     pub rate: f32,
+    pub pause_after_ms: f32,
 }
 
 pub struct Session {
@@ -341,10 +345,23 @@ impl Session {
         self.chunk_ends.iter().rev().take_while(|&&e| e > pos).count()
     }
 
+    /// The job for chunk `idx`: each word in its spoken form before the next word's
+    /// boundary (the last word before the next chunk's first word, when there is one),
+    /// and the pause after the chunk from that boundary.
     fn job(&self, idx: usize, rate: f32) -> Option<Job> {
         let r = self.chunks.get(idx)?.clone();
-        let words = self.words.get(r)?.iter().map(|w| w.text.clone()).collect();
-        Some(Job { gen: self.gen(), idx, words, rate })
+        let ws = self.words.get(r)?;
+        let next = self.chunks.get(idx + 1).and_then(|c| self.words.get(c.start)).map(|w| w.brk);
+        let words = ws
+            .iter()
+            .enumerate()
+            .map(|(i, w)| match ws.get(i + 1).map(|n| n.brk).or(next) {
+                Some(b) => ra_pause::speak_form(&w.text, b).into_owned(),
+                None => w.text.clone(),
+            })
+            .collect();
+        let pause_after_ms = ra_pause::after_ms(ws.last().map_or("", |w| w.text.as_str()), next, rate);
+        Some(Job { gen: self.gen(), idx, words, rate, pause_after_ms })
     }
 
     /// Words in the chunks past the playhead (pushed-unplayed, pending, in flight).
@@ -514,7 +531,7 @@ pub fn spawn_synth(engine: Arc<Engine>, ctl: u64, gen: Arc<AtomicU64>, out: mpsc
                     continue;
                 }
                 let words: Vec<&str> = job.words.iter().map(String::as_str).collect();
-                let r = engine.synth_job(&words, job.rate, ctl, job.gen);
+                let r = engine.synth_job(&words, job.rate, job.pause_after_ms, ctl, job.gen);
                 if out.send(Msg::Chunk(job.gen, job.idx, r)).is_err() {
                     break;
                 }
@@ -2344,6 +2361,39 @@ mod session_tests {
             s.chunks = ra_text::chunk(&s.words, FIRST_MAX, CHUNK_MAX);
         }
         s
+    }
+
+    /// Spec §2: a job speaks each word in its boundary form (a heading's last word gets
+    /// a "." from the next chunk's first word) and carries the pause after its chunk.
+    #[test]
+    fn job_speaks_boundary_forms_and_carries_the_pause_after() {
+        use crate::ra_pause::{after_ms, pause_ms};
+        use crate::ra_struct::Brk;
+        let mk = |t: &str, brk| Word { text: t.into(), src: vec![0], para_break_before: false, brk };
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.words = vec![
+            mk("Key", Brk::Heading(2)),
+            mk("Takeaways", Brk::None),
+            mk("Prices", Brk::AfterHeading),
+            mk("grew.", Brk::None),
+            mk("fast", Brk::None),
+            mk("Price", Brk::Paragraph),
+            mk("$4", Brk::TableCell),
+            mk("one", Brk::None),
+        ];
+        s.chunks = vec![0..2, 2..5, 5..8];
+        let j0 = s.job(0, 2.2).expect("job 0");
+        assert_eq!(j0.words, ["Key", "Takeaways."], "the heading ends falling");
+        assert_eq!(j0.pause_after_ms, after_ms("Takeaways", Some(Brk::AfterHeading), 2.2));
+        assert_eq!(j0.pause_after_ms, pause_ms(Brk::AfterHeading, 2.2));
+        let j1 = s.job(1, 2.2).expect("job 1");
+        assert_eq!(j1.words, ["Prices", "grew.", "fast."]);
+        assert_eq!(j1.pause_after_ms, pause_ms(Brk::Paragraph, 2.2));
+        let j2 = s.job(2, 2.2).expect("job 2");
+        assert_eq!(j2.words, ["Price,", "$4", "one"], "a cell before a cell, last word as is");
+        assert_eq!(j2.pause_after_ms, after_ms("one", None, 2.2), "no next word yet: a sentence pause");
+        assert_eq!(s.words[1].text, "Takeaways", "Word::text is never changed");
+        assert!(s.job(3, 2.2).is_none());
     }
 
     #[test]

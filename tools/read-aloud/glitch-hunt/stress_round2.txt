@@ -1,0 +1,702 @@
+# Self-written round-2 sentences (source<TAB>text). Ours; safe to commit.
+# Regenerate with gen_stress_round2.py.
+own:finance	Shares of Nvidia (NASDAQ: NVDA) rose 4.2% to $128.40 in premarket trading.
+own:finance	Apple (NASDAQ:AAPL) slipped 1.1% after the report.
+own:finance	JPMorgan Chase & Co. (NYSE: JPM) reported Q3 EPS of $4.37, beating estimates by $0.12.
+own:finance	The S&P 500 closed up 0.8% at 5,712.44, while the Nasdaq Composite gained 1.3%.
+own:finance	The 10-year Treasury yield fell 7 bps to 4.12%.
+own:finance	The Fed cut rates by 50 bps, bringing the target range to 4.75%-5.00%.
+own:finance	Core PCE rose 0.3% M/M and 2.7% Y/Y in August.
+own:finance	Revenue grew 12% Y/Y and 3% Q/Q to $26.0B.
+own:finance	Gross margin expanded 140 bps to 46.3%.
+own:finance	Operating margin fell 2.1 pp to 18.4%.
+own:finance	The company raised its FY25 guidance to $3.10-$3.20 per share.
+own:finance	1H24 revenue came in at $412M, up 9% from 1H23.
+own:finance	Adjusted EBITDA was $1.2bn, a margin of 22%.
+own:finance	The stock trades at 25x forward earnings, versus 18x for the sector.
+own:finance	Bitcoin jumped 6% to $67,250, its highest level since July.
+own:finance	Ether (ETH) fell 3.4% to $2,410 while Solana (SOL) rose 2%.
+own:finance	Tesla shares are up 10x since 2019.
+own:finance	Netflix added 5.1M paid subscribers in Q2, beating the 4.1M consensus.
+own:finance	Microsoft beat by $0.03 on EPS and guided Azure growth to 28%-29% in constant currency.
+own:finance	Brent crude settled at $79.40 a barrel, down $1.12, or 1.4%.
+own:finance	Gold hit a record $2,685/oz on Friday.
+own:finance	The dollar index (DXY) slipped 0.3% to 100.9.
+own:finance	Initial jobless claims fell by 12,000 to 218,000 in the week ended Sept. 28.
+own:finance	Nonfarm payrolls rose by 254K in September, well above the 150K forecast.
+own:finance	The unemployment rate ticked down to 4.1% from 4.2%.
+own:finance	CPI rose 2.4% Y/Y, the smallest gain since Feb. 2021.
+own:finance	Mortgage rates averaged 6.08% for a 30-year fixed loan, per Freddie Mac.
+own:finance	The 2s10s spread turned positive at +5 bps.
+own:finance	Fed funds futures price a 92% chance of a 25 bp cut in November.
+own:finance	Q3 GDP grew at a 2.8% annualized rate (SAAR).
+own:finance	The ECB lowered its deposit rate by 25 bps to 3.25%.
+own:finance	The yen weakened past ¥150 per dollar.
+own:finance	Berkshire Hathaway's cash pile hit a record $325.2 billion.
+own:finance	Palantir (PLTR) surged 8% after it was added to the S&P 500.
+own:finance	Shares fell -3.2% after hours.
+own:finance	Guidance implies +/-2% growth next quarter.
+own:finance	The stock has a P/E of 32 and a P/S of 9.8.
+own:finance	Free cash flow (FCF) was $4.6B, up 21% YoY.
+own:finance	ROE improved to 17.2% from 15.9% a year ago.
+own:finance	The REIT yields 5.4% and trades at 0.9x book value.
+own:finance	Q4 FY2024 revenue was $35.1 billion, up 94% from a year ago.
+own:finance	The bank's CET1 ratio was 15.3%.
+own:finance	AUM rose to $11.5 trillion at Sept. 30.
+own:finance	Coinbase (COIN) shares gained 5.5% as BTC topped $70K.
+own:finance	The ETF saw $1.2B of net inflows in Q3.
+own:finance	It's the stock's best day since Mar. 2020.
+own:finance	Analysts at Goldman Sachs raised their price target to $150 from $135.
+own:finance	The deal values the company at roughly $14.1B, or $35 per share in cash.
+own:finance	Short interest stands at 3.1% of the float.
+own:finance	The yield on the 2-year note rose 4 basis points to 3.64%.
+own:earnings_call	Thank you, operator, and good afternoon, everyone.
+own:earnings_call	Revenue for the quarter was $94.9 billion, up 6% year over year.
+own:earnings_call	Services revenue reached an all-time high of $24.2 billion.
+own:earnings_call	We expect Q1 revenue of $37.5 billion, plus or minus 2%.
+own:earnings_call	GAAP gross margin is expected to be 73.0%, plus or minus 50 basis points.
+own:earnings_call	Opex was up 14% Q/Q, driven by compute and infrastructure.
+own:earnings_call	We returned $29 billion to shareholders, including $3.9B in dividends.
+own:earnings_call	Our board approved an additional $110 billion buyback.
+own:earnings_call	Diluted EPS was $1.64, up 12% Y/Y.
+own:earnings_call	Data center revenue was $30.8B, up 112% Y/Y and 17% Q/Q.
+own:earnings_call	Let me now turn the call over to Colette.
+own:earnings_call	Next question, please.
+own:earnings_call	As a reminder, today's call is being recorded.
+own:earnings_call	We're seeing strong demand for Blackwell, and supply is ramping through 1H25.
+own:earnings_call	On a constant-currency basis, revenue grew 9%.
+own:earnings_call	Capex for the year will be roughly $60B-$65B.
+own:earnings_call	Our installed base of active devices passed 2.2 billion.
+own:earnings_call	Average revenue per user (ARPU) rose 7% to $11.82.
+own:earnings_call	We exited the quarter with $67.1B in cash and marketable securities.
+own:earnings_call	Net retention was 115%, and RPO grew 28% to $41.1B.
+own:tech	OpenAI released GPT-4o mini, which costs $0.15 per 1M input tokens.
+own:tech	Anthropic's Claude 3.5 Sonnet scored 49% on SWE-bench Verified.
+own:tech	Apple shipped iOS 18.1 with Apple Intelligence on Monday.
+own:tech	The RTX 4090 draws up to 450W and costs $1,599.
+own:tech	Nvidia's H100 and B200 GPUs are sold out through 2025.
+own:tech	Meta's Llama 3.1 405B was trained on 15T tokens.
+own:tech	Google's Gemini 1.5 Pro has a 2M-token context window.
+own:tech	Windows 11 24H2 rolls out to all users this month.
+own:tech	The M4 Max has a 16-core CPU and a 40-core GPU.
+own:tech	Samsung's Galaxy S24 Ultra has a 6.8-inch display and a 200MP camera.
+own:tech	AMD's Ryzen 9 9950X boosts to 5.7GHz.
+own:tech	Download the beta at https://example.com/beta (about 2.3 GB).
+own:tech	Read the full post (https://blog.example.org/2024/ai-update) for details.
+own:tech	The patch fixes CVE-2024-3094 in xz 5.6.1.
+own:tech	macOS Sequoia 15.1 adds iPhone mirroring.
+own:tech	Python 3.13 removes the GIL as an option (PEP 703).
+own:tech	Rust 1.82 was released on Oct. 17.
+own:tech	The Pixel 9 Pro XL starts at $1,099.
+own:tech	Wi-Fi 7 routers offer up to 46 Gbps.
+own:tech	The Vision Pro costs $3,499 in the U.S.
+own:tech	Tesla's FSD v12.5 is rolling out to HW3 cars.
+own:tech	Microsoft's Copilot+ PCs need a 40+ TOPS NPU.
+own:tech	Intel's 18A process enters volume production in 2H25.
+own:tech	TSMC's N2 node is slated for 2025, with A16 to follow in 2026.
+own:tech	The Switch 2 has a 7.9-inch LCD screen.
+own:tech	ChatGPT now has 200M weekly active users, per OpenAI.
+own:tech	The app hit #1 on the App Store in 12 countries.
+own:tech	PS5 Pro launches Nov. 7 for $699.99.
+own:tech	Starlink now serves 4M+ customers in 100 countries.
+own:tech	Llama-3-70B-Instruct runs at ~30 tokens/s on a single A100.
+own:crypto	BTC/USD broke above $64,000 overnight.
+own:crypto	ETH/BTC fell to 0.039, its lowest since 2021.
+own:crypto	Spot bitcoin ETFs saw $556M in inflows on Monday.
+own:crypto	The SEC approved 11 spot bitcoin ETFs in Jan. 2024.
+own:crypto	Solana's TVL climbed to $6.2B.
+own:crypto	USDC's market cap passed $35B.
+own:crypto	Dogecoin (DOGE) jumped 12% in 24h.
+own:crypto	The halving cut the block reward to 3.125 BTC.
+own:crypto	Gas fees on Ethereum fell below 2 gwei.
+own:crypto	MicroStrategy (MSTR) now holds 252,220 BTC.
+own:politics	The Senate passed the bill 68-32 on Tuesday.
+own:politics	The House voted 218-214 to advance the measure.
+own:politics	Sen. Elizabeth Warren (D-Mass.) called the deal a giveaway.
+own:politics	Rep. Jim Jordan (R-OH) chairs the Judiciary Committee.
+own:politics	The case is Loper Bright Enterprises v. Raimondo, 603 U.S. 369 (2024).
+own:politics	Section 230 of the Communications Decency Act, 47 U.S.C. § 230, is at issue.
+own:politics	The rule is codified at 17 C.F.R. § 240.10b-5.
+own:politics	The court cited Fed. R. Civ. P. 12(b)(6).
+own:politics	H.R. 4366 passed by a vote of 286-134.
+own:politics	S. 2226, the NDAA for FY2024, authorizes $886 billion.
+own:politics	The ruling was 6-3, with Justice Kagan writing the dissent.
+own:politics	Polls show Harris at 48% and Trump at 46%, within the ±3.1-point margin of error.
+own:politics	Turnout was 66.6%, the highest since 1900.
+own:politics	Gov. Josh Shapiro (D) signed the budget on July 11.
+own:politics	The CBO projects a $1.9 trillion deficit for FY2024.
+own:politics	The debt ceiling was suspended until Jan. 1, 2025.
+own:politics	Under 26 U.S.C. § 401(k), employees may defer up to $23,000 in 2024.
+own:politics	The 14th Amendment, Section 3, was the core of the case.
+own:politics	Trump v. United States, 603 U.S. 593 (2024), addressed immunity.
+own:politics	The EU's AI Act enters into force Aug. 1, 2024.
+own:sports	The Dodgers beat the Yankees 7-6 in Game 1.
+own:sports	Ohtani went 2-for-4 with a homer and 3 RBIs.
+own:sports	Arsenal W 3-1 vs. Spurs; Chelsea D 1-1 at Villa.
+own:sports	The Chiefs improved to 5-0 with a 26-13 win.
+own:sports	Jokic finished with 32 points, 14 rebounds and 9 assists.
+own:sports	Messi scored in the 87th minute to make it 2-1.
+own:sports	Sinner won 6-3, 6-4, 7-6 (7-4).
+own:sports	The Lakers are 3-1 ATS this season.
+own:sports	He's batting .312 with a .945 OPS.
+own:sports	Mahomes was 24/36 for 291 yds, 2 TD, 1 INT.
+own:sports	The Celtics won 108-102 in OT.
+own:sports	McIlroy shot a 5-under 67 to lead by two.
+own:sports	Verstappen took P1 by 0.214s ahead of Norris.
+own:sports	The Yankees lead the series 3-2.
+own:sports	Final: Bills 31, Jets 20.
+own:weather	Lows tonight near -5°F with wind chills of -25°F.
+own:weather	Highs in the mid-80s; 40% chance of storms after 2 p.m.
+own:weather	Winds NW 15-25 mph, gusting to 40 mph.
+own:weather	Expect 6-10 in. of snow above 5,000 ft.
+own:weather	Hurricane Milton is a Cat. 5 storm with 180 mph winds.
+own:weather	The pressure dropped to 897 mb.
+own:weather	Today: sunny, high 72°F (22°C).
+own:weather	A Flood Watch is in effect until 8 PM EDT.
+own:weather	UV index: 9 (very high).
+own:weather	Rainfall totals of 1-3" are likely, with locally 5".
+own:weather	Temperatures will fall 20-30 degrees behind the front.
+own:weather	The heat index could reach 110°.
+own:recipes	Whisk 1 ½ cups flour with ¾ tsp baking soda.
+own:recipes	Add 2 1/4 cups sugar and 1/2 cup butter, softened.
+own:recipes	Bake at 350°F (175°C) for 25-30 min.
+own:recipes	Season with 1 tbsp. kosher salt and ½ tsp. pepper.
+own:recipes	You'll need 3 large eggs, room temp.
+own:recipes	Simmer for 10-12 minutes, stirring occasionally.
+own:recipes	Makes 12 servings; 240 kcal per serving.
+own:recipes	Chill the dough for 1 hr. (or overnight).
+own:recipes	Use a 9x13-inch pan, lightly greased.
+own:recipes	Stir in 1/3 c. milk and 2 Tbsp honey.
+own:recipes	Preheat the oven to 425 degrees F.
+own:recipes	Cut into 1/2-inch cubes.
+own:recipes	Add 1 (14.5 oz) can diced tomatoes.
+own:recipes	Roast 45 min–1 hr, until golden.
+own:recipes	Total time: 1 hr 15 min.
+own:punct	The market—already shaky—fell another 2%.
+own:punct	It's not a bubble — it's a mania, he said.
+own:punct	"We're not done," Powell said, "but we're close."
+own:punct	'Buy the dip' isn't a strategy; it's a slogan.
+own:punct	Key points: • Revenue up 12% • Margins flat • Guidance raised
+own:punct	Highlights: - Revenue: $4.2B - EPS: $1.12
+own:punct	1) Rates; 2) earnings; 3) the election.
+own:punct	The CEO's comments — and the CFO's silence — rattled investors.
+own:punct	Q: What's next? A: More cuts.
+own:punct	Sources say the deal is "days away."
+own:punct	The firm's 2024 outlook ... is cautious.
+own:punct	Note: All figures are in USD unless stated otherwise.
+own:punct	(Reporting by Jane Doe; Editing by John Smith)
+own:punct	Updated 9:41 a.m. ET
+own:punct	The call starts at 4:30 p.m. ET / 1:30 p.m. PT.
+own:punct	Markets open at 9:30 am EST and close at 4 pm EST.
+own:punct	The meeting is at 14:00 UTC (10:00 EDT).
+own:punct	Tokyo opens at 9:00 JST.
+own:punct	The figures (see Table 2) are preliminary.
+own:punct	Apple's—and Google's—app stores face new rules.
+own:sports	Yankees L 7-6
+own:fractions	About 3/4 of analysts agreed.
+own:cities	Atlanta, GA (AP) — Officials said Tuesday the vote will go ahead.
+own:ticker	Costco (NASDAQ:COST) reports after the bell.
+own:uk_dates	The deadline is 25/12.
+own:earnings	Volume was 1.5x the 30-day average.
+own:ticker	Disney ($DIS) hit a 52-week high.
+own:ticker	Broadcom (NASDAQ:AVGO) reports after the bell.
+own:ticker	$F is up 2.5% premarket.
+own:cities	Detroit, MI (AP) — Officials said Tuesday the vote will go ahead.
+own:weather	Rain totals 1-2 in. by 7 a.m..
+own:earnings	Volume was 3x the 30-day average.
+own:uk_dates	The deadline is 31/10.
+own:versions	RTX 4090 beats GB200 on most benchmarks.
+own:cities	The plant in Portland, OR, employs 450 people.
+own:recipes	Add 1/3 teaspoons milk.
+own:weather	Low 3°F, high 27°F.
+own:fractions	About 7/8 of analysts agreed.
+own:cities	Boise, ID (AP) — Officials said Tuesday the vote will go ahead.
+own:earnings	EBITDA came in at $15K, up 27% YoY.
+own:cities	Nashville, TN (AP) — Officials said Tuesday the vote will go ahead.
+own:versions	Benchmarks put the Claude 3 Opus 18.3% ahead of the Mistral 7B.
+own:recipes	Bake 20-25 min at 350°F.
+own:cities	The plant in Honolulu, HI, employs 3000 people.
+own:ticker	Visa ($V) hit a 52-week high.
+own:earnings	Share of revenue rose 0.5 pp to 18.3%.
+own:earnings	FY24 sales were $118.50.
+own:cities	Austin, TX (AP) — Officials said Tuesday the vote will go ahead.
+own:cities	The plant in Portland, OR, employs 3000 people.
+own:fractions	Use a 1/4 inch socket.
+own:cities	Portland, OR (AP) — Officials said Tuesday the vote will go ahead.
+own:recipes	Add 1 ½ tbsp milk.
+own:recipes	Add ½ cups sugar.
+own:fractions	About 7/8 of the S&P 500 agreed.
+own:sports	The Eagles won 29-11 to move to 3-1.
+own:weather	Rain totals 2-4 in. by Tuesday.
+own:earnings	Share of revenue rose 0.5 pp to 3.8%.
+own:sports	Mets L 1-2
+own:recipes	Add 1 ½ cup salt.
+own:recipes	Add ½ oz milk.
+own:uk_dates	The deadline is 13/7.
+own:fractions	About 1/5 of voters agreed.
+own:cities	The plant in Raleigh, NC, employs 1200 people.
+own:recipes	Add ¼ teaspoons salt.
+own:sports	The Lions won 33-15 to move to 5-2.
+own:weather	Low 18°F, high 14°F.
+own:recipes	Bake 12 min at 375°F.
+own:fractions	About 2/3 of the S&P 500 agreed.
+own:cities	Raleigh, NC (AP) — Officials said Tuesday the vote will go ahead.
+own:versions	Benchmarks put the M3 Pro 1.2% ahead of the Pixel 9.
+own:earnings	FY24 sales were $1.2B.
+own:ticker	$AVGO is up 1.2% premarket.
+own:cities	Columbus, OH (AP) — Officials said Tuesday the vote will go ahead.
+own:recipes	Add 1/3 cup milk.
+own:versions	Benchmarks put the Claude 3.5 Sonnet 2.5% ahead of the H100.
+own:recipes	Bake 35-40 min at 350°F.
+own:versions	Claude Opus 4.1 beats DeepSeek-V3 on most benchmarks.
+own:versions	Benchmarks put the macOS 14.5 27% ahead of the macOS 14.5.
+own:ticker	Shares of Costco (NASDAQ: COST) rose 12% on Monday.
+own:versions	The update brings Claude 3.5 Sonnet support to Mistral 7B devices.
+own:cities	The plant in Denver, CO, employs 1200 people.
+own:cities	Seattle, WA (AP) — Officials said Tuesday the vote will go ahead.
+own:weather	Snow totals 1-2 in. by noon.
+own:sports	Soto went 2-for-4 with 3 RBIs.
+own:ticker	Coca-Cola ($KO) hit a 52-week high.
+own:versions	RTX 4090 beats Xbox Series X on most benchmarks.
+own:recipes	Add 1 ½ tsp salt.
+own:recipes	Bake 20-25 min at 375°F.
+own:ticker	$INTC is up 2.5% premarket.
+own:ticker	Super Micro ($SMCI) hit a 52-week high.
+own:versions	The update brings Grok 2 support to iPhone 16 Pro Max devices.
+own:earnings	Volume was 2x the 30-day average.
+own:weather	Rain totals 1-2 in. by Tuesday.
+own:versions	Benchmarks put the o3-mini 27% ahead of the Claude Opus 4.1.
+own:earnings	The stock trades at 1.5x sales.
+own:sports	Astros W 9-3
+own:fractions	Use a 3/8 inch drill bit.
+own:sports	The Lions won 33-17 to move to 7-2.
+own:weather	Snow totals 2-4 in. by noon.
+own:fractions	Use a 13/16 inch socket.
+own:versions	Benchmarks put the Claude Opus 4.1 6.1% ahead of the iOS 17.4.
+own:earnings	EBITDA came in at $450M, up 0.4% YoY.
+own:sports	Alvarez went 3-for-5 with 1 RBIs.
+own:cities	The plant in Seattle, WA, employs 450 people.
+own:versions	Ryzen 7 7800X3D beats o1-preview on most benchmarks.
+own:versions	The update brings GPT-4o support to A18 Pro devices.
+own:ticker	Broadcom ($AVGO) hit a 52-week high.
+own:ticker	Shares of Alphabet (NASDAQ: GOOGL) fell 0.4% on Tuesday.
+own:earnings	Volume was 10x the 30-day average.
+own:sports	The Eagles won 25-13 to move to 5-0.
+own:versions	Gemini 2.0 Flash beats Claude Opus 4.1 on most benchmarks.
+own:recipes	Add 1 1/2 teaspoons butter.
+own:cities	The plant in Austin, TX, employs 3000 people.
+own:earnings	EBITDA came in at £1.1 billion, up 1.2% YoY.
+own:cities	Phoenix, AZ (AP) — Officials said Tuesday the vote will go ahead.
+own:earnings	The company beat by $0.05 and raised FY26 guidance.
+own:fractions	Use a 3/8 inch bolt.
+own:earnings	Margins widened 75 bps to 1.2%.
+own:fractions	About 2/3 of voters agreed.
+own:sports	Soto went 2-for-5 with 3 RBIs.
+own:sports	Cubs L 2-6
+own:ticker	Shopify (NYSE:SHOP) reports after the bell.
+own:earnings	Microsoft posted EPS of $2.45 vs. $1.10 expected.
+own:earnings	Share of revenue rose 3.4 pp to 2.5%.
+own:recipes	Bake 20-25 min at 400°F.
+own:sports	The 49ers won 25-19 to move to 5-3.
+own:weather	Snow totals 2-4 in. by 7 a.m..
+own:sports	The Eagles won 35-17 to move to 5-0.
+own:recipes	Add 1/3 cup flour.
+own:ticker	Rivian (NASDAQ:RIVN) reports after the bell.
+own:weather	Wind chill near -20°F overnight.
+own:earnings	Guidance calls for ±2% around $87.5 million.
+own:cities	The plant in Nashville, TN, employs 450 people.
+own:uk_dates	The deadline is 28/02/24.
+own:weather	Wind chill near -8°F overnight.
+own:ticker	Rivian ($RIVN) hit a 52-week high.
+own:weather	Snow totals 2-4 in. by Tuesday.
+own:versions	DeepSeek-V3 beats Claude Opus 4.1 on most benchmarks.
+own:versions	M3 Pro beats RTX 5080 on most benchmarks.
+own:sports	The 49ers won 26-19 to move to 6-2.
+own:fractions	Use a 5/8 inch socket.
+own:ticker	Palantir ($PLTR) hit a 52-week high.
+own:recipes	Add 1 1/2 tbsp flour.
+own:weather	Rain totals 2-4 in. by noon.
+own:versions	Benchmarks put the Grok 2 0.4% ahead of the Android 15.
+own:cities	The plant in Austin, TX, employs 1200 people.
+own:ticker	$GS is up 27% premarket.
+own:cities	The plant in Honolulu, HI, employs 450 people.
+own:sports	The Ravens won 33-11 to move to 4-3.
+own:cities	The plant in Omaha, NE, employs 450 people.
+own:ticker	Shares of Meta (NASDAQ: META) jumped 0.4% on Friday.
+own:ticker	AT&T ($T) hit a 52-week high.
+own:versions	Claude 3 Opus beats o1-preview on most benchmarks.
+own:versions	Galaxy Z Fold6 beats GB200 on most benchmarks.
+own:ticker	Apple (NASDAQ:AAPL) reports after the bell.
+own:recipes	Add 2 2/3 teaspoons butter.
+own:ticker	$ORCL is up 2.5% premarket.
+own:weather	Rain totals 4-8 in. by Tuesday.
+own:recipes	Add 1 ½ cups flour.
+own:earnings	Guidance calls for +/-1% around $87.5 million.
+own:recipes	Add 2 ¼ tbsp butter.
+own:ticker	Goldman Sachs ($GS) hit a 52-week high.
+own:earnings	The stock trades at 12x sales.
+own:ticker	$AVGO is up 2.5% premarket.
+own:fractions	About 2/3 of analysts agreed.
+own:fractions	About 3/4 of voters agreed.
+own:weather	Low -12°F, high 33°F.
+own:versions	The update brings Core i9-14900K support to Mistral 7B devices.
+own:recipes	Add 1 ½ cup butter.
+own:recipes	Add 3/4 tsp sugar.
+own:fractions	About 7/8 of voters agreed.
+own:sports	Soto went 1-for-4 with 4 RBIs.
+own:sports	The Ravens won 26-11 to move to 4-0.
+own:ticker	$NVDA is up 3.8% premarket.
+own:earnings	Guidance calls for +/-1% around $0.42.
+own:weather	Low -12°F, high 27°F.
+own:versions	Benchmarks put the Windows 11 6.1% ahead of the Claude 3 Opus.
+own:recipes	Bake 12 min at 350°F.
+own:versions	Benchmarks put the Snapdragon 8 Gen 3 18.3% ahead of the Xbox Series X.
+own:sports	Cubs W 8-1
+own:earnings	EBITDA came in at £1.1 billion, up 0.4% YoY.
+own:sports	The Ravens won 20-16 to move to 4-3.
+own:weather	Wind chill near -35°F overnight.
+own:versions	Xbox Series X beats Llama 3.1 70B on most benchmarks.
+own:weather	Low 18°F, high 33°F.
+own:recipes	Add 1 1/2 oz flour.
+own:cities	The plant in Boise, ID, employs 3000 people.
+own:sports	Judge went 3-for-5 with 2 RBIs.
+own:cities	Miami, FL (AP) — Officials said Tuesday the vote will go ahead.
+own:versions	Benchmarks put the o3-mini 12% ahead of the GPT-5.
+own:earnings	1H24 sales were $999.
+own:cities	Honolulu, HI (AP) — Officials said Tuesday the vote will go ahead.
+own:uk_dates	The deadline is 15/03/2025.
+own:versions	M3 Pro beats GPT-4o on most benchmarks.
+own:cities	Denver, CO (AP) — Officials said Tuesday the vote will go ahead.
+own:fractions	Use a 5/8 inch bolt.
+own:earnings	Guidance calls for ±3% around $999.
+own:fractions	Use a 1/4 inch drill bit.
+own:recipes	Bake 12 min at 400°F.
+own:versions	DeepSeek-V3 beats Galaxy Z Fold6 on most benchmarks.
+own:earnings	Q1 FY25 sales were $12.7bn.
+own:ticker	Oracle (NYSE:ORCL) reports after the bell.
+own:earnings	Costco posted EPS of $3.01 vs. $2.95 expected.
+own:ticker	Shares of Palantir (NYSE: PLTR) slid 12% on Monday.
+own:versions	Benchmarks put the Windows 11 27% ahead of the Claude 3.5 Sonnet.
+own:ticker	Shares of Exxon Mobil (NYSE: XOM) jumped 0.4% on Tuesday.
+own:ticker	Apple ($AAPL) hit a 52-week high.
+own:sports	The Ravens won 37-15 to move to 3-0.
+own:earnings	The company beat by $0.05 and raised FY2025 guidance.
+own:sports	The 49ers won 34-10 to move to 3-1.
+own:earnings	Margins widened 120 bps to 6.1%.
+own:weather	Low -5°F, high 27°F.
+own:versions	The update brings RX 7900 XTX support to iOS 18.1 devices.
+own:versions	The update brings iOS 17.4 support to DeepSeek-V3 devices.
+own:earnings	Margins widened 210 bps to 1.2%.
+own:sports	Cubs L 1-5
+own:sports	Dodgers L 1-8
+own:cities	Albany, NY (AP) — Officials said Tuesday the vote will go ahead.
+own:versions	H100 beats Pixel 9 on most benchmarks.
+own:earnings	Margins widened 75 bps to 0.4%.
+own:recipes	Bake 35-40 min at 400°F.
+own:recipes	Bake 35-40 min at 375°F.
+own:sports	Mets L 6-0
+own:weather	Low 18°F, high 27°F.
+own:sports	Betts went 3-for-4 with 2 RBIs.
+own:earnings	The stock trades at 25x sales.
+own:sports	Soto went 1-for-4 with 3 RBIs.
+own:fractions	Use a 13/16 inch bolt.
+own:earnings	Goldman Sachs posted EPS of $3.01 vs. $1.10 expected.
+own:versions	The update brings Pixel 9 support to Galaxy Z Fold6 devices.
+own:ticker	Snowflake ($SNOW) hit a 52-week high.
+own:versions	Benchmarks put the o1-preview 2.5% ahead of the iOS 18.1.
+own:earnings	Share of revenue rose 0.5 pp to 27%.
+own:ticker	Shares of Shopify (NYSE: SHOP) fell 6.1% on Friday.
+own:sports	Mets L 7-1
+own:earnings	Margins widened 30 bps to 6.1%.
+own:cities	The plant in Nashville, TN, employs 1200 people.
+own:sports	The Ravens won 28-17 to move to 3-3.
+own:cities	The plant in Albany, NY, employs 1200 people.
+own:earnings	Share of revenue rose 3.4 pp to 18.3%.
+own:weather	Rain totals 4-8 in. by 7 a.m..
+own:recipes	Add 3/4 cup flour.
+own:versions	The update brings Qwen2.5-72B support to Xbox Series X devices.
+own:weather	Low -5°F, high 33°F.
+own:versions	The update brings Windows 11 support to Claude 3.5 Sonnet devices.
+own:recipes	Add 1 1/2 oz sugar.
+own:recipes	Add ¼ cup salt.
+own:ticker	Shares of Snowflake (NYSE: SNOW) slid 6.1% on Monday.
+own:cities	Omaha, NE (AP) — Officials said Tuesday the vote will go ahead.
+own:earnings	EBITDA came in at $15K, up 1.2% YoY.
+own:ticker	Oracle ($ORCL) hit a 52-week high.
+own:versions	Benchmarks put the Mistral 7B 27% ahead of the RTX 4090.
+own:sports	Betts went 1-for-3 with 2 RBIs.
+own:sports	The 49ers won 24-12 to move to 8-1.
+own:cities	The plant in Atlanta, GA, employs 3000 people.
+own:earnings	Revenue rose 0.4% Y/Y and 0.4% Q/Q.
+own:cities	The plant in Seattle, WA, employs 3000 people.
+own:ticker	$V is up 2.5% premarket.
+own:recipes	Add 1/3 tsp sugar.
+own:ticker	Meta (NASDAQ:META) reports after the bell.
+own:weather	Rain totals 4-8 in. by noon.
+own:weather	Snow totals 4-8 in. by noon.
+own:sports	Cubs L 7-6
+own:recipes	Add 1/3 cups salt.
+own:ticker	Shares of Arm (NASDAQ: ARM) rose 0.4% on Monday.
+own:versions	The update brings RX 7900 XTX support to Claude Opus 4.1 devices.
+own:sports	Judge went 1-for-5 with 2 RBIs.
+own:earnings	The company beat by $0.03 and raised FY25 guidance.
+own:cities	The plant in Columbus, OH, employs 3000 people.
+own:sports	Judge went 3-for-5 with 4 RBIs.
+own:weather	Low 3°F, high 14°F.
+own:earnings	EBITDA came in at $118.50, up 18.3% YoY.
+own:versions	Benchmarks put the Grok 2 1.2% ahead of the Phi-3.
+own:versions	The update brings Llama 3.1 70B support to RTX 4090 devices.
+own:fractions	About 1/5 of the S&P 500 agreed.
+own:fractions	About 3/4 of the S&P 500 agreed.
+own:sports	Soto went 3-for-3 with 2 RBIs.
+own:ticker	Intel ($INTC) hit a 52-week high.
+own:recipes	Add ¼ oz milk.
+own:versions	Benchmarks put the Claude 3.5 Sonnet 2.5% ahead of the M3 Pro.
+own:versions	The update brings o3-mini support to Core i9-14900K devices.
+own:versions	GPT-4o beats RTX 5080 on most benchmarks.
+own:sports	The Ravens won 24-18 to move to 7-2.
+own:recipes	Add 1 ½ cups salt.
+own:cities	The plant in Phoenix, AZ, employs 1200 people.
+own:earnings	Revenue rose 0.4% Y/Y and 6.1% Q/Q.
+own:ticker	$META is up 6.1% premarket.
+own:earnings	The stock trades at 40x book.
+own:ticker	Palantir (NYSE:PLTR) reports after the bell.
+own:recipes	Add 2 ¼ teaspoons butter.
+own:sports	Soto went 3-for-3 with 1 RBIs.
+own:weather	Snow totals 4-8 in. by Tuesday.
+own:fractions	Use a 7/16 inch bolt.
+own:versions	Benchmarks put the Phi-3 12% ahead of the Claude 3 Opus.
+own:versions	The update brings Android 15 support to Pixel 9 devices.
+own:sports	Yankees W 9-8
+own:sports	Alvarez went 3-for-3 with 2 RBIs.
+own:versions	The update brings macOS 14.5 support to M3 Pro devices.
+own:versions	Benchmarks put the Ryzen 7 7800X3D 18.3% ahead of the DeepSeek-V3.
+own:earnings	Goldman Sachs posted EPS of $1.12 vs. $0.84 expected.
+own:recipes	Add 3/4 cups salt.
+own:versions	Xbox Series X beats o3-mini on most benchmarks.
+own:cities	The plant in Atlanta, GA, employs 1200 people.
+own:sports	Dodgers L 5-3
+own:fractions	Use a 7/16 inch socket.
+own:sports	Soto went 2-for-3 with 3 RBIs.
+own:earnings	Netflix posted EPS of $2.45 vs. $2.40 expected.
+own:earnings	The company beat by $0.11 and raised FY25 guidance.
+own:versions	Benchmarks put the GPT-4o 6.1% ahead of the M3 Pro.
+own:sports	Betts went 3-for-3 with 2 RBIs.
+own:earnings	Margins widened 30 bps to 27%.
+own:sports	The Ravens won 29-19 to move to 6-0.
+own:versions	Llama 3.1 70B beats H100 on most benchmarks.
+own:sports	Dodgers W 3-4
+own:earnings	The company beat by $0.03 and raised FY26 guidance.
+own:ticker	$SMCI is up 6.1% premarket.
+own:versions	The update brings Snapdragon 8 Gen 3 support to macOS 14.5 devices.
+own:ticker	$INTC is up 0.4% premarket.
+own:cities	The plant in Nashville, TN, employs 3000 people.
+own:ticker	Snowflake (NYSE:SNOW) reports after the bell.
+own:versions	GPT-5 beats Mistral 7B on most benchmarks.
+own:sports	Astros L 8-5
+own:ticker	Shares of JPMorgan (NYSE: JPM) fell 18.3% on Tuesday.
+own:versions	Galaxy Z Fold6 beats Claude 3 Opus on most benchmarks.
+own:earnings	The stock trades at 0.8x sales.
+own:ticker	Shares of Intel (NASDAQ: INTC) rose 27% on Friday.
+own:ticker	Shares of Netflix (NASDAQ: NFLX) jumped 18.3% on Tuesday.
+own:versions	Phi-3 beats Windows 11 on most benchmarks.
+own:ticker	AT&T (NYSE:T) reports after the bell.
+own:earnings	EBITDA came in at £1.1 billion, down 3.8% YoY.
+own:versions	The update brings Android 15 support to Xbox Series X devices.
+own:earnings	The stock trades at 12x EBITDA.
+own:versions	Benchmarks put the Qwen2.5-72B 1.2% ahead of the Core i9-14900K.
+own:earnings	Q1 FY25 sales were $6.1B.
+own:versions	Benchmarks put the RX 7900 XTX 1.2% ahead of the iPhone 16 Pro Max.
+own:versions	Xbox Series X beats iPhone 16 Pro Max on most benchmarks.
+own:earnings	Boeing posted EPS of $1.12 vs. $2.40 expected.
+own:sports	The Eagles won 30-12 to move to 7-0.
+own:versions	Benchmarks put the A18 Pro 12% ahead of the Claude Opus 4.1.
+own:sports	Judge went 2-for-4 with 3 RBIs.
+own:earnings	The company beat by $0.11 and raised FY2025 guidance.
+own:sports	The Ravens won 31-15 to move to 7-3.
+own:sports	Alvarez went 2-for-5 with 4 RBIs.
+own:versions	Xbox Series X beats o1-preview on most benchmarks.
+own:ticker	Shares of Meta (NASDAQ: META) fell 2.5% on Monday.
+own:sports	Betts went 2-for-5 with 3 RBIs.
+own:sports	The 49ers won 22-10 to move to 5-1.
+own:versions	o3-mini beats o1-preview on most benchmarks.
+own:sports	The Eagles won 28-15 to move to 7-0.
+own:cities	The plant in Miami, FL, employs 1200 people.
+own:ticker	Exxon Mobil ($XOM) hit a 52-week high.
+own:ticker	AMD (NASDAQ:AMD) reports after the bell.
+own:ticker	$META is up 27% premarket.
+own:sports	Dodgers L 2-4
+own:sports	Betts went 3-for-5 with 2 RBIs.
+own:versions	Grok 2 beats macOS 14.5 on most benchmarks.
+own:weather	Low -5°F, high 14°F.
+own:versions	The update brings H100 support to A18 Pro devices.
+own:versions	Benchmarks put the Galaxy Z Fold6 12% ahead of the Ryzen 7 7800X3D.
+own:cities	The plant in Miami, FL, employs 450 people.
+own:earnings	The stock trades at 1.5x EBITDA.
+own:ticker	Boeing ($BA) hit a 52-week high.
+own:fractions	About 1/5 of analysts agreed.
+own:versions	Snapdragon 8 Gen 3 beats GPT-5 on most benchmarks.
+own:recipes	Add 3/4 cup butter.
+own:weather	Rain totals 1-2 in. by noon.
+own:earnings	EBITDA came in at $0.42, up 0.4% YoY.
+own:earnings	Margins widened 75 bps to 12%.
+own:ticker	Shares of Microsoft (NASDAQ: MSFT) fell 27% on Friday.
+own:versions	RTX 4090 beats Claude Opus 4.1 on most benchmarks.
+own:sports	Betts went 2-for-5 with 4 RBIs.
+own:recipes	Add 1 1/2 tbsp salt.
+own:versions	iOS 17.4 beats Galaxy Z Fold6 on most benchmarks.
+own:ticker	Shares of Nvidia (NASDAQ: NVDA) jumped 0.4% on Tuesday.
+own:recipes	Add 2 ¼ tbsp sugar.
+own:cities	The plant in Detroit, MI, employs 450 people.
+own:sports	Dodgers L 6-3
+own:versions	RTX 5080 beats GPT-5 on most benchmarks.
+own:sports	Cubs W 2-7
+own:earnings	Margins widened 210 bps to 2.5%.
+own:earnings	Rivian posted EPS of $0.87 vs. $0.84 expected.
+own:earnings	Broadcom posted EPS of $2.45 vs. $0.84 expected.
+own:recipes	Add ¼ tbsp sugar.
+own:versions	o1-preview beats GPT-4o on most benchmarks.
+own:cities	The plant in Honolulu, HI, employs 1200 people.
+own:ticker	Shopify ($SHOP) hit a 52-week high.
+own:versions	The update brings iOS 17.4 support to Claude Opus 4.1 devices.
+own:versions	Benchmarks put the Xbox Series X 1.2% ahead of the Claude 3.5 Sonnet.
+own:versions	Benchmarks put the DeepSeek-V3 27% ahead of the GPT-5.
+own:recipes	Add 1 ½ tsp milk.
+own:recipes	Add 1 ½ teaspoons flour.
+own:earnings	2H24 sales were €2.4bn.
+own:ticker	Shares of Boeing (NYSE: BA) rose 0.4% on Monday.
+own:earnings	Nvidia posted EPS of $0.87 vs. $1.10 expected.
+own:recipes	Add 3/4 cups milk.
+own:ticker	Ford (NYSE:F) reports after the bell.
+own:versions	RX 7900 XTX beats Xbox Series X on most benchmarks.
+own:ticker	$NFLX is up 1.2% premarket.
+own:versions	Claude 3.5 Sonnet beats Gemini 2.0 Flash on most benchmarks.
+own:recipes	Add 1 1/2 cups milk.
+own:ticker	Shares of Exxon Mobil (NYSE: XOM) fell 18.3% on Tuesday.
+own:earnings	FY24 sales were $0.42.
+own:ticker	Boeing (NYSE:BA) reports after the bell.
+own:versions	Benchmarks put the o1-preview 1.2% ahead of the GPT-5.
+own:earnings	The stock trades at 25x book.
+own:sports	Yankees W 2-0
+own:versions	The update brings H100 support to Gemini 2.0 Flash devices.
+own:ticker	JPMorgan ($JPM) hit a 52-week high.
+own:ticker	$AMD is up 0.4% premarket.
+own:sports	Astros L 5-8
+own:recipes	Add 1/3 cups flour.
+own:earnings	The company beat by $0.25 and raised FY2025 guidance.
+own:sports	The Eagles won 36-10 to move to 5-0.
+own:ticker	Alphabet (NASDAQ:GOOGL) reports after the bell.
+own:versions	The update brings Snapdragon 8 Gen 3 support to DeepSeek-V3 devices.
+own:weather	Low 3°F, high 33°F.
+own:earnings	Guidance calls for ±1% around $0.42.
+own:sports	Soto went 1-for-4 with 2 RBIs.
+own:sports	The Lions won 26-10 to move to 4-2.
+own:earnings	Margins widened 75 bps to 2.5%.
+own:fractions	Use a 1/4 inch bolt.
+own:sports	Alvarez went 2-for-3 with 3 RBIs.
+own:sports	Cubs L 8-3
+own:ticker	Netflix (NASDAQ:NFLX) reports after the bell.
+own:earnings	Revenue rose 0.4% Y/Y and 27% Q/Q.
+own:recipes	Add 2 2/3 tsp salt.
+own:sports	Soto went 2-for-3 with 2 RBIs.
+own:sports	The Ravens won 22-14 to move to 3-3.
+own:sports	Judge went 3-for-5 with 1 RBIs.
+own:earnings	The stock trades at 1.5x book.
+own:versions	The update brings GB200 support to RTX 4090 devices.
+own:ticker	Moderna (NASDAQ:MRNA) reports after the bell.
+own:cities	The plant in Detroit, MI, employs 1200 people.
+own:versions	Benchmarks put the Ryzen 7 7800X3D 6.1% ahead of the o3-mini.
+own:fractions	Use a 7/16 inch drill bit.
+own:sports	The 49ers won 32-17 to move to 5-3.
+own:ticker	Tesla ($TSLA) hit a 52-week high.
+own:earnings	Margins widened 120 bps to 2.5%.
+own:earnings	Revenue rose 3.8% Y/Y and 0.4% Q/Q.
+own:recipes	Add ½ oz flour.
+own:recipes	Add ¼ cups salt.
+own:ticker	Tesla (NASDAQ:TSLA) reports after the bell.
+own:ticker	Shares of JPMorgan (NYSE: JPM) fell 3.8% on Monday.
+own:recipes	Add 2 2/3 teaspoons salt.
+own:ticker	Shares of AMD (NASDAQ: AMD) jumped 0.4% on Tuesday.
+own:earnings	1H24 sales were $0.42.
+own:earnings	EBITDA came in at $87.5 million, down 0.4% YoY.
+own:earnings	Revenue rose 6.1% Y/Y and 12% Q/Q.
+own:earnings	Share of revenue rose 1.5 pp to 27%.
+own:recipes	Add ¼ oz sugar.
+own:sports	Mets L 2-6
+own:fractions	Use a 3/8 inch socket.
+own:recipes	Add 2 ¼ cups milk.
+own:sports	The Eagles won 29-17 to move to 5-2.
+own:ticker	JPMorgan (NYSE:JPM) reports after the bell.
+own:versions	macOS 14.5 beats H100 on most benchmarks.
+own:earnings	EBITDA came in at $1.08, down 0.4% YoY.
+own:versions	Phi-3 beats H100 on most benchmarks.
+own:recipes	Add 3/4 tsp flour.
+own:versions	Mistral 7B beats RTX 4090 on most benchmarks.
+own:versions	The update brings Gemini 2.0 Flash support to RX 7900 XTX devices.
+own:versions	Qwen2.5-72B beats Ryzen 7 7800X3D on most benchmarks.
+own:weather	Snow totals 1-2 in. by Tuesday.
+own:earnings	Margins widened 120 bps to 12%.
+own:versions	Benchmarks put the M3 Pro 27% ahead of the o1-preview.
+own:cities	The plant in Detroit, MI, employs 3000 people.
+own:ticker	$AMD is up 2.5% premarket.
+own:earnings	2H25 sales were $0.42.
+own:recipes	Add 1 1/2 teaspoons flour.
+own:sports	Yankees W 7-2
+own:earnings	1H25 sales were $87.5 million.
+own:recipes	Add 3/4 teaspoons butter.
+own:recipes	Add ½ teaspoons flour.
+own:recipes	Add 2 2/3 oz salt.
+own:earnings	Netflix posted EPS of $0.87 vs. $0.84 expected.
+own:ticker	Shares of Exxon Mobil (NYSE: XOM) fell 6.1% on Friday.
+own:ticker	$META is up 1.2% premarket.
+own:ticker	Shares of Intel (NASDAQ: INTC) slid 1.2% on Tuesday.
+own:earnings	Revenue rose 1.2% Y/Y and 27% Q/Q.
+own:versions	RTX 5080 beats Gemini 2.0 Flash on most benchmarks.
+own:versions	The update brings Windows 11 support to Snapdragon 8 Gen 3 devices.
+own:ticker	$GOOGL is up 12% premarket.
+own:versions	Benchmarks put the Llama 3.1 70B 12% ahead of the Claude 3 Opus.
+own:versions	The update brings Pixel 9 support to GPT-4.1 devices.
+own:sports	Alvarez went 1-for-3 with 4 RBIs.
+own:sports	The 49ers won 24-10 to move to 5-1.
+own:recipes	Add 1 ½ teaspoons butter.
+own:versions	The update brings Xbox Series X support to RTX 4090 devices.
+own:sports	The Eagles won 30-15 to move to 6-0.
+own:earnings	3Q24 sales were $1.2B.
+own:earnings	Guidance calls for ±1% around $118.50.
+own:sports	Cubs W 4-7
+own:sports	Dodgers W 2-3
+own:sports	Astros L 6-3
+own:sports	The Eagles won 26-14 to move to 8-1.
+own:versions	Benchmarks put the Gemini 2.0 Flash 2.5% ahead of the Snapdragon 8 Gen 3.
+own:cities	The plant in Phoenix, AZ, employs 3000 people.
+own:versions	The update brings Qwen2.5-72B support to A18 Pro devices.
+own:recipes	Add 3/4 cup salt.
+own:earnings	Guidance calls for ±2% around $450M.
+own:recipes	Add 2 2/3 tsp flour.
+own:recipes	Add 3/4 tsp milk.
+own:versions	The update brings o1-preview support to Windows 11 devices.
+own:ticker	Shares of Shopify (NYSE: SHOP) jumped 1.2% on Tuesday.
+own:versions	The update brings iOS 18.1 support to iOS 17.4 devices.
+own:sports	The 49ers won 22-16 to move to 4-1.
+own:versions	Phi-3 beats Claude 3 Opus on most benchmarks.
+own:versions	Benchmarks put the Claude 3 Opus 3.8% ahead of the Android 15.
+own:sports	Soto went 1-for-5 with 2 RBIs.
+own:sports	The 49ers won 36-15 to move to 4-0.
+own:recipes	Add 2 2/3 cup sugar.
+own:ticker	Ford ($F) hit a 52-week high.
+own:sports	Yankees W 2-1
+own:ticker	Shares of Amazon (NASDAQ: AMZN) fell 1.2% on Tuesday.
+own:sports	Cubs W 4-1
+own:earnings	Revenue rose 27% Y/Y and 18.3% Q/Q.
+own:versions	Benchmarks put the RX 7900 XTX 3.8% ahead of the Qwen2.5-72B.
+own:versions	Benchmarks put the Claude 3 Opus 0.4% ahead of the Snapdragon 8 Gen 3.
+own:sports	Astros L 8-2
+own:versions	Benchmarks put the GPT-4.1 12% ahead of the iOS 17.4.
+own:earnings	Guidance calls for ±1% around $1.08.
+own:sports	The Eagles won 35-10 to move to 8-0.
+own:versions	Benchmarks put the o3-mini 27% ahead of the RTX 4090.
+own:earnings	Revenue rose 18.3% Y/Y and 3.8% Q/Q.
+own:earnings	The stock trades at 12x book.
+own:ticker	Shares of Palantir (NYSE: PLTR) jumped 0.4% on Friday.
+own:earnings	EBITDA came in at $3.4 billion, down 0.4% YoY.
+own:earnings	Moderna posted EPS of $1.12 vs. $0.84 expected.

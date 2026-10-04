@@ -51,6 +51,7 @@ static ABBREVS: &[(&str, &str, Rule)] = &[
     ("Blvd.", "boulevard", Rule::Always),
     ("Bros.", "brothers", Rule::Always),
     ("Capt.", "captain", Rule::Title),
+    ("Cat.", "category", Rule::Number),
     ("Ch.", "chapter", Rule::Number),
     ("Cmdr.", "commander", Rule::Title),
     ("Co.", "company", Rule::Always),
@@ -173,6 +174,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("L", "liter", "liters", false),
     ("MB", "megabyte", "megabytes", true),
     ("MHz", "megahertz", "megahertz", true),
+    ("MP", "megapixel", "megapixels", true),
     ("MW", "megawatt", "megawatts", true),
     ("MWh", "megawatt hour", "megawatt hours", true),
     ("Mb", "megabit", "megabits", true),
@@ -181,8 +183,11 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("PB", "petabyte", "petabytes", true),
     ("TB", "terabyte", "terabytes", true),
     ("TWh", "terawatt hour", "terawatt hours", true),
+    ("Tbsp", "tablespoon", "tablespoons", true),
     ("V", "volt", "volts", true),
     ("W", "watt", "watts", true),
+    ("bp", "basis point", "basis points", true),
+    ("bps", "basis points", "basis points", true),
     ("cc", "cubic centimeter", "cubic centimeters", true),
     ("cm", "centimeter", "centimeters", true),
     ("dB", "decibel", "decibels", true),
@@ -200,6 +205,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("kb", "kilobit", "kilobits", true),
     ("kbit", "kilobit", "kilobits", true),
     ("kbps", "kilobit per second", "kilobits per second", true),
+    ("kcal", "calorie", "calories", true),
     ("kg", "kilogram", "kilograms", true),
     ("km", "kilometer", "kilometers", true),
     ("km²", "square kilometer", "square kilometers", true),
@@ -209,6 +215,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("m", "meter", "meters", false),
     ("mAh", "milliamp hour", "milliamp hours", true),
     ("mL", "milliliter", "milliliters", true),
+    ("mb", "millibar", "millibars", true),
     ("mg", "milligram", "milligrams", true),
     ("mi", "mile", "miles", true),
     ("min", "minute", "minutes", true),
@@ -222,6 +229,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("m²", "square meter", "square meters", true),
     ("nm", "nanometer", "nanometers", true),
     ("oz", "ounce", "ounces", true),
+    ("pp", "percentage point", "percentage points", true),
     ("psi", "P S I", "P S I", true),
     ("px", "pixel", "pixels", true),
     ("rpm", "R P M", "R P M", true),
@@ -246,9 +254,15 @@ static PER: &[(&str, &str)] = &[
     ("d", "day"),
     ("day", "day"),
     ("h", "hour"),
+    ("hr", "hour"),
+    ("kg", "kilogram"),
     ("l", "liter"),
+    ("lb", "pound"),
+    ("min", "minute"),
     ("mo", "month"),
+    ("oz", "ounce"),
     ("s", "second"),
+    ("sec", "second"),
     ("wk", "week"),
     ("yr", "year"),
     // END SORTED
@@ -538,6 +552,106 @@ const CLOSERS: &[char] = &[
 ];
 const PAUSES: &[char] = &[',', ';', ':', '!', '?'];
 
+/// Period-over-period shorthand in earnings text. Sorted.
+static OVER: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("M/M", "month over month"),
+    ("MoM", "month over month"),
+    ("Q/Q", "quarter over quarter"),
+    ("QoQ", "quarter over quarter"),
+    ("Y/Y", "year over year"),
+    ("YoY", "year over year"),
+    ("m/m", "month over month"),
+    ("q/q", "quarter over quarter"),
+    ("y/y", "year over year"),
+    ("yoy", "year over year"),
+    // END SORTED
+];
+
+/// Stock exchanges before a ticker ("NASDAQ:AAPL", "NYSE: T"). Sorted.
+static EXCHANGES: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("AMEX", "Amex"),
+    ("LSE", "L S E"),
+    ("NASDAQ", "Nasdaq"),
+    ("NYSE", "N Y S E"),
+    ("Nasdaq", "Nasdaq"),
+    ("OTC", "O T C"),
+    ("TSX", "T S X"),
+    // END SORTED
+];
+
+/// Compass points (wind directions). Sorted.
+static COMPASS: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("E", "east"),
+    ("ENE", "east northeast"),
+    ("ESE", "east southeast"),
+    ("N", "north"),
+    ("NE", "northeast"),
+    ("NNE", "north northeast"),
+    ("NNW", "north northwest"),
+    ("NW", "northwest"),
+    ("S", "south"),
+    ("SE", "southeast"),
+    ("SSE", "south southeast"),
+    ("SSW", "south southwest"),
+    ("SW", "southwest"),
+    ("W", "west"),
+    ("WNW", "west northwest"),
+    ("WSW", "west southwest"),
+    // END SORTED
+];
+
+/// AP-style state abbreviations in party tags ("D-Mass."). Sorted.
+static AP_STATES: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("Ala.", "Alabama"), ("Ariz.", "Arizona"), ("Ark.", "Arkansas"), ("Calif.", "California"),
+    ("Colo.", "Colorado"), ("Conn.", "Connecticut"), ("Del.", "Delaware"), ("Fla.", "Florida"),
+    ("Ga.", "Georgia"), ("Ill.", "Illinois"), ("Ind.", "Indiana"), ("Kan.", "Kansas"), ("Ky.", "Kentucky"),
+    ("La.", "Louisiana"), ("Mass.", "Massachusetts"), ("Md.", "Maryland"), ("Mich.", "Michigan"),
+    ("Minn.", "Minnesota"), ("Miss.", "Mississippi"), ("Mo.", "Missouri"), ("Mont.", "Montana"),
+    ("N.C.", "North Carolina"), ("N.D.", "North Dakota"), ("N.H.", "New Hampshire"), ("N.J.", "New Jersey"),
+    ("N.M.", "New Mexico"), ("N.Y.", "New York"), ("Neb.", "Nebraska"), ("Nev.", "Nevada"),
+    ("Okla.", "Oklahoma"), ("Ore.", "Oregon"), ("Pa.", "Pennsylvania"), ("R.I.", "Rhode Island"),
+    ("S.C.", "South Carolina"), ("S.D.", "South Dakota"), ("Tenn.", "Tennessee"), ("Va.", "Virginia"),
+    ("Vt.", "Vermont"), ("W.Va.", "West Virginia"), ("Wash.", "Washington"), ("Wis.", "Wisconsin"),
+    ("Wyo.", "Wyoming"),
+    // END SORTED
+];
+
+/// "D-Mass." / "R-OH" / "I-Vt." / "R-Texas": party and state.
+fn party_tag(core: &str) -> Option<String> {
+    let (p, st) = core.split_once('-')?;
+    let party = match p {
+        "D" => "Democrat",
+        "R" => "Republican",
+        "I" => "Independent",
+        _ => return None,
+    };
+    let state = find(AP_STATES, st)
+        .copied()
+        .or_else(|| find(STATES, st).copied())
+        .or_else(|| STATES.iter().map(|e| e.1).find(|n| *n == st))?;
+    Some(format!("{party} of {state}"))
+}
+
+/// A ticker read letter by letter ("AAPL" -> "A A P L", "BRK.B" -> "B R K B").
+fn spell_ticker(t: &str) -> Option<String> {
+    let letters: Vec<char> = t.chars().filter(|c| *c != '.').collect();
+    if letters.is_empty() || letters.len() > 6 || !letters.iter().all(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    Some(letters.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "))
+}
+
+/// A sports score ("3-1", "108-102,").
+fn is_score(s: &str) -> bool {
+    let s = s.trim_end_matches([',', '.', ';']);
+    let Some((a, b)) = s.split_once(['-', '\u{2013}']) else { return false };
+    (1..=3).contains(&a.len()) && (1..=3).contains(&b.len()) && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())
+}
+
 fn find<'t, T>(table: &'t [(&'static str, T)], key: &str) -> Option<&'t T> {
     table
         .binary_search_by(|e| e.0.cmp(key))
@@ -684,7 +798,23 @@ fn ends_in_number(core: &str) -> bool {
 /// The word before `i` is exactly one ("1", "one"): its unit is singular. Every
 /// other number (0, 1.5, "1.0", 1/2, 59,000) takes the plural.
 fn prev_is_one(w: &[&str], i: usize) -> bool {
-    i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| p.core == "1" || p.core.eq_ignore_ascii_case("one"))
+    i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| {
+        p.core == "1"
+            || p.core.eq_ignore_ascii_case("one")
+            // the top of a range written "min\u{2013}1": "to one hour"
+            || p.core.strip_suffix('1').is_some_and(|r| r.ends_with(['-', '\u{2013}']) && r.chars().next().is_some_and(char::is_alphabetic))
+    })
+}
+
+/// "min\u{2013}1" in "45 min\u{2013}1 hr": the unit of a range's low end, then the
+/// range's top number ("minutes to one").
+pub fn unit_range(core: &str) -> Option<String> {
+    let (u, n) = core.split_once(['-', '\u{2013}'])?;
+    let (_, many, _) = unit(u)?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) || u.chars().count() < 2 {
+        return None;
+    }
+    Some(format!("{many} to {}", crate::ra_numwords::integer(n)))
 }
 
 /// The word before `i` looks like a street name (`Main`, `5th`), no pause after it.
@@ -1176,6 +1306,10 @@ fn slash_words(s: &str) -> Option<String> {
             return Some(format!("{many} per {per}"));
         }
     }
+    // "tokens/s", "requests/sec": a lowercase word per a unit
+    if let (Some(per), true) = (find(PER, b), a.len() >= 3 && a.chars().all(|c| c.is_ascii_lowercase())) {
+        return Some(format!("{a} per {per}"));
+    }
     Some(format!("{} {}", caps_piece(a), caps_piece(b)))
 }
 
@@ -1292,6 +1426,77 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         return one(said, strip_period(core).1 && sentence_end(w, i));
     }
 
+    // ---- round 2 ----
+    // Earnings shorthand: "Y/Y", "QoQ", "M/M".
+    if let Some(said) = find(OVER, strip_period(core).0) {
+        return one((*said).to_string(), strip_period(core).1 && sentence_end(w, i));
+    }
+    // An exchange and its ticker, glued ("NASDAQ:AAPL") or spaced ("NYSE: SNOW").
+    if let Some((ex, tk)) = core.split_once(':') {
+        if let (Some(ex), Some(tk)) = (find(EXCHANGES, ex), spell_ticker(tk)) {
+            return one(format!("{ex}, {tk}"), false);
+        }
+    }
+    if let (Some(ex), true) = (find(EXCHANGES, core), t.trail.starts_with(':')) {
+        if let Some(n) = tok(w, i + 1) {
+            if let Some(tk) = spell_ticker(strip_period(n.core).0) {
+                return Some((i + 2, finish(format!("{ex}, {tk}"), n.trail, false)));
+            }
+        }
+    }
+    // Party tags: "(D-Mass.)", "(R-OH)"; "(D)" after a name.
+    if let Some(said) = party_tag(core) {
+        return one(said, false);
+    }
+    if matches!(w[i].trim_end_matches([',', '.', ';']), "(D)" | "(R)")
+        && i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| is_proper(p.core))
+    {
+        return one((if core == "D" { "Democrat" } else { "Republican" }).to_string(), false);
+    }
+    // A result letter before a score: "Arsenal W 3-1" -> "won".
+    if matches!(core, "W" | "L" | "D") && w.get(i + 1).is_some_and(|n| is_score(n)) {
+        let said = match core {
+            "W" => "won",
+            "L" => "lost",
+            _ => "drew",
+        };
+        return one(said.to_string(), false);
+    }
+    // Wind directions: "Winds NW 15-25 mph".
+    if let Some(said) = find(COMPASS, strip_period(core).0) {
+        let after_wind = i
+            .checked_sub(1)
+            .and_then(|j| tok(w, j))
+            .is_some_and(|p| matches!(p.core.to_ascii_lowercase().as_str(), "winds" | "wind" | "gusts" | "from" | "blowing"));
+        let multi = strip_period(core).0.len() >= 2;
+        if after_wind && (multi || next_is_number(w, i)) {
+            return one((*said).to_string(), strip_period(core).1 && sentence_end(w, i));
+        }
+    }
+    // "degrees F", "degrees C"
+    if matches!(strip_period(core).0, "F" | "C")
+        && i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| p.trail.is_empty() && matches!(p.core, "degrees" | "degree"))
+    {
+        let said = if strip_period(core).0 == "F" { "Fahrenheit" } else { "Celsius" };
+        return one(said.to_string(), strip_period(core).1 && sentence_end(w, i));
+    }
+    // "Fed. R. Civ. P." and kin
+    if core == "Fed." && tok(w, i + 1).is_some_and(|n| n.core == "R.") {
+        let c2 = tok(w, i + 2).map(|n| n.core);
+        let c3 = tok(w, i + 3).map(|n| n.core);
+        let (said, end) = match (c2, c3) {
+            (Some("Civ."), Some("P." | "P")) => ("Federal Rule of Civil Procedure", i + 4),
+            (Some("Crim."), Some("P." | "P")) => ("Federal Rule of Criminal Procedure", i + 4),
+            (Some("App."), Some("P." | "P")) => ("Federal Rule of Appellate Procedure", i + 4),
+            (Some("Evid." | "Evid"), _) => ("Federal Rule of Evidence", i + 3),
+            _ => ("", i),
+        };
+        if end > i {
+            let last = tok(w, end - 1).map_or("", |n| n.trail);
+            return Some((end, finish(said.to_string(), last, sentence_end(w, end - 1) && end == w.len())));
+        }
+    }
+
     // A state code after "City," (`Columbus, OH`).
     if let Some(name) = state_after_city(w, i, strip_period(core).0) {
         return one(name.to_string(), strip_period(core).1);
@@ -1362,6 +1567,8 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         return None;
     }
 
+    // "jones@nasa.gov/" (contact lists separated by slashes)
+    let body = if body.contains('@') { body.trim_end_matches('/') } else { body };
     if let Some(said) = tag_words(body)
         .or_else(|| {
             if body.contains('@') {
@@ -1437,6 +1644,17 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             && !(single && after_name)
             && !has(ROMAN_NEVER, body)
             && !(body == "m" && prev_money);
+        // a unit abbreviation's period before a lowercase word is not a sentence end
+        let lower_next = next_core(w, i).and_then(first_char).is_some_and(char::is_lowercase);
+        let period = period && !lower_next;
+        // "6-10 in. of snow", "3 c. flour": only with the period (and digits)
+        if let (true, Some((o, m))) = (prev_digits && t.core.ends_with('.'), match body {
+            "in" => Some(("inch", "inches")),
+            "c" => Some(("cup", "cups")),
+            _ => None,
+        }) {
+            return one((if prev_is_one(w, i) { o } else { m }).to_string(), period);
+        }
         if let Some((one_u, many, _)) = unit(body).filter(|_| ok) {
             return one((if prev_is_one(w, i) { one_u } else { many }).to_string(), period);
         }
@@ -1500,6 +1718,10 @@ fn check_tables_sorted() {
     sorted("UNITS_DIGITS_ONLY", UNITS_DIGITS_ONLY.iter());
     sorted("NUMBER_WORDS", NUMBER_WORDS.iter());
     sorted("STATES", STATES.iter().map(|e| e.0));
+    sorted("OVER", OVER.iter().map(|e| e.0));
+    sorted("EXCHANGES", EXCHANGES.iter().map(|e| e.0));
+    sorted("COMPASS", COMPASS.iter().map(|e| e.0));
+    sorted("AP_STATES", AP_STATES.iter().map(|e| e.0));
     sorted("NOT_CITIES", NOT_CITIES.iter());
     sorted("CREDENTIAL_STATES", CREDENTIAL_STATES.iter());
     assert!(ABBREVS.len() >= 80, "{} abbreviations", ABBREVS.len());

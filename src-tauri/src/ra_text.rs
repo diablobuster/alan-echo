@@ -270,6 +270,28 @@ fn date_comma(words: &[Word], k: usize) -> bool {
         && words.get(k).is_some_and(|w| w.text.len() >= 4 && w.text.chars().take(4).all(|c| c.is_ascii_digit()))
 }
 
+/// An abbreviation's period inside a sentence: the next word starts lowercase
+/// ("1 tbsp. kosher", "9 a.m. to", "(D-Mass.) called"), or a short abbreviation is
+/// followed by a number or "\u{a7}" ("Cat. 5", "H.R. 4366", "U.S.C. \u{a7} 230").
+/// A number's period ("in 1990. 2001 was") still ends the sentence.
+fn abbrev_continues(w: &str, next: Option<&Word>) -> bool {
+    let Some(n) = next else { return false };
+    let core = w.trim_end_matches(|c| matches!(c, '"' | '\'' | ')' | ']' | '\u{201D}' | '\u{2019}'));
+    let Some(body) = core.strip_suffix('.') else { return false };
+    if !body.chars().any(char::is_alphabetic) || body.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let nt = n.text.trim_start_matches(['(', '[', '"', '\'', '\u{201C}']);
+    let Some(c) = nt.chars().next() else { return false };
+    if c.is_lowercase() {
+        return true;
+    }
+    let letters = body.chars().filter(|c| c.is_alphabetic()).count();
+    // "Fed. R. Civ. P. 12": a short abbreviation before a capital initial ("R.", "P.")
+    let initial_next = nt.len() == 2 && c.is_ascii_uppercase() && nt.ends_with('.');
+    (c.is_ascii_digit() || c == '\u{a7}' || initial_next) && letters <= 4
+}
+
 fn ends_clause(w: &str) -> bool {
     w.ends_with([',', ';', ':'])
 }
@@ -367,6 +389,7 @@ fn chunk_with(
         if ends_sentence(&w.text)
             && !month_before_number(&w.text, words.get(i + 1))
             && !clock_before_zone(&w.text, words.get(i + 1))
+            && !abbrev_continues(&w.text, words.get(i + 1))
         {
             sentences.push(start..i + 1);
             start = i + 1;
@@ -402,7 +425,12 @@ fn chunk_with(
                     // (`450` | `GeV`, `in` | `1990`) when a cut nearby avoids it,
                     // and best cut before a joining word (`… references | as most …`)
                     // so the chunk's falling tone lands at a phrase edge
-                    let quiet = |k: usize| !has_digit(&words[k - 1].text) && !has_digit(&words[k].text);
+                    // and never right after an abbreviation inside the sentence (`U.S. | evidence`)
+                    let quiet = |k: usize| {
+                        !has_digit(&words[k - 1].text)
+                            && !has_digit(&words[k].text)
+                            && !abbrev_continues(&words[k - 1].text, words.get(k))
+                    };
                     let near = a + (1 + limit / 2).max(min)..=hard;
                     near.clone()
                         .rev()
@@ -730,6 +758,29 @@ mod tests {
         // after the ramp, sentences are chunks of their own again
         let w = words("Rates fell. The Fed cut.");
         assert_eq!(chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2), vec![0..2, 2..5]);
+    }
+
+    /// Round 2: an abbreviation's period before a lowercase word, or a short one
+    /// before a number or "§", does not end the sentence (no chunk cut, no pause).
+    #[test]
+    fn abbreviation_periods_inside_a_sentence_do_not_cut() {
+        for s in [
+            "Season with 1 tbsp. kosher salt and pepper.",
+            "Expect 6-10 in. of snow above 5,000 ft.",
+            "Hurricane Milton is a Cat. 5 storm with 180 mph winds.",
+            "Section 230 of the Act, 47 U.S.C. § 230, is at issue.",
+            "H.R. 4366 passed by a vote of 286-134.",
+            "Open from 9 a.m. to 5 p.m. daily.",
+            "The court cited Fed. R. Civ. P. 12(b)(6) in its ruling.",
+        ] {
+            assert_eq!(chunk(&words(s), 30, 50).len(), 1, "{s}");
+        }
+        // a length cut does not land right after one either
+        let w = words("there is no real U.S. evidence to indicate that the Dutch auction fares any better.");
+        assert!(chunk(&w, 5, 50).iter().all(|r| r.start == 0 || !w[r.start - 1].text.ends_with('.')));
+        // real sentence ends stay cuts
+        assert_eq!(chunk(&words("It closed in 1990. 2001 was the next."), 30, 50).len(), 2);
+        assert_eq!(chunk(&words("We met at noon. Then we left."), 30, 50).len(), 2);
     }
 
     #[test]

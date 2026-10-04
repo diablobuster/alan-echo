@@ -227,6 +227,10 @@ struct Ctx {
     pressure: bool,
     /// The word before is exactly one ("1", "one"): a unit here is singular (`1 km2`).
     after_one: bool,
+    /// "for" follows: `24/36 for 291 yards` is "twenty four of thirty six".
+    of_next: bool,
+    /// "per" before: `per 1M tokens` is a quantity ("one million").
+    per_prev: bool,
 }
 
 fn plain() -> Ctx {
@@ -251,7 +255,12 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
     let after_month_day = month_of(prev2_core).is_some() && day_of(prev_core).is_some();
     let range_tail = matches!(prev.as_str(), "to" | "and" | "through" | "until" | "-" | "–")
         && is_year_num(prev2_core);
-    let parens = lead.contains('(') && trail.contains(')');
+    let modern_now = words.get(i).is_some_and(|w| {
+        let c = split_punct(w).1;
+        is_year_num(c) && c.parse::<u32>().is_ok_and(|n| (1900..=2099).contains(&n))
+    });
+    // "(2017 reference year)": an opening bracket before a modern year is enough
+    let parens = lead.contains('(') && (trail.contains(')') || modern_now);
     let modern = words.get(i).is_some_and(|w| {
         let c = split_punct(w).1;
         is_year_num(c) && c.parse::<u32>().is_ok_and(|n| (1900..=2099).contains(&n))
@@ -268,8 +277,11 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
     // "since about 2019", "in around 1990"
     let about_year = matches!(prev.as_str(), "about" | "around" | "circa" | "approximately")
         && in_sorted(&YEAR_PREV, &prev2_core.to_lowercase());
-    let modern_cue = modern && (prev_is_name || in_sorted(&YEAR_DET, &prev) || prev == "of");
+    // round 2: "for 2026", "September of 1814" (a month, then "of")
+    let month_of_year = prev == "of" && month_of(prev2_core).is_some() && is_year_num(split_punct(words[i]).1);
+    let modern_cue = modern && (prev_is_name || in_sorted(&YEAR_DET, &prev) || prev == "of" || prev == "for");
     let year_hint = in_sorted(&YEAR_PREV, &prev)
+        || month_of_year
         || after_month
         || after_month_day
         || range_tail
@@ -322,7 +334,9 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
         || (next == "blood" && next2 == "pressure")
         || (i.saturating_sub(3)..i).any(|k| matches!(lc_core(words[k]).as_str(), "pressure" | "bp"));
     let after_one = i >= 1 && matches!(prev.as_str(), "1" | "one") && split_punct(words[i - 1]).2.is_empty();
-    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure, after_one }
+    let of_next = next == "for";
+    let per_prev = prev == "per";
+    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure, after_one, of_next, per_prev }
 }
 
 // ---- currency ----
@@ -599,8 +613,8 @@ fn day_month_words(d: u64, m: u64, y: Option<&str>) -> Option<String> {
 
 /// Units a fraction can measure, as written after it (lowercase key, sorted) ->
 /// the singular said ("3/4 cup" -> "three quarters of a cup").
-static FRACTION_UNITS: [(&str, &str); 52] = [
-    ("acre", "acre"), ("acres", "acre"), ("cm", "centimeter"), ("cup", "cup"), ("cups", "cup"),
+static FRACTION_UNITS: [(&str, &str); 53] = [
+    ("acre", "acre"), ("acres", "acre"), ("c", "cup"), ("cm", "centimeter"), ("cup", "cup"), ("cups", "cup"),
     ("feet", "foot"), ("foot", "foot"), ("ft", "foot"), ("gal", "gallon"), ("gallon", "gallon"),
     ("gallons", "gallon"), ("hour", "hour"), ("hours", "hour"), ("hr", "hour"), ("in", "inch"),
     ("inch", "inch"), ("inches", "inch"), ("kg", "kilogram"), ("lb", "pound"), ("lbs", "pound"),
@@ -695,6 +709,10 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         let over = || format!("{} over {}", integer(parts[0]), integer(parts[1]));
         if ctx.pressure && pressure_shape {
             return Some(over());
+        }
+        // completions: "24/36 for 291 yards"
+        if ctx.of_next && a <= b && parts[0].len() <= 3 && parts[1].len() <= 3 {
+            return Some(format!("{} of {}", integer(parts[0]), integer(parts[1])));
         }
         if ctx.date_hint && short {
             if let Some(d) = date_words(a, b, None) {
@@ -829,7 +847,13 @@ fn number_unit(core: &str) -> Option<String> {
         .iter()
         .find(|(s, _, _)| *s == suf)
         .map(|(_, o, m)| (*o, *m))
-        .or_else(|| crate::ra_norm_text::glued_unit(suf))?;
+        .or_else(|| crate::ra_norm_text::glued_unit(suf))
+        .or_else(|| match suf {
+            // "0.214s" (a lap time), "24h"; a whole number + s is a plural ("5s")
+            "s" if num.contains('.') => Some(("second", "seconds")),
+            "h" => Some(("hour", "hours")),
+            _ => None,
+        })?;
     let words = plain_number(num)?;
     Some(format!("{words} {}", if words == "one" { one } else { many }))
 }
@@ -1073,6 +1097,13 @@ fn per_unit(u: &str) -> Option<&'static str> {
         "wk" | "wks" | "week" => "week",
         "day" | "d" => "day",
         "share" | "sh" => "share",
+        "oz" | "ounce" => "ounce",
+        "lb" | "lbs" | "pound" => "pound",
+        "kg" => "kilogram",
+        "bbl" | "barrel" => "barrel",
+        "gal" | "gallon" => "gallon",
+        "ton" | "tonne" | "t" => "ton",
+        "kwh" => "kilowatt hour",
         "unit" => "unit",
         "person" => "person",
         "night" => "night",
@@ -1141,6 +1172,100 @@ fn currency_with_tail(cur: &Currency, rest: &str) -> Option<String> {
     Some(format!("{money} {more}").trim_end().to_string())
 }
 
+/// Fiscal and half/quarter codes: "FY25" -> "fiscal twenty five", "1H24" -> "first
+/// half twenty four", "3Q24" -> "third quarter twenty four".
+fn period_code(core: &str) -> Option<String> {
+    let yr = |y: &str| -> Option<String> {
+        match y.len() {
+            2 if all_digits(y) => Some(two_digit_year(y)),
+            4 if all_digits(y) => Some(year(y.parse().ok()?)),
+            _ => None,
+        }
+    };
+    if let Some(y) = core.strip_prefix("FY") {
+        return Some(format!("fiscal {}", yr(y)?));
+    }
+    let b = core.as_bytes();
+    if b.len() >= 4 && b[0].is_ascii_digit() && matches!(b[1], b'H' | b'Q') {
+        let n = (b[0] - b'0') as u64;
+        let what = match (b[1], n) {
+            (b'H', 1..=2) => "half",
+            (b'Q', 1..=4) => "quarter",
+            _ => return None,
+        };
+        return Some(format!("{} {what} {}", ordinal(n), yr(&core[2..])?));
+    }
+    None
+}
+
+/// A bare number with a scale letter: "5.1M" -> "five point one million", "254K",
+/// "4M+". K and M from 10 up, with a decimal, a "+", after "per" or before a count
+/// noun (a 4K screen stays "four K", the 3M company "three M"); B only with a decimal
+/// or before a count noun (a 70B model stays "seventy B").
+fn bare_scale(core: &str, ctx: &Ctx) -> Option<String> {
+    let (body, plus) = match core.strip_suffix('+') {
+        Some(b) => (b, true),
+        None => (core, false),
+    };
+    let (amt, Some(sc)) = amount_and_scale(body)? else { return None };
+    let suf = &body[amt.len()..];
+    let dec = amt.contains('.');
+    let big = dec || plus || ctx.per_prev || ctx.card_hint || amt.replace(',', "").parse::<f64>().is_ok_and(|v| v >= 10.0);
+    let ok = match suf {
+        "M" | "mn" | "K" | "k" => big,
+        "B" | "bn" | "Bn" => dec || suf != "B" || ctx.card_hint,
+        _ => false,
+    };
+    if !ok {
+        return None;
+    }
+    let (ip, fp) = number_parts(amt)?;
+    Some(format!("{} {sc}{}", decimal(ip, fp), if plus { " plus" } else { "" }))
+}
+
+/// A product model number read in pairs, as people say it: "4090" -> "forty ninety",
+/// "7900" -> "seventy nine hundred", "14900K" -> "fourteen nine hundred K",
+/// "9950X3D" -> "ninety nine fifty X three D".
+fn model_pairs(core: &str) -> Option<String> {
+    let end = core.find(|c: char| !c.is_ascii_digit()).unwrap_or(core.len());
+    let (num, suf) = core.split_at(end);
+    if !(4..=5).contains(&num.len()) || num.starts_with('0') || !suf.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let (hi, lo) = num.split_at(num.len() - 2);
+    let lo_n: u64 = lo.parse().ok()?;
+    let mut out = if num.len() == 5 {
+        format!("{} {}", integer(&num[..2]), integer(&num[2..]))
+    } else if lo_n == 0 {
+        format!("{} hundred", integer(hi))
+    } else if lo_n < 10 {
+        format!("{} oh {}", integer(hi), cardinal(lo_n))
+    } else {
+        format!("{} {}", integer(hi), cardinal(lo_n))
+    };
+    for c in suf.chars() {
+        out.push(' ');
+        out.push_str(&if c.is_ascii_digit() { cardinal(c as u64 - '0' as u64) } else { c.to_ascii_uppercase().to_string() });
+    }
+    Some(out)
+}
+
+/// "401(k)" -> "four oh one K"; "529" plans and "457(b)" alike.
+fn plan_name(w: &str) -> Option<String> {
+    let w = w.trim_end_matches([',', '.', ';', ':']);
+    let (num, rest) = w.split_once('(')?;
+    let letter = rest.strip_suffix(')')?;
+    if num.len() != 3 || !all_digits(num) || letter.len() != 1 || !letter.chars().all(|c| c.is_ascii_lowercase()) {
+        return None;
+    }
+    let d: Vec<u64> = num.bytes().map(|b| (b - b'0') as u64).collect();
+    let tail = if d[1] == 0 { format!("oh {}", cardinal(d[2])) } else { cardinal(d[1] * 10 + d[2]) };
+    Some(format!("{} {tail} {}", cardinal(d[0]), letter.to_ascii_uppercase()))
+}
+
+/// Brands whose model numbers are read in pairs (`model_pairs`).
+static MODEL_PREFIX: [&str; 6] = ["GT", "GTX", "MX", "RTX", "RX", "Threadripper"];
+
 /// `read_core` after the sign and percent handling.
 fn read_body(core: &str, ctx: &Ctx) -> String {
     if !has_digit(core) {
@@ -1186,6 +1311,12 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
         return s;
     }
     if let Some(s) = model_size(core, ctx) {
+        return s;
+    }
+    if let Some(s) = period_code(core) {
+        return s;
+    }
+    if let Some(s) = bare_scale(core, ctx) {
         return s;
     }
     if core.contains('/') {
@@ -1252,6 +1383,43 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
     if !has_digit(core) && vulgar(core).is_none() {
         return None;
     }
+    // "45 min\u{2013}1 hr": "minutes to one"
+    if let Some(s) = crate::ra_norm_text::unit_range(core) {
+        return Some((i + 1, format!("{lead}{s}{trail}")));
+    }
+    // inches written as a double quote after a number ("1-3\"", "5\".") when no quote
+    // opened earlier in the chunk
+    if trail.starts_with('"') && core.ends_with(|c: char| c.is_ascii_digit()) && !lead.contains('"') {
+        let opened = words[..i].iter().any(|w| w.contains(['"', '\u{201C}']));
+        if !opened {
+            let ctx = build_ctx(words, i, lead, "");
+            let body = read_core(core, &ctx);
+            let unit = if core == "1" { "inch" } else { "inches" };
+            return Some((i + 1, format!("{lead}{body} {unit}{}", &trail[1..])));
+        }
+    }
+    // "401(k)", "457(b)"
+    if let Some(p) = plan_name(words.get(i)?) {
+        let (_, _, t) = split_punct(words.get(i)?);
+        let t = t.trim_start_matches(')');
+        return Some((i + 1, format!("{lead}{p}{t}")));
+    }
+    // product model numbers: "RTX 4090", "Ryzen 9 9950X", "Core i9-14900K"
+    let prev = if i >= 1 { split_punct(words[i - 1]).1 } else { "" };
+    let prev2 = if i >= 2 { split_punct(words[i - 2]).1 } else { "" };
+    let after_brand = MODEL_PREFIX.contains(&prev) || (prev2 == "Ryzen" && prev.len() == 1 && all_digits(prev));
+    if after_brand {
+        if let Some(m) = model_pairs(core) {
+            return Some((i + 1, format!("{lead}{m}{trail}")));
+        }
+    }
+    if let Some((cpu, num)) = core.split_once('-') {
+        if cpu.len() == 2 && cpu.starts_with('i') && cpu[1..].bytes().all(|b| b.is_ascii_digit()) {
+            if let Some(m) = model_pairs(num) {
+                return Some((i + 1, format!("{lead}I {} {m}{trail}", cardinal((cpu.as_bytes()[1] - b'0') as u64))));
+            }
+        }
+    }
     if let Some((l2, c2, t2)) = next {
         // A whole number and a fraction: "2 1/2", "1 ½" -> "two and a half".
         let whole = (1..=3).contains(&core.len()) && all_digits(core) && trail.is_empty() && l2.is_empty();
@@ -1281,7 +1449,7 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
                 return Some((i + 1, fraction_words(a, b)));
             }
             // a bare "in" is a unit only before a lowercase word ("3/8 in thick", not "5/10 in 2024")
-            let bare_in = key == "in" && t2.is_empty();
+            let bare_in = (key == "in" && t2.is_empty()) || (key == "c" && !t2.starts_with('.'));
             let in_ok = !bare_in
                 || words.get(i + 2).is_some_and(|w| {
                     let c = split_punct(w).1;
@@ -1339,6 +1507,11 @@ pub fn num_spans(words: &[&str]) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < words.len() {
+        // a URL or email with digits is the text pass's ("example.org/2024/ai-update")
+        if words[i].contains("://") || words[i].contains("www.") || words[i].contains('@') {
+            i += 1;
+            continue;
+        }
         match span_at(words, i) {
             Some((end, spoken)) if end > i && end <= words.len() && !spoken.trim().is_empty() => {
                 out.push((i, end, spoken));
@@ -1937,6 +2110,15 @@ mod tests {
         assert_eq!(at("Room 1204, Floor 12", 1).1, "one thousand two hundred four,");
         assert_eq!(at("Dial 1200 then 3 more.", 1).1, "one thousand two hundred");
         assert_eq!(at("Four of these are federal, 1261 are local, and 53 are private.", 5).1, "one thousand two hundred sixty one");
+    }
+
+    /// Round 2: year cues that beat another number in the sentence.
+    #[test]
+    fn years_after_for_and_month_of() {
+        assert_eq!(at("remain at 2 percent for 2026.", 5).1, "twenty twenty six.");
+        assert_eq!(at("In September of 1814, 1,000 patriots", 3).1, "eighteen fourteen,");
+        // a count stays a count
+        assert_eq!(at("enough for 2026 people and 3 dogs", 2).1, "two thousand twenty six");
     }
 
     #[test]

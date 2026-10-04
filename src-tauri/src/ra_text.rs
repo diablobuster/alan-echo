@@ -391,7 +391,8 @@ pub(crate) fn line_breaks_brk(text: &str) -> Vec<Option<Brk>> {
 /// block (at most 4 words, no `.!?:;` end, no heading or list item) is a `Line`
 /// (signature, address). `blank[i]`: a blank line came before word `i`; such a break
 /// stays a paragraph (never a soft wrap or a `Line`). Source markers are never changed, except a marked
-/// `Paragraph` opened by a bullet glyph becomes `ListItem`. Linear; never panics.
+/// `Paragraph` opened by a bullet glyph or a digit item number becomes `ListItem`.
+/// Linear; never panics.
 pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], blank: &[bool], read_start: bool) {
     let mut out: Vec<Word> = Vec::with_capacity(words.len());
     let mut out_marked: Vec<bool> = Vec::with_capacity(words.len());
@@ -425,7 +426,12 @@ pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], blank: &[bool], r
             if let Some(rest) = strip_glued_bullet(&w.text) {
                 w.text = rest.to_string();
                 w.brk = item_brk(w.brk, m);
-            } else if !m && !folded && is_item_number(&w.text) {
+            } else if !folded
+                && is_item_number(&w.text)
+                // a marked paragraph (tagged P-only list, top of an untagged page) only
+                // by a digit number: a letter or roman one may start a sentence
+                && (!m || (w.brk == Brk::Paragraph && w.text.starts_with(|c: char| c.is_ascii_digit())))
+            {
                 w.brk = Brk::ListItem;
             }
         }
@@ -1563,9 +1569,17 @@ mod tests {
         assert_eq!((w[0].brk, w[1].brk), (Brk::Paragraph, Brk::Line));
         let w = normalize(&["Done.\n".into(), "Overview\n".into(), h(Brk::Paragraph, "The "), "end.".into()]);
         assert_eq!((w[1].brk, w[2].brk), (Brk::Heading(0), Brk::Paragraph));
-        // a marked item number stays what the source said
+        // a marked paragraph opened by a digit item number becomes a list item (Task 11
+        // fix round 2: tagged P-only lists); a letter / roman one stays what the source
+        // said, and any other marker always stays
         let w = normalize(&["Done.\n".into(), h(Brk::Paragraph, "1. "), "Apples".into()]);
-        assert_eq!(w[1].brk, Brk::Paragraph);
+        assert_eq!(w[1].brk, Brk::ListItem);
+        for n in ["a) ", "iv. ", "B. "] {
+            let w = normalize(&["Done.\n".into(), h(Brk::Paragraph, n), "Apples".into()]);
+            assert_eq!(w[1].brk, Brk::Paragraph, "{n}");
+        }
+        let w = normalize(&["Done.\n".into(), h(Brk::TableCell, "1. "), "Apples".into()]);
+        assert_eq!(w[1].brk, Brk::TableCell);
         // a bullet glyph refines a marked paragraph, never another marker
         let w = normalize(&["Done.\n".into(), h(Brk::Paragraph, "\u{2022} "), "Apples".into()]);
         assert_eq!(brks(&w), vec![("Done.", Brk::None), ("Apples", Brk::ListItem)]);
@@ -1731,6 +1745,34 @@ mod tests {
         // a marked break is never made a Line
         let w = normalize(&["Best,\n".into(), format!("{}Daniel", ra_struct::mark(Brk::Paragraph))]);
         assert_eq!(w[1].brk, Brk::Paragraph);
+    }
+
+    /// Task 11 fix round 2: a tagged P-only numbered list (each item a marked
+    /// `Paragraph`), and a numbered item at the top of an untagged page, are list items.
+    #[test]
+    fn marked_paragraphs_with_digit_numbers_are_list_items() {
+        let p = |t: &str| format!("{}{t}", ra_struct::mark(Brk::Paragraph));
+        let v = vec![p("Ingredients:\n"), p("1. "), "Flour\n".into(), p("2. "), "Eggs\n".into(), p("12) "), "Salt".into()];
+        let w = normalize(&v);
+        assert_eq!(
+            brks(&w),
+            vec![
+                ("Ingredients:", Brk::Paragraph),
+                ("1.", Brk::ListItem),
+                ("Flour", Brk::None),
+                ("2.", Brk::ListItem),
+                ("Eggs", Brk::None),
+                ("12)", Brk::ListItem),
+                ("Salt", Brk::None),
+            ]
+        );
+        // glued "3.Go", and a later batch that starts on a marked item
+        assert_eq!(normalize(&["Done.\n".into(), p("3.Go")])[1].brk, Brk::ListItem);
+        assert_eq!(normalize_cont(&[p("2. "), "Eggs".into()], false)[0].brk, Brk::ListItem);
+        // not item numbers: unchanged
+        for t in ["1.5 ", "2024. ", "No. "] {
+            assert_eq!(normalize(&["Done.\n".into(), p(t), "x".into()])[1].brk, Brk::Paragraph, "{t}");
+        }
     }
 
     /// Task 11 fix round 1: a blank line is always a paragraph, never a `Line` or a

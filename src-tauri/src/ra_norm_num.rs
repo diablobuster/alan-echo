@@ -231,6 +231,8 @@ struct Ctx {
     of_next: bool,
     /// "per" before: `per 1M tokens` is a quantity ("one million").
     per_prev: bool,
+    /// "percentage", "point", "percent" or "of" follows: `1/4` is a fraction.
+    frac_next: bool,
 }
 
 fn plain() -> Ctx {
@@ -335,8 +337,10 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
         || (i.saturating_sub(3)..i).any(|k| matches!(lc_core(words[k]).as_str(), "pressure" | "bp"));
     let after_one = i >= 1 && matches!(prev.as_str(), "1" | "one") && split_punct(words[i - 1]).2.is_empty();
     let of_next = next == "for";
+    // "by 1/4 percentage point": a fraction, not a date
+    let frac_next = matches!(next.as_str(), "percentage" | "point" | "points" | "percent" | "of");
     let per_prev = prev == "per";
-    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure, after_one, of_next, per_prev }
+    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure, after_one, of_next, per_prev, frac_next }
 }
 
 // ---- currency ----
@@ -713,6 +717,9 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         // completions: "24/36 for 291 yards"
         if ctx.of_next && a <= b && parts[0].len() <= 3 && parts[1].len() <= 3 {
             return Some(format!("{} of {}", integer(parts[0]), integer(parts[1])));
+        }
+        if ctx.frac_next && a >= 1 && a < b && b <= 64 {
+            return Some(fraction_words(a, b));
         }
         if ctx.date_hint && short {
             if let Some(d) = date_words(a, b, None) {
@@ -1329,6 +1336,19 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
         if let Some(s) = slash_number(core, ctx) {
             return s;
         }
+    }
+    // "3-3/4" (a whole number and a fraction joined by a hyphen)
+    if let Some((w, f)) = core.split_once('-') {
+        if let (true, Some((a, b))) = ((1..=3).contains(&w.len()) && all_digits(w), common_fraction(f)) {
+            if f.contains('/') {
+                return format!("{} and {}", integer(w), mixed_tail(a, b));
+            }
+        }
+    }
+    // "49ers", "76ers": the team names
+    if let Some(n) = core.strip_suffix("ers").filter(|n| !n.is_empty() && all_digits(n) && n.len() <= 3) {
+        let words = integer(n);
+        return if words.ends_with('e') { format!("{words}rs") } else { format!("{words}ers") };
     }
     if let Some(s) = dash_number(core, ctx) {
         return s;
@@ -2110,6 +2130,20 @@ mod tests {
         assert_eq!(at("Room 1204, Floor 12", 1).1, "one thousand two hundred four,");
         assert_eq!(at("Dial 1200 then 3 more.", 1).1, "one thousand two hundred");
         assert_eq!(at("Four of these are federal, 1261 are local, and 53 are private.", 5).1, "one thousand two hundred sixty one");
+    }
+
+    /// Round 2 (round-trip audit): FOMC statements say "by 1/4 percentage point" and
+    /// "3-3/4 to 4 percent"; sports say "49ers".
+    #[test]
+    fn fed_fractions_and_team_numbers() {
+        assert_eq!(at("raise the range by 1/4 percentage point", 4).1, "one quarter");
+        assert_eq!(at("lower it by 1/2 point today", 3).1, "one half");
+        assert_eq!(at("by 1/4 of a point", 1).1, "one quarter");
+        assert_eq!(at("on 1/4 we met", 1).1, "January fourth", "a date stays a date");
+        assert_eq!(at("to 3-3/4 to 4 percent", 1).1, "three and three quarters");
+        assert_eq!(at("to 4-1/2 percent", 1).1, "four and a half");
+        assert_eq!(one("49ers"), "forty niners");
+        assert_eq!(one("76ers"), "seventy sixers");
     }
 
     /// Round 2: year cues that beat another number in the sentence.

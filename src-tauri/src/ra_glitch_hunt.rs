@@ -153,7 +153,11 @@ fn glitch_synth() {
     let mut l = eng.lock();
     assert_eq!(l.device, Device::Cpu);
     let t = Instant::now();
-    let gap = vec![0.0f32; (ra_timing::SR as usize) / 10];
+    // GH_RATE (default 1.0): reading speed; GH_GAP_MS (default 100): silence added
+    // between chunks (0 = chunks back to back, as the player plays them)
+    let rate: f32 = std::env::var("GH_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let gap_ms: usize = std::env::var("GH_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let gap = vec![0.0f32; ra_timing::SR as usize * gap_ms / 1000];
     for (n, (id, _src, text)) in rows.iter().enumerate() {
         let p = dir.join(format!("{id}.wav"));
         if p.is_file() {
@@ -167,7 +171,7 @@ fn glitch_synth() {
             let ws: Vec<&str> = words[r].iter().map(|w| w.text.as_str()).collect();
             let mut a = 0;
             while a < ws.len() {
-                match Engine::synth_inner(&mut l, &ws[a..], 1.0, true) {
+                match Engine::synth_inner(&mut l, &ws[a..], rate, true) {
                     Ok(c) => {
                         // WordTime is in samples (rate 1.0): to ms in the WAV
                         let off = pcm.len() as u64;

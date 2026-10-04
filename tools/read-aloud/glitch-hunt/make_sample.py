@@ -18,7 +18,7 @@ groups = defaultdict(set)
 for r in csv.DictReader(open(os.path.join(HERE, "static.csv"), encoding="utf-8")):
     groups[(r["flag"].split("(")[0], r["category"])].add(r["id"])
 for i, (src, _) in corpus.items():
-    if src.startswith("stress:"):
+    if src.startswith(("stress:", "own:")):
         groups[("STRESS", src)].add(i)
 
 ids = list(corpus)

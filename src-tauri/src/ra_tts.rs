@@ -262,6 +262,27 @@ pub(crate) fn set_model_speed_max(v: f32) {
 }
 const WSOLA_MAX: f32 = 2.2;
 
+/// The voice style row for a chunk of `n_ids` tokens: the row indexed by length, capped.
+#[cfg(not(test))]
+fn style_row(n_ids: usize, rows: usize) -> usize {
+    n_ids.min(rows.saturating_sub(1))
+}
+/// Test-only fixed row for the style-row spike (-1 = by length, as in product).
+#[cfg(test)]
+static STYLE_ROW_OVERRIDE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+#[cfg(test)]
+fn style_row(n_ids: usize, rows: usize) -> usize {
+    let last = rows.saturating_sub(1);
+    match STYLE_ROW_OVERRIDE.load(Ordering::Relaxed) {
+        r if r < 0 => n_ids.min(last),
+        r => (r as usize).min(last),
+    }
+}
+#[cfg(test)]
+pub(crate) fn set_style_row(v: Option<usize>) {
+    STYLE_ROW_OVERRIDE.store(v.map_or(-1, |r| r as i64), Ordering::Relaxed);
+}
+
 /// The error of a synth run stopped by `Engine::cancel_stale`.
 pub const CANCELLED: &str = "cancelled: stale job";
 
@@ -779,7 +800,7 @@ impl Engine {
         if rows == 0 {
             return Err("voice: no style rows".into());
         }
-        let row = ids.len().min(rows - 1);
+        let row = style_row(ids.len(), rows);
         let style = l.voice[row * STYLE_DIM..(row + 1) * STYLE_DIM].to_vec();
         let mut input = Vec::with_capacity(ids.len() + 2);
         input.push(0i64);
@@ -2927,6 +2948,143 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Per-chunk measures for the style-row spike: (spectral centroid Hz, speech RMS, F0 median Hz).
+    /// Speech = frames (512, hop 256) whose RMS is above 10% of the loudest frame.
+    fn style_measures(pcm: &[f32]) -> (f64, f64, f64) {
+        let sr = ra_timing::SR as f64;
+        let (n, hop) = (512usize, 256usize);
+        let starts: Vec<usize> = (0..).map(|i| i * hop).take_while(|s| s + n <= pcm.len()).collect();
+        let rms = |s: usize| (pcm[s..s + n].iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
+        let top = starts.iter().map(|s| rms(*s)).fold(0.0f64, f64::max);
+        let (mut cs, mut es, mut f0s) = (Vec::new(), Vec::new(), Vec::new());
+        for s in starts.iter().copied().filter(|s| rms(*s) > 0.1 * top) {
+            let fr = &pcm[s..s + n];
+            es.push(rms(s));
+            // centroid from a plain DFT of the Hann-windowed frame
+            let (mut num, mut den) = (0.0f64, 0.0f64);
+            for k in 1..n / 2 {
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for (i, x) in fr.iter().enumerate() {
+                    let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos();
+                    let a = 2.0 * std::f64::consts::PI * (k * i % n) as f64 / n as f64;
+                    re += *x as f64 * w * a.cos();
+                    im -= *x as f64 * w * a.sin();
+                }
+                let m = (re * re + im * im).sqrt();
+                num += m * k as f64 * sr / n as f64;
+                den += m;
+            }
+            if den > 0.0 {
+                cs.push(num / den);
+            }
+            // F0: autocorrelation peak in 70-400 Hz, kept when clearly periodic
+            let (lo, hi) = ((sr / 400.0) as usize, (sr / 70.0) as usize);
+            let r0: f64 = fr.iter().map(|x| (*x as f64).powi(2)).sum();
+            let best = (lo..hi.min(n - 1))
+                .map(|lag| (lag, (0..n - lag).map(|i| fr[i] as f64 * fr[i + lag] as f64).sum::<f64>()))
+                .fold((0usize, f64::MIN), |b, c| if c.1 > b.1 { c } else { b });
+            if r0 > 0.0 && best.1 / r0 > 0.5 {
+                f0s.push(sr / best.0 as f64);
+            }
+        }
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v.get(v.len() / 2).copied().unwrap_or(0.0)
+        };
+        let rms_mean = if es.is_empty() { 0.0 } else { es.iter().sum::<f64>() / es.len() as f64 };
+        (med(&mut cs), rms_mean, med(&mut f0s))
+    }
+
+    /// Spec 4 style-row spike: the same sentences, each its own chunk at 2.2x, with today's
+    /// `voice[len(ids)]` row and with fixed rows. Prints per-variant variance across chunks
+    /// and writes WAVs plus metrics.csv to C:/Users/arowm/alan-echo-nat-bench/style/.
+    /// cargo test --release style_row_spike -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn style_row_spike() {
+        const TEXT: [&str; 20] = [
+            "Yes.",
+            "It rained all night.",
+            "The market closed lower on Tuesday.",
+            "She opened the door and looked outside.",
+            "Nobody expected the committee to vote that quickly.",
+            "The report was published late on Friday afternoon.",
+            "He walked to the station, bought a ticket, and waited for the next train.",
+            "Prices rose again last month, though economists say the pace is slowing.",
+            "We found the old letters in a box under the stairs, tied with a faded blue ribbon.",
+            "When the power went out, the whole street went quiet for a few minutes.",
+            "Most of the volunteers had never met before that morning.",
+            "The library is open until nine.",
+            "After the storm passed, the river rose three feet above its usual level and covered the road.",
+            "Please read the instructions carefully before you begin.",
+            "They said it could not be done, and then they did it.",
+            "A small boat drifted slowly toward the harbor.",
+            "The teacher asked every student to write down one question about the story.",
+            "Winter came early that year.",
+            "The new bridge will cut the trip across the bay from forty minutes to ten.",
+            "I think we should leave now.",
+        ];
+        let out = PathBuf::from("C:/Users/arowm/alan-echo-nat-bench/style");
+        std::fs::create_dir_all(&out).unwrap();
+        let e = Engine::new(dirs::data_dir().unwrap().join("ALAN Echo"));
+        e.preload("af_heart", "cpu");
+        let eng = e.acquire().expect("engine (real CPU model in the ALAN Echo models dir)");
+        let mut l = eng.lock();
+        assert_eq!(l.device, Device::Cpu);
+        let rows = l.voice.len() / STYLE_DIM;
+        let chunks: Vec<Vec<&str>> = TEXT.iter().map(|t| t.split(' ').collect()).collect();
+        let mut lens: Vec<usize> = Vec::new();
+        for w in &chunks {
+            let p = prepare_chunk(&l.g2p, &l.names, w).unwrap();
+            lens.push(build_ids_with(&p.ph, &l.vocab, w.len(), true).0.len());
+        }
+        let mut sorted = lens.clone();
+        sorted.sort();
+        let median = sorted[sorted.len() / 2];
+        println!("voice rows {rows}; ids per chunk {lens:?}; median {median}");
+        std::fs::write(out.join("sentences.txt"), TEXT.join("\n")).unwrap();
+        let variants: [(String, Option<usize>); 4] = [
+            ("today".into(), None),
+            (format!("median{median}"), Some(median)),
+            ("row100".into(), Some(100)),
+            ("row200".into(), Some(200)),
+        ];
+        let mut csv = String::from("variant,chunk,ids,secs,centroid_hz,speech_rms,f0_hz\n");
+        for (name, row) in &variants {
+            set_style_row(*row);
+            std::fs::create_dir_all(out.join(name)).unwrap();
+            let (mut cs, mut es, mut fs, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for (i, w) in chunks.iter().enumerate() {
+                let a = Engine::synth_inner(&mut l, w, 2.2, true).unwrap();
+                assert_eq!(a.covered, w.len());
+                let (c, r, f) = style_measures(&a.pcm);
+                csv.push_str(&format!("{name},{i},{},{:.2},{c:.0},{r:.4},{f:.1}\n", lens[i], a.pcm.len() as f64 / 24000.0));
+                write_wav_at(&a.pcm, &out.join(name).join(format!("{i:02}.wav")));
+                all.extend_from_slice(&a.pcm);
+                all.extend(std::iter::repeat(0.0f32).take(6000));
+                cs.push(c);
+                es.push(r);
+                if f > 0.0 {
+                    fs.push(f);
+                }
+            }
+            write_wav_at(&all, &out.join(format!("{name}_all.wav")));
+            let sd = |v: &[f64]| {
+                let m = v.iter().sum::<f64>() / v.len().max(1) as f64;
+                (m, (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len().max(1) as f64).sqrt())
+            };
+            let (cm, csd) = sd(&cs);
+            let (em, esd) = sd(&es);
+            let (fm, fsd) = sd(&fs);
+            println!(
+                "{name:>10}: centroid {cm:.0} sd {csd:.0} (cv {:.3}) | rms {em:.4} sd {esd:.4} (cv {:.3}) | f0 {fm:.1} sd {fsd:.1} (cv {:.3}, n {})",
+                csd / cm, esd / em, fsd / fm, fs.len()
+            );
+        }
+        set_style_row(None);
+        std::fs::write(out.join("metrics.csv"), csv).unwrap();
     }
 
     fn write_wav_at(pcm: &[f32], p: &Path) {

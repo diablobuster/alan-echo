@@ -1250,3 +1250,572 @@ fn follow_reflow_manual() {
         "a PageDown (window.scrollBy) turns follow off: {after:?}"
     );
 }
+
+/// Task 4 (natural reading): a news-article page with every block kind the structure
+/// markers cover, plus page junk (nav, aside, footer, cookie dialog). `reps` repeats
+/// the article body so batch costs can be timed on 400-token batches.
+fn struct_fixture(tag: &str, reps: usize) -> String {
+    let mut body = String::new();
+    for r in 0..reps {
+        body.push_str(&format!(
+            "<h2>Section{r} the river rises</h2>\n\
+             <p>Engineers said on Tuesday that the old stone bridge carried twice its rated load for a decade, and nobody noticed until the cracks spread.</p>\n\
+             <ul><li>Bullet one about the bridge budget.</li><li>Bullet two about the inspection backlog.</li></ul>\n\
+             <ol><li>First step close the lanes.</li><li>Second step brace the arches.</li></ol>\n\
+             <table><tr><th>Year</th><th>Inspections</th></tr><tr><td>Twenty twenty</td><td>Four done</td></tr><tr><td>Twenty twenty one</td><td>None done</td></tr></table>\n\
+             <blockquote><p>We were lucky, the mayor said, and luck is not a plan.</p></blockquote>\n\
+             <figure><img alt=\"A cracked arch\" width=40 height=20 src=\"data:image/gif;base64,R0lGODlhAQABAAAAACw=\"><figcaption>Caption the cracked arch in March.</figcaption></figure>\n\
+             <pre><code>load = rated * 2.0\nfactor = safety</code></pre>\n\
+             <h3>Subhead{r} what happens next</h3>\n\
+             <pre>plain pre line one\nplain pre line two</pre>\n\
+             <table><caption>Table caption repair costs</caption><tr><td><p>Cell paragraph alpha</p></td><td>Beta (<code>inline</code>) gamma</td></tr></table>\n\
+             <h4><a href=\"#x{r}\">Linked heading four</a></h4>\n\
+             <ul><li><p>Item paragraph start</p></li><li><b>Bold</b>start of item</li></ul>\n\
+             <div aria-hidden=true>Hidden decorative text</div>\n\
+             <p>The council meets again next week to vote on the repair plan and the cost.</p>\n"
+        ));
+    }
+    format!(
+        "<!doctype html><html><head><meta charset=utf-8><title>{tag}</title>\
+         <style>body{{font:18px Georgia;max-width:760px;margin:20px auto}}</style></head><body>\n\
+         <header><nav><a href=\"#a\">Home</a> <a href=\"#b\">World</a> <a href=\"#c\">Sport</a></nav></header>\n\
+         <div role=dialog aria-label=\"Cookie consent\"><p>We use cookies to improve your experience.</p><button>Accept all cookies</button></div>\n\
+         <main><article><h1>Headline the bridge that held</h1>\n\
+         <p>Lead paragraph a city learns how close it came to disaster.</p>\n{body}</article>\n\
+         <aside><h2>Related</h2><ul><li><a href=\"#r1\">Related link one</a></li><li><a href=\"#r2\">Related link two</a></li></ul></aside></main>\n\
+         <footer><p>Footer copyright the news company.</p></footer>\n</body></html>"
+    )
+}
+
+/// Launches a throwaway Edge (RA_BROWSER for another Chromium) on a private temp
+/// profile with `html`, waits for its window (title = `tag`), raises it without focus.
+#[allow(clippy::zombie_processes)] // cleaned up by BrowserCleanup
+fn open_throwaway_browser(tag: &str, html: &str) -> (BrowserCleanup, HWND) {
+    let exe = std::env::var("RA_BROWSER")
+        .unwrap_or_else(|_| r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".into());
+    let dir = std::env::temp_dir();
+    let page = dir.join(format!("{tag}.html"));
+    let profile = dir.join(format!("{tag}-profile"));
+    std::fs::write(&page, html).unwrap();
+    let mut guard = BrowserCleanup { hwnd: None, profile: profile.clone(), page: page.clone() };
+    Command::new(&exe)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .args(["--no-first-run", "--no-default-browser-check", "--new-window", "--window-size=1100,900"])
+        .arg(format!("file:///{}", page.display().to_string().replace('\\', "/")))
+        .spawn()
+        .expect("launch browser");
+    let t0 = Instant::now();
+    let hwnd = loop {
+        if let Some(h) = find_window(tag) {
+            break h;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20), "browser window not found");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    guard.hwnd = Some(hwnd);
+    raise(hwnd);
+    std::thread::sleep(Duration::from_millis(1500));
+    // Edge may swap its startup window; re-find it by title
+    let hwnd = find_window(tag).unwrap_or(hwnd);
+    guard.hwnd = Some(hwnd);
+    (guard, hwnd)
+}
+
+/// The page's TextPattern (the one whose document contains `needle`), retried while
+/// Chromium builds its tree.
+fn page_text_pattern(uia: &IUIAutomation, hwnd: HWND, needle: &str) -> IUIAutomationTextPattern {
+    let cond = text_pattern_condition(uia).unwrap();
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(250));
+        let Ok(root) = (unsafe { uia.ElementFromHandle(hwnd) }) else { continue };
+        let Ok(all) = (unsafe { root.FindAll(TreeScope_Descendants, &cond) }) else { continue };
+        for i in 0..unsafe { all.Length() }.unwrap_or(0) {
+            let Ok(e) = (unsafe { all.GetElement(i) }) else { continue };
+            let Ok(tp) = (unsafe { e.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }) else {
+                continue;
+            };
+            let Ok(doc) = (unsafe { tp.DocumentRange() }) else { continue };
+            if unsafe { doc.FindText(&windows::core::BSTR::from(needle), false, false) }.is_ok() {
+                return tp;
+            }
+        }
+    }
+    panic!("page text {needle:?} not found");
+}
+
+/// Short name of a UIA control type (spike output).
+#[allow(non_upper_case_globals)]
+fn ct_name(t: UIA_CONTROLTYPE_ID) -> String {
+    match t {
+        UIA_TextControlTypeId => "Text".into(),
+        UIA_DocumentControlTypeId => "Document".into(),
+        UIA_GroupControlTypeId => "Group".into(),
+        UIA_ListControlTypeId => "List".into(),
+        UIA_ListItemControlTypeId => "ListItem".into(),
+        UIA_TableControlTypeId => "Table".into(),
+        UIA_DataItemControlTypeId => "DataItem".into(),
+        UIA_DataGridControlTypeId => "DataGrid".into(),
+        UIA_HeaderControlTypeId => "Header".into(),
+        UIA_HeaderItemControlTypeId => "HeaderItem".into(),
+        UIA_CustomControlTypeId => "Custom".into(),
+        UIA_HyperlinkControlTypeId => "Hyperlink".into(),
+        UIA_PaneControlTypeId => "Pane".into(),
+        UIA_ImageControlTypeId => "Image".into(),
+        UIA_ButtonControlTypeId => "Button".into(),
+        UIA_WindowControlTypeId => "Window".into(),
+        other => format!("{}", other.0),
+    }
+}
+
+/// One element's structure properties as a compact string (spike output).
+fn describe_el(el: &IUIAutomationElement) -> String {
+    let prop = |id: UIA_PROPERTY_ID| unsafe { el.GetCurrentPropertyValue(id) }.ok();
+    let as_i32 = |v: Option<VARIANT>| v.and_then(|v| i32::try_from(&v).ok());
+    let as_str = |v: Option<VARIANT>| v.map(|v| v.to_string()).unwrap_or_default();
+    let ct = unsafe { el.CurrentControlType() }.map(ct_name).unwrap_or_else(|_| "?".into());
+    let role = unsafe { el.CurrentAriaRole() }.map(|b| b.to_string()).unwrap_or_default();
+    let lct = unsafe { el.CurrentLocalizedControlType() }.map(|b| b.to_string()).unwrap_or_default();
+    let hl = as_i32(prop(UIA_HeadingLevelPropertyId)).map(|v| v - HeadingLevel_None.0);
+    let lm = as_i32(prop(UIA_LandmarkTypePropertyId)).unwrap_or(0);
+    let llm = as_str(prop(UIA_LocalizedLandmarkTypePropertyId));
+    let name: String = unsafe { el.CurrentName() }
+        .map(|b| b.to_string())
+        .unwrap_or_default()
+        .chars()
+        .take(24)
+        .collect();
+    let mut s = ct;
+    if !role.is_empty() {
+        s.push_str(&format!(" role={role}"));
+    }
+    s.push_str(&format!(" lct={lct:?}"));
+    if let Some(h) = hl.filter(|&h| h != 0) {
+        s.push_str(&format!(" H{h}"));
+    }
+    if lm != 0 {
+        s.push_str(&format!(" lm={lm}/{llm}"));
+    }
+    if !name.is_empty() {
+        s.push_str(&format!(" name={name:?}"));
+    }
+    s
+}
+
+/// Task 4 spike: what Edge's UIA returns at each block start of the fixture, and what
+/// the reads cost. Throwaway Edge only; sends no input.
+/// Run: cargo test uia_struct_spike -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn uia_struct_spike_manual() {
+    use crate::ra_perf::{ms, pct};
+    use windows::core::Interface;
+    let tag = format!("RaUiaStructSpike{}", std::process::id());
+    let reps = std::env::var("RA_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+    let (_guard, hwnd) = open_throwaway_browser(&tag, &struct_fixture(&tag, reps));
+    let uia = new_uia();
+    let tp = page_text_pattern(&uia, hwnd, "Headline the bridge");
+    let raw = unsafe { uia.RawViewWalker() }.unwrap();
+    // every token of the page from the start
+    let r = unsafe { tp.DocumentRange() }.unwrap();
+    unsafe {
+        r.MoveEndpointByRange(TextPatternRangeEndpoint_End, &r, TextPatternRangeEndpoint_Start).unwrap();
+        r.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
+    }
+    let mut toks: Vec<(String, IUIAutomationTextRange)> = Vec::new();
+    loop {
+        let text = unsafe { r.GetText(-1) }.map(|b| b.to_string()).unwrap_or_default();
+        toks.push((text, unsafe { r.Clone() }.unwrap()));
+        if toks.len() > 6000 || unsafe { r.Move(TextUnit_Word, 1) }.unwrap_or(0) == 0 {
+            break;
+        }
+        unsafe { r.ExpandToEnclosingUnit(TextUnit_Word) }.unwrap();
+    }
+    println!("{} tokens", toks.len());
+    let dump: usize = std::env::var("RA_DUMP").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    println!("{:?}", toks.iter().take(dump).map(|t| t.0.as_str()).collect::<Vec<_>>());
+    let mut starts = Vec::new();
+    for i in 0..toks.len() {
+        let prev = i.checked_sub(1).map(|j| toks[j].0.as_str());
+        if structure::block_start(prev, &toks[i].0, true) {
+            starts.push(i);
+        }
+    }
+    println!("{} block starts", starts.len());
+    let n_show: usize = std::env::var("RA_SHOW").ok().and_then(|s| s.parse().ok()).unwrap_or(45);
+    for &i in starts.iter().take(n_show) {
+        let (t, rg) = &toks[i];
+        let style = unsafe { rg.GetAttributeValue(UIA_StyleIdAttributeId) }
+            .ok()
+            .map(|v| i32::try_from(&v).map(|n| n.to_string()).unwrap_or_else(|_| "n/a".into()))
+            .unwrap_or_else(|| "err".into());
+        println!("#{i} {t:?} (prev {:?}) style={style}", i.checked_sub(1).map(|j| toks[j].0.clone()));
+        let Ok(mut el) = (unsafe { rg.GetEnclosingElement() }) else {
+            println!("    (no enclosing element)");
+            continue;
+        };
+        for _ in 0..10 {
+            let is_doc = unsafe { el.CurrentControlType() }.is_ok_and(|c| c == UIA_DocumentControlTypeId);
+            println!("    {}", describe_el(&el));
+            if is_doc {
+                break;
+            }
+            match unsafe { raw.GetParentElement(&el) } {
+                Ok(p) => el = p,
+                Err(_) => break,
+            }
+        }
+    }
+    // cost per block start
+    let mut walk = Vec::new();
+    for _ in 0..3 {
+        let r = unsafe { toks[0].1.Clone() }.unwrap();
+        let t = Instant::now();
+        for _ in 0..400 {
+            unsafe {
+                let _ = r.Move(TextUnit_Word, 1);
+                let _ = r.ExpandToEnclosingUnit(TextUnit_Word);
+                let _ = r.Clone();
+                let _ = r.GetText(-1);
+            }
+        }
+        walk.push(ms(t.elapsed()));
+    }
+    println!("plain 400-token walk:           {}", pct(&walk));
+    let mut enc = Vec::new();
+    let mut full = Vec::new();
+    let mut sty = Vec::new();
+    for &i in &starts {
+        let rg = &toks[i].1;
+        let t = Instant::now();
+        let el = unsafe { rg.GetEnclosingElement() };
+        enc.push(ms(t.elapsed()));
+        let t = Instant::now();
+        if let Ok(el) = &el {
+            let _ = unsafe { el.CurrentControlType() };
+            let _ = unsafe { el.CurrentAriaRole() };
+            let _ = unsafe { el.GetCurrentPropertyValue(UIA_HeadingLevelPropertyId) };
+            if let Ok(p) = unsafe { raw.GetParentElement(el) } {
+                let _ = unsafe { p.CurrentControlType() };
+                let _ = unsafe { p.CurrentAriaRole() };
+            }
+        }
+        full.push(ms(t.elapsed()));
+        let t = Instant::now();
+        let _ = unsafe { rg.GetAttributeValue(UIA_StyleIdAttributeId) };
+        sty.push(ms(t.elapsed()));
+    }
+    println!("GetEnclosingElement:            {}", pct(&enc));
+    println!("props + 1 parent (ct/role/hl):  {}", pct(&full));
+    println!("StyleId attribute:              {}", pct(&sty));
+    let cr = unsafe { uia.CreateCacheRequest() }.unwrap();
+    for p in [UIA_ControlTypePropertyId, UIA_AriaRolePropertyId, UIA_HeadingLevelPropertyId, UIA_LandmarkTypePropertyId] {
+        unsafe { cr.AddProperty(p) }.unwrap();
+    }
+    let mut cached = Vec::new();
+    for &i in &starts {
+        let rg = &toks[i].1;
+        let t = Instant::now();
+        if let Ok(r3) = rg.cast::<IUIAutomationTextRange3>() {
+            if let Ok(el) = unsafe { r3.GetEnclosingElementBuildCache(&cr) } {
+                let _ = unsafe { el.CachedControlType() };
+                let _ = unsafe { el.CachedAriaRole() };
+            }
+        }
+        cached.push(ms(t.elapsed()));
+    }
+    println!("EnclosingElementBuildCache:     {}", pct(&cached));
+    println!("block starts per 400 tokens:    {:.0}", starts.len() as f64 / toks.len() as f64 * 400.0);
+}
+
+/// A token's marker (if any) and its text, for printing.
+fn split_mark(t: &str) -> (Option<crate::ra_struct::Brk>, &str) {
+    crate::ra_struct::strip_mark(t)
+}
+
+/// Task 4 live check: the real worker reads the fixture in a throwaway Edge; the
+/// marked tokens are printed and headings / list items / cells / quote / caption /
+/// code must be marked, page junk and running text not. Then the cost of the
+/// structure reads per 400-token batch (same page, structure on vs off).
+/// Run: cargo test uia_struct_live -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn uia_struct_live_manual() {
+    use crate::ra_perf::{ms, pct};
+    use crate::ra_struct::Brk;
+    unsafe {
+        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    let tag = format!("RaUiaStructLive{}", std::process::id());
+    let (_guard, hwnd) = open_throwaway_browser(&tag, &struct_fixture(&tag, 16));
+    let uia = new_uia();
+    let tp = page_text_pattern(&uia, hwnd, "Headline the bridge");
+    let head = unsafe { tp.DocumentRange().unwrap().FindText(&windows::core::BSTR::from("Headline"), false, false) }
+        .expect("headline");
+    let w = rects_of(&head).unwrap_or_default().first().cloned().expect("headline on screen");
+    // Edge on a fresh profile may float a bubble over the page: click a part of the
+    // word that our page window owns
+    let cy = (w.y + w.h / 2.0) as i32;
+    let ours = find_window(&tag).unwrap_or(hwnd);
+    let cx = (0..8)
+        .map(|k| (w.x + 4.0 + k as f64 * (w.w - 8.0) / 7.0) as i32)
+        .find(|&x| unsafe { GetAncestor(WindowFromPoint(POINT { x, y: cy }), GA_ROOT) } == ours)
+        .unwrap_or((w.x + w.w / 2.0) as i32);
+
+    let ra = Uia::start(hwnd.0 as isize);
+    let t = Instant::now();
+    // another test's topmost window may cover ours for a moment: re-raise and retry
+    let mut picked = Err(String::new());
+    for _ in 0..6 {
+        picked = ra.pick(cx, cy);
+        if picked.is_ok() {
+            break;
+        }
+        let top = unsafe { GetAncestor(WindowFromPoint(POINT { x: cx, y: cy }), GA_ROOT) };
+        let mut buf = [0u16; 128];
+        let n = unsafe { GetWindowTextW(top, &mut buf) }.max(0) as usize;
+        let mut cls = [0u16; 128];
+        let cn = unsafe { GetClassNameW(top, &mut cls) }.max(0) as usize;
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(top, Some(&mut pid)) };
+        let mut our_pid = 0u32;
+        unsafe { GetWindowThreadProcessId(find_window(&tag).unwrap_or(hwnd), Some(&mut our_pid)) };
+        let wr_top = window_rect(top);
+        println!(
+            "pick at ({cx},{cy}) {w:?}: {picked:?}; window there {:?} {wr_top:?} class {:?} pid {pid} (our browser pid {our_pid}) (ours {:?}, at {:?}); retrying",
+            String::from_utf16_lossy(&buf[..n]),
+            String::from_utf16_lossy(&cls[..cn]),
+            find_window(&tag).map(|h| h.0),
+            find_window(&tag).map(window_rect)
+        );
+        raise(find_window(&tag).unwrap_or(hwnd));
+    }
+    let mut all = picked.expect("pick the headline");
+    println!("pick: {} tokens in {} ms", all.len(), t.elapsed().as_millis());
+    loop {
+        let more = ra.more().expect("more()");
+        if more.is_empty() {
+            break;
+        }
+        all.extend(more);
+        assert!(all.len() < 20_000, "more() never reached the end");
+    }
+    drop(ra);
+    let marks: Vec<(usize, Brk, String)> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let (b, rest) = split_mark(t);
+            b.map(|b| (i, b, rest.to_string()))
+        })
+        .collect();
+    println!("{} tokens, {} marked; first article copy:", all.len(), marks.len());
+    for (i, b, t) in marks.iter().take(36) {
+        println!("  #{i} {b:?} {t:?}");
+    }
+    let marked = |b: Brk, word: &str| marks.iter().any(|(_, mb, t)| *mb == b && t.trim() == word);
+    let unmarked = |word: &str| !marks.iter().any(|(_, _, t)| t.trim() == word);
+    assert!(split_mark(&all[0]).0 == Some(Brk::Heading(1)), "the clicked H1: {:?}", all[0]);
+    assert!(marked(Brk::Heading(2), "Section0"));
+    assert!(marked(Brk::Heading(3), "Subhead0"));
+    assert!(marked(Brk::Heading(4), "Linked"), "a heading whose text is a link");
+    assert!(marked(Brk::ListItem, "•"));
+    assert!(marked(Brk::ListItem, "1"));
+    assert!(marked(Brk::ListItem, "2"));
+    assert!(marked(Brk::TableRow, "Year"));
+    assert!(marked(Brk::TableCell, "Inspections"));
+    assert!(marked(Brk::TableRow, "Twenty"));
+    assert!(marked(Brk::TableCell, "Four"));
+    assert!(marked(Brk::TableRow, "Cell"), "a cell holding a <p>");
+    assert!(marked(Brk::TableCell, "Beta"));
+    assert!(marked(Brk::Quote, "We"));
+    assert!(marked(Brk::Caption, "Caption"));
+    assert!(marked(Brk::Caption, "Table"), "a table caption");
+    assert!(marked(Brk::Code, "load"));
+    assert!(marked(Brk::Paragraph, "Lead"));
+    assert!(marked(Brk::Paragraph, "Engineers"));
+    assert!(marked(Brk::Paragraph, "Footer"));
+    for w in ["inline", "factor", "start", "Bullet", "decade", ",", "Home", "World", "Accept"] {
+        assert!(unmarked(w), "{w} is not a block start of a known kind");
+    }
+    // every copy of the article got its markers (the budget held on each batch)
+    let h2 = marks.iter().filter(|(_, b, _)| *b == Brk::Heading(2)).count();
+    assert!(h2 >= 6, "an H2 per section: {h2}");
+
+    // cost: the same page read in 400-token batches, structure on vs off
+    let start = unsafe { tp.DocumentRange().unwrap() };
+    unsafe {
+        start.MoveEndpointByRange(TextPatternRangeEndpoint_End, &start, TextPatternRangeEndpoint_Start).unwrap();
+        start.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
+    }
+    for round in 0..2 {
+        for on in [false, true] {
+            let mut read = UiaRead {
+                chromium: true,
+                cursor: Some(unsafe { start.Clone() }.unwrap()),
+                structure: if on { structure::Reader::new(&uia, true) } else { structure::Reader::default() },
+                ..Default::default()
+            };
+            let mut times = Vec::new();
+            let mut extra = Vec::new();
+            let (mut n_marked, mut n_checked, mut n_over) = (0, 0, 0);
+            loop {
+                let prev = read.cursor.as_ref().and_then(|c| unsafe { c.GetText(-1) }.ok()).map(|b| b.to_string());
+                let mut batch = structure::Batch::new(MORE_BATCH, prev);
+                let t = Instant::now();
+                let b = read_forward_in(&mut read, MORE_BATCH, &mut batch).expect("read_forward");
+                if b.len() < MORE_BATCH {
+                    break; // time full batches only
+                }
+                times.push(ms(t.elapsed()));
+                extra.push(ms(batch.spent()));
+                n_marked += batch.marked;
+                n_checked += batch.checked;
+                n_over += usize::from(batch.over);
+            }
+            println!(
+                "round {round} structure {}: 400-token batch {} ; structure reads {} ; {n_marked} marked of {n_checked} candidates; {n_over} batches hit the budget",
+                if on { "on " } else { "off" },
+                pct(&times),
+                pct(&extra)
+            );
+        }
+    }
+}
+
+/// Task 4: Notepad has no structure: the first block start's StyleId read finds it
+/// unsupported and turns structure reads off for the read (no markers, no cost after).
+/// Refuses to run while any Notepad is open.
+/// Run: cargo test uia_struct_notepad -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn uia_struct_notepad_manual() {
+    if !notepad_pids().is_empty() {
+        println!("skipped: a Notepad is open (this test never touches your windows)");
+        return;
+    }
+    let stem = format!("{NP_PREFIX}struct_{}", std::process::id());
+    let file = std::env::temp_dir().join(format!("{stem}.txt"));
+    let lines: String = (0..60).map(|i| format!("Line{i:02} alpha bravo charlie.\r\n# Not a heading {i}\r\n")).collect();
+    std::fs::write(&file, lines).unwrap();
+    let mut guard = Cleanup { hwnds: vec![], files: vec![file.clone()] };
+    let hwnd = open_in_notepad(&file, &stem);
+    guard.hwnds.push(hwnd);
+    std::thread::sleep(Duration::from_millis(1000));
+    let uia = new_uia();
+    let (_, tp) = main_text(&uia, hwnd);
+    let start = unsafe { tp.DocumentRange() }.unwrap();
+    unsafe {
+        start.MoveEndpointByRange(TextPatternRangeEndpoint_End, &start, TextPatternRangeEndpoint_Start).unwrap();
+        start.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
+    }
+    let mut read = UiaRead {
+        cursor: Some(start),
+        structure: structure::Reader::new(&uia, false),
+        ..Default::default()
+    };
+    assert_eq!(read.structure.mode, structure::Mode::Style);
+    let mut batch = structure::Batch::new(MORE_BATCH, None);
+    let toks = read_forward_in(&mut read, MORE_BATCH, &mut batch).expect("read");
+    println!(
+        "{} tokens, first {:?}; {} candidates checked in {:.2} ms; mode now {:?}",
+        toks.len(),
+        &toks[..toks.len().min(6)],
+        batch.checked,
+        batch.spent().as_secs_f64() * 1000.0,
+        read.structure.mode
+    );
+    assert!(toks.iter().any(|t| t.contains('\r')), "Notepad tokens carry line breaks");
+    assert!(toks.iter().all(|t| crate::ra_struct::strip_mark(t).0.is_none()), "no markers");
+    assert_eq!(read.structure.mode, structure::Mode::Off, "turned off after the first read");
+    assert!(batch.checked <= 1, "one StyleId read at most");
+}
+
+/// Task 4: Word's StyleId at block starts. Needs `RA_WORD_DOC` = a .docx with Title,
+/// Heading 1/2, List Bullet / List Number and Quote paragraphs (the report says how it
+/// was made). Opens it in a NEW Word process only when no Word is running (never
+/// touches the user's documents), prints the marked tokens, then closes and kills only
+/// that process.
+/// Run: cargo test uia_struct_word -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+#[allow(clippy::zombie_processes)] // the Word process is killed by `Kill`
+fn uia_struct_word_manual() {
+    use crate::ra_struct::{strip_mark, Brk};
+    let Ok(doc) = std::env::var("RA_WORD_DOC") else {
+        println!("skipped: set RA_WORD_DOC");
+        return;
+    };
+    let exe = r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE";
+    if !std::path::Path::new(exe).exists() {
+        println!("skipped: Word is not installed");
+        return;
+    }
+    let running = Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq WINWORD.EXE", "/NH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("WINWORD"))
+        .unwrap_or(true);
+    if running {
+        println!("skipped: Word is running (this test never touches your documents)");
+        return;
+    }
+    let stem = std::path::Path::new(&doc).file_stem().unwrap().to_string_lossy().to_string();
+    let mut child = Command::new(exe).args(["/q", "/w", &doc]).spawn().expect("launch Word");
+    /// Kills the Word process this test started (only it), even on a failed assert.
+    struct Kill(u32);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = Command::new("taskkill").args(["/PID", &self.0.to_string(), "/F"]).output();
+        }
+    }
+    let _kill = Kill(child.id());
+    let t0 = Instant::now();
+    let hwnd = loop {
+        if let Some(h) = find_window(&stem) {
+            break h;
+        }
+        if t0.elapsed() > Duration::from_secs(30) {
+            println!("Word window not found (a first-run dialog?)");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    std::thread::sleep(Duration::from_millis(2500));
+    let uia = new_uia();
+    let (_, tp) = main_text(&uia, hwnd);
+    let start = unsafe { tp.DocumentRange() }.unwrap();
+    unsafe {
+        start.MoveEndpointByRange(TextPatternRangeEndpoint_End, &start, TextPatternRangeEndpoint_Start).unwrap();
+        start.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
+    }
+    let first = unsafe { start.GetText(-1) }.map(|b| b.to_string()).unwrap_or_default();
+    let mut read = UiaRead {
+        cursor: Some(start.clone()),
+        structure: structure::Reader::new(&uia, false),
+        ..Default::default()
+    };
+    let mut batch = structure::Batch::new(MORE_BATCH, None);
+    let mut toks = vec![batch.token(&mut read.structure, &start, first)];
+    toks.extend(read_forward_in(&mut read, MORE_BATCH - 1, &mut batch).expect("read"));
+    println!(
+        "{} tokens; {} marked of {} candidates in {:.2} ms; mode {:?}",
+        toks.len(),
+        batch.marked,
+        batch.checked,
+        batch.spent().as_secs_f64() * 1000.0,
+        read.structure.mode
+    );
+    println!("{:?}", &toks[..toks.len().min(80)]);
+    let marks: Vec<(Brk, String)> =
+        toks.iter().filter_map(|t| { let (b, r) = strip_mark(t); b.map(|b| (b, r.to_string())) }).collect();
+    for (b, t) in &marks {
+        println!("  {b:?} {t:?}");
+    }
+    unsafe {
+        let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(2000));
+    let _ = child.try_wait();
+    assert!(marks.iter().any(|(b, _)| *b == Brk::Heading(1)), "Heading 1 / Title marked");
+    assert!(marks.iter().any(|(b, _)| *b == Brk::ListItem), "list items marked");
+}

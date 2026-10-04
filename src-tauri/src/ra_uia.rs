@@ -471,6 +471,8 @@ struct UiaRead {
     /// When the scroller was last (re)resolved: a failed query re-resolves it at most
     /// once a second (Chrome rebuilds its tree on single-page apps).
     scroller_at: Option<Instant>,
+    /// Page structure reads at block starts (natural-reading spec §5).
+    structure: structure::Reader,
 }
 
 impl UiaRead {
@@ -1163,13 +1165,15 @@ fn pick_uia(st: &mut State, x: i32, y: i32, retry: bool) -> Result<(Read, Vec<St
         hwnd: st.target.hwnd,
         chromium: st.target.chromium,
         ranges: vec![r.clone()],
-        cursor: Some(r),
+        cursor: Some(r.clone()),
+        structure: structure::Reader::new(&st.uia, st.target.chromium),
         ..Default::default()
     };
+    let mut batch = structure::Batch::new(FIRST_BATCH, None);
     let mut out = Vec::with_capacity(FIRST_BATCH);
-    out.push(first);
+    out.push(batch.token(&mut read.structure, &r, first));
     // a failed forward read keeps the clicked word; more() continues from the cursor
-    out.extend(read_forward(&mut read, FIRST_BATCH - 1).unwrap_or_default());
+    out.extend(read_forward_in(&mut read, FIRST_BATCH - 1, &mut batch).unwrap_or_default());
     Ok((Read::Uia(read), out))
 }
 
@@ -1177,6 +1181,19 @@ fn pick_uia(st: &mut State, x: i32, y: i32, retry: bool) -> Result<(Read, Vec<St
 /// `Ok(empty)` only at the true end of the text. A UIA error before any token is read
 /// is `Err` (retryable); after some tokens it ends the batch early (`Ok(partial)`).
 fn read_forward(read: &mut UiaRead, n: usize) -> Result<Vec<String>, String> {
+    // the token before this batch decides whether its first token starts a block
+    let prev = match (read.structure.mode, read.cursor.as_ref()) {
+        (structure::Mode::Off, _) | (_, None) => None,
+        (_, Some(c)) => unsafe { c.GetText(-1) }.ok().map(|b| b.to_string()),
+    };
+    let mut batch = structure::Batch::new(n, prev);
+    read_forward_in(read, n, &mut batch)
+}
+
+/// `read_forward` with the batch's structure state (the pick shares one with its
+/// first token). Block-start tokens get a structure marker (spec §5); the marker
+/// changes no token count or source index.
+fn read_forward_in(read: &mut UiaRead, n: usize, batch: &mut structure::Batch) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let Some(cur) = read.cursor.as_ref() else {
         return Err("no current read".into());
@@ -1201,9 +1218,19 @@ fn read_forward(read: &mut UiaRead, n: usize) -> Result<Vec<String>, String> {
         let text = unsafe { keep.GetText(-1) }
             .map(|b| b.to_string())
             .unwrap_or_default();
+        let text = batch.token(&mut read.structure, &keep, text);
         read.ranges.push(keep.clone());
         read.cursor = Some(keep);
         out.push(text);
+    }
+    if batch.checked > 0 {
+        log::debug!(
+            "read-aloud: structure: {} of {} block starts marked in {} ms{}",
+            batch.marked,
+            batch.checked,
+            batch.spent().as_millis(),
+            if batch.over { " (budget reached)" } else { "" }
+        );
     }
     Ok(out)
 }
@@ -1639,6 +1666,9 @@ mod tests {
         assert!(read.at_end_of_screen());
     }
 }
+
+#[path = "ra_uia_struct.rs"]
+mod structure;
 
 #[cfg(test)]
 #[path = "ra_uia_manual_tests.rs"]

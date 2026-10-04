@@ -123,16 +123,6 @@ pub(super) fn classify(el: &ElInfo, child: &ElInfo) -> Step {
     Step::Up
 }
 
-/// The walk reached a container: when it came up through a generic block (a `Group`:
-/// Chromium's `<p>` / `<div>`), the token starts a paragraph (Chromium word ranges
-/// carry no line breaks, so the raw-text rules cannot see it). `cts`: the control
-/// types below the container, enclosing element first. Also returns the index of the
-/// outermost such block (the elements below it must be first children).
-pub(super) fn plain_block(cts: &[i32]) -> Option<(Brk, usize)> {
-    let top = cts.iter().rposition(|&c| c == UIA_GroupControlTypeId.0)?;
-    Some((Brk::Paragraph, top))
-}
-
 /// The block kind of a Word-style paragraph (StyleId text attribute), if any.
 pub(super) fn style_brk(style: i32) -> Option<Brk> {
     let id = UIA_STYLE_ID(style);
@@ -151,9 +141,9 @@ pub(super) fn style_brk(style: i32) -> Option<Brk> {
     None
 }
 
-/// True when the element's text (`name`) starts with this token: the token is the
-/// element's first word, not a word in its middle. An embedded object (U+FFFC) is an
-/// element of its own.
+/// True when the element's text (`name`) starts with this token's text: a cheap
+/// local pre-test only (`1` matches "1.1" twice); the caller then checks the
+/// token's position. An embedded object (U+FFFC) is an element of its own.
 pub(super) fn leaf_starts_with(name: &str, tok: &str) -> bool {
     let t = tok.trim();
     if t.is_empty() {
@@ -168,8 +158,103 @@ pub(super) fn budget(n: usize) -> Duration {
     Duration::from_micros((n as u64).saturating_mul(150_000) / 400)
 }
 
-/// Max ancestors walked above the enclosing element.
-const MAX_UP: usize = 4;
+/// Max ancestors walked above the enclosing element (news sites nest `<p>` 6-8 deep).
+const MAX_UP: usize = 12;
+
+/// What the structure walk asks of the element tree (UIA live, a fake in tests).
+pub(super) trait Tree {
+    type El;
+    /// The parent of `el` and its properties (`None`: no parent, or an error).
+    fn parent(&mut self, el: &Self::El) -> Option<(Self::El, ElInfo)>;
+    /// `Some(true)` when `el` has no previous sibling, `Some(false)` when it has one,
+    /// `None` on an error (no marker: never guess).
+    fn is_first(&mut self, el: &Self::El) -> Option<bool>;
+    /// The batch's structure budget is spent: stop before the next read.
+    fn out_of_time(&self) -> bool;
+}
+
+/// The block kind that starts at a token, walking up from its enclosing element
+/// `leaf` (already known to start at the token). Each step up needs the element to be
+/// its parent's first child (then the token starts the parent too). The first block
+/// kind found wins; if the walk leaves the blocks the token starts before finding
+/// one, a generic block (`Group`: Chromium's `<p>`, `<div>`, `<section>`) that the
+/// token does start makes it a `Paragraph` (Chromium word ranges carry no line breaks,
+/// so the raw-text rules cannot see paragraphs). Errors and an empty budget give no
+/// marker.
+pub(super) fn walk<T: Tree>(t: &mut T, leaf: T::El, leaf_info: ElInfo) -> Option<Brk> {
+    let group = UIA_GroupControlTypeId.0;
+    let mut para = leaf_info.ct == group;
+    let para_brk = |p: bool| p.then_some(Brk::Paragraph);
+    let (mut el, mut info) = (leaf, leaf_info);
+    // the enclosing element itself (Chromium: almost always a text leaf)
+    match classify(&info, &ElInfo::default()) {
+        Step::Mark(b) => return Some(b),
+        Step::Stop => return None,
+        Step::Block(b) => return t.is_first(&el)?.then_some(b),
+        Step::Cell => return Some(if t.is_first(&el)? { Brk::TableRow } else { Brk::TableCell }),
+        Step::Up => {}
+    }
+    for _ in 0..MAX_UP {
+        if t.out_of_time() {
+            return None;
+        }
+        let Some((parent, pinfo)) = t.parent(&el) else {
+            return para_brk(para);
+        };
+        let step = classify(&pinfo, &info);
+        if step == Step::Stop {
+            return para_brk(para);
+        }
+        if t.out_of_time() {
+            return None;
+        }
+        if !t.is_first(&el)? {
+            // the token starts `el` but not its parent: nothing above starts here
+            return para_brk(para);
+        }
+        match step {
+            Step::Mark(b) => return Some(b),
+            Step::Block(b) => return if t.is_first(&parent)? { Some(b) } else { para_brk(para) },
+            Step::Cell => return Some(if t.is_first(&parent)? { Brk::TableRow } else { Brk::TableCell }),
+            Step::Up | Step::Stop => {}
+        }
+        para |= pinfo.ct == group;
+        el = parent;
+        info = pinfo;
+    }
+    // deeper than MAX_UP: the token still starts every block passed
+    para_brk(para)
+}
+
+/// The live element tree: one cached parent read and one sibling read per step.
+struct UiaTree<'a> {
+    walker: &'a IUIAutomationTreeWalker,
+    cache: &'a IUIAutomationCacheRequest,
+    deadline: Instant,
+}
+
+impl Tree for UiaTree<'_> {
+    type El = IUIAutomationElement;
+
+    fn parent(&mut self, el: &IUIAutomationElement) -> Option<(IUIAutomationElement, ElInfo)> {
+        let p = unsafe { self.walker.GetParentElementBuildCache(el, self.cache) }.ok()?;
+        let info = cached_info(&p);
+        Some((p, info))
+    }
+
+    fn is_first(&mut self, el: &IUIAutomationElement) -> Option<bool> {
+        match unsafe { self.walker.GetPreviousSiblingElement(el) } {
+            Ok(_) => Some(false),
+            // windows-rs reports a null result ("no sibling") as an error with S_OK
+            Err(e) if e.code().is_ok() => Some(true),
+            Err(_) => None,
+        }
+    }
+
+    fn out_of_time(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+}
 
 /// Structure reads for one UIA read: the mode plus the COM helpers they use.
 #[derive(Default)]
@@ -177,13 +262,16 @@ pub(super) struct Reader {
     pub mode: Mode,
     walker: Option<IUIAutomationTreeWalker>,
     cache: Option<IUIAutomationCacheRequest>,
+    /// The read's TextPattern: the range of an element, to check it starts at a token.
+    pattern: Option<IUIAutomationTextPattern>,
     /// UIA's "not supported" attribute value (Style mode).
     not_supported: Option<windows::core::IUnknown>,
 }
 
 impl Reader {
-    /// A reader for a read from `uia`: element walk on Chromium, StyleId elsewhere.
-    pub fn new(uia: &IUIAutomation, chromium: bool) -> Reader {
+    /// A reader for a read from `uia` in TextPattern `pattern`: element walk on
+    /// Chromium (needs the pattern), StyleId elsewhere.
+    pub fn new(uia: &IUIAutomation, chromium: bool, pattern: Option<IUIAutomationTextPattern>) -> Reader {
         if !chromium {
             return Reader {
                 mode: Mode::Style,
@@ -191,6 +279,9 @@ impl Reader {
                 ..Default::default()
             };
         }
+        let Some(pattern) = pattern else {
+            return Reader::default();
+        };
         let made = (|| -> windows::core::Result<(IUIAutomationTreeWalker, IUIAutomationCacheRequest)> {
             let walker = unsafe { uia.RawViewWalker() }?;
             let cr = unsafe { uia.CreateCacheRequest() }?;
@@ -206,7 +297,13 @@ impl Reader {
             Ok((walker, cr))
         })();
         match made {
-            Ok((w, c)) => Reader { mode: Mode::Elements, walker: Some(w), cache: Some(c), not_supported: None },
+            Ok((w, c)) => Reader {
+                mode: Mode::Elements,
+                walker: Some(w),
+                cache: Some(c),
+                pattern: Some(pattern),
+                not_supported: None,
+            },
             Err(e) => {
                 log::debug!("read-aloud: structure reads off: {e}");
                 Reader::default()
@@ -215,8 +312,12 @@ impl Reader {
     }
 
     /// The block kind starting at word range `r` (text `tok`), already known to be a
-    /// block-start candidate. `None` when unknown or on any UIA error.
-    pub fn brk_at(&mut self, r: &IUIAutomationTextRange, tok: &str) -> Option<Brk> {
+    /// block-start candidate. `None` when unknown, on any UIA error, or when `deadline`
+    /// passes (checked before each read).
+    pub fn brk_at(&mut self, r: &IUIAutomationTextRange, tok: &str, deadline: Instant) -> Option<Brk> {
+        if Instant::now() >= deadline {
+            return None;
+        }
         match self.mode {
             Mode::Off => None,
             Mode::Style => {
@@ -231,56 +332,29 @@ impl Reader {
                 }
                 None
             }
-            Mode::Elements => self.walk(r, tok),
+            Mode::Elements => self.elements(r, tok, deadline),
         }
     }
 
-    /// Chromium: from the token's enclosing element up to the first block ancestor;
-    /// every step must be its parent's first child (the token starts that block).
-    fn walk(&self, r: &IUIAutomationTextRange, tok: &str) -> Option<Brk> {
-        let (walker, cr) = (self.walker.as_ref()?, self.cache.as_ref()?);
+    /// Chromium: the token's enclosing element must start exactly at the token (its
+    /// position, not just its text: "1.1" is `1` `.` `1` in one element), then `walk`.
+    fn elements(&self, r: &IUIAutomationTextRange, tok: &str, deadline: Instant) -> Option<Brk> {
+        let (walker, cache, pattern) = (self.walker.as_ref()?, self.cache.as_ref()?, self.pattern.as_ref()?);
         let r3 = r.cast::<IUIAutomationTextRange3>().ok()?;
-        let leaf = unsafe { r3.GetEnclosingElementBuildCache(cr) }.ok()?;
+        let leaf = unsafe { r3.GetEnclosingElementBuildCache(cache) }.ok()?;
         let name = unsafe { leaf.CachedName() }.map(|b| b.to_string()).unwrap_or_default();
-        if !leaf_starts_with(&name, tok) {
+        // cheap text test first (no cross-process call), then the position
+        if !leaf_starts_with(&name, tok) || Instant::now() >= deadline {
             return None;
         }
-        let mut el = leaf;
-        let mut info = cached_info(&el);
-        // the elements below `el` on the way up; each must be its parent's first child,
-        // checked only once a block kind is found (plain paragraphs cost no checks)
-        let mut below: Vec<IUIAutomationElement> = Vec::new();
-        let mut below_cts: Vec<i32> = Vec::new();
-        let mut child_info = ElInfo::default();
-        for _ in 0..=MAX_UP {
-            let step = classify(&info, &child_info);
-            let first_of = |e: &IUIAutomationElement| first_child(walker, e);
-            let starts_here = || below.iter().all(first_of);
-            match step {
-                // a container: the token starts the plain block (<p>, <div>) below it
-                // when it starts each element below that block
-                Step::Stop => {
-                    let (b, top) = plain_block(&below_cts)?;
-                    return below.get(..top)?.iter().all(first_of).then_some(b);
-                }
-                Step::Mark(b) => return starts_here().then_some(b),
-                Step::Block(b) => return (starts_here() && first_of(&el)).then_some(b),
-                Step::Cell => {
-                    if !starts_here() {
-                        return None;
-                    }
-                    return Some(if first_of(&el) { Brk::TableRow } else { Brk::TableCell });
-                }
-                Step::Up => {}
-            }
-            let parent = unsafe { walker.GetParentElementBuildCache(&el, cr) }.ok()?;
-            let pinfo = cached_info(&parent);
-            below.push(el);
-            below_cts.push(info.ct);
-            el = parent;
-            child_info = std::mem::replace(&mut info, pinfo);
+        let lr = unsafe { pattern.RangeFromChild(&leaf) }.ok()?;
+        let at = unsafe { lr.CompareEndpoints(TextPatternRangeEndpoint_Start, r, TextPatternRangeEndpoint_Start) }
+            .ok()?;
+        if at != 0 {
+            return None;
         }
-        None
+        let info = cached_info(&leaf);
+        walk(&mut UiaTree { walker, cache, deadline }, leaf, info)
     }
 }
 
@@ -300,14 +374,8 @@ fn cached_info(el: &IUIAutomationElement) -> ElInfo {
     }
 }
 
-/// True when `el` has no previous sibling (a failed query counts as none: the other
-/// checks still have to pass).
-fn first_child(walker: &IUIAutomationTreeWalker, el: &IUIAutomationElement) -> bool {
-    unsafe { walker.GetPreviousSiblingElement(el) }.is_err()
-}
-
 /// Structure reads for one batch: candidates only, and none once the batch has spent
-/// its budget (`budget(n)`).
+/// its budget (`budget(n)`; a read never starts past it).
 pub(super) struct Batch {
     spent: Duration,
     limit: Duration,
@@ -325,6 +393,12 @@ impl Batch {
         Batch { spent: Duration::ZERO, limit: budget(n), prev, marked: 0, checked: 0, over: false }
     }
 
+    /// Counts `d` (a structure-only read outside `token`) against the budget.
+    pub fn charge(&mut self, d: Duration) {
+        self.spent += d;
+        self.over |= self.spent >= self.limit;
+    }
+
     /// `tok` with its structure marker when it starts a known block. Remembers `tok`
     /// as the previous token.
     pub fn token(&mut self, reader: &mut Reader, r: &IUIAutomationTextRange, tok: String) -> String {
@@ -333,12 +407,10 @@ impl Batch {
         let mut out = None;
         if candidate && !self.over {
             let t = Instant::now();
-            let b = reader.brk_at(r, &tok);
-            self.spent += t.elapsed();
+            let deadline = t + self.limit.saturating_sub(self.spent);
+            let b = reader.brk_at(r, &tok, deadline);
+            self.charge(t.elapsed());
             self.checked += 1;
-            if self.spent >= self.limit {
-                self.over = true;
-            }
             if let Some(b) = b {
                 self.marked += 1;
                 out = Some(format!("{}{tok}", crate::ra_struct::mark(b)));
@@ -437,15 +509,143 @@ mod tests {
         assert_eq!(classify(&ElInfo::default(), &ElInfo::default()), Step::Up, "unknown: look higher");
     }
 
+    /// A fake element tree: node i = (parent, properties, has a previous sibling);
+    /// `None` sibling = the sibling query fails. `reads` counts tree reads, and the
+    /// budget runs out after `budget` reads.
+    struct Fake {
+        nodes: Vec<(Option<usize>, ElInfo, Option<bool>)>,
+        reads: usize,
+        budget: usize,
+    }
+
+    impl Fake {
+        fn new() -> Fake {
+            Fake { nodes: Vec::new(), reads: 0, budget: usize::MAX }
+        }
+        /// Adds a node under `parent`; `first` = no previous sibling (None: query fails).
+        fn add(&mut self, parent: Option<usize>, info: ElInfo, first: Option<bool>) -> usize {
+            self.nodes.push((parent, info, first));
+            self.nodes.len() - 1
+        }
+        fn run(&mut self, leaf: usize) -> Option<Brk> {
+            let info = self.nodes[leaf].1.clone();
+            walk(self, leaf, info)
+        }
+    }
+
+    impl Tree for Fake {
+        type El = usize;
+        fn parent(&mut self, el: &usize) -> Option<(usize, ElInfo)> {
+            self.reads += 1;
+            let p = self.nodes.get(*el)?.0?;
+            Some((p, self.nodes.get(p)?.1.clone()))
+        }
+        fn is_first(&mut self, el: &usize) -> Option<bool> {
+            self.reads += 1;
+            self.nodes.get(*el)?.2
+        }
+        fn out_of_time(&self) -> bool {
+            self.reads >= self.budget
+        }
+    }
+
+    fn group() -> ElInfo {
+        el(UIA_GroupControlTypeId, "group")
+    }
+
+    /// document > article > div > div > section(group) > div > [p, p], each p with a
+    /// text leaf; returns (tree, first p's leaf, second p's leaf).
+    fn news_page() -> (Fake, usize, usize) {
+        let mut t = Fake::new();
+        let doc = t.add(None, el(UIA_DocumentControlTypeId, "document"), Some(true));
+        let art = t.add(Some(doc), el(UIA_GroupControlTypeId, "article"), Some(false));
+        let d1 = t.add(Some(art), group(), Some(false));
+        let d2 = t.add(Some(d1), group(), Some(true));
+        let sec = t.add(Some(d2), group(), Some(true));
+        let d3 = t.add(Some(sec), group(), Some(true));
+        let p1 = t.add(Some(d3), group(), Some(true));
+        let l1 = t.add(Some(p1), text_leaf(), Some(true));
+        let p2 = t.add(Some(d3), group(), Some(false));
+        let l2 = t.add(Some(p2), text_leaf(), Some(true));
+        (t, l1, l2)
+    }
+
     #[test]
-    fn a_generic_block_under_a_container_is_a_paragraph() {
-        let (text, group, link) = (UIA_TextControlTypeId.0, UIA_GroupControlTypeId.0, UIA_HyperlinkControlTypeId.0);
-        assert_eq!(plain_block(&[text, group]), Some((Brk::Paragraph, 1)), "<p> in <article>");
-        assert_eq!(plain_block(&[link, group]), Some((Brk::Paragraph, 1)), "a <p> starting with a link");
-        assert_eq!(plain_block(&[text, group, group]), Some((Brk::Paragraph, 2)), "<div><p>: the outer block");
-        assert_eq!(plain_block(&[link]), None, "a nav link right under the landmark");
-        assert_eq!(plain_block(&[text, UIA_ButtonControlTypeId.0]), None, "a button");
-        assert_eq!(plain_block(&[]), None);
+    fn paragraphs_deep_in_news_site_wrappers_are_marked() {
+        let (mut t, l1, l2) = news_page();
+        assert_eq!(t.run(l1), Some(Brk::Paragraph), "first <p>: walks up to the article");
+        let deep = t.reads;
+        t.reads = 0;
+        assert_eq!(t.run(l2), Some(Brk::Paragraph), "a later <p> in the same wrapper");
+        assert!(t.reads <= 4, "stops at the first parent it does not start: {} reads", t.reads);
+        assert!(deep <= 2 * 7, "{deep} reads");
+        // deeper than MAX_UP: still a paragraph (the token starts every block passed)
+        let mut t = Fake::new();
+        let mut at = t.add(None, group(), Some(true));
+        for _ in 0..20 {
+            at = t.add(Some(at), group(), Some(true));
+        }
+        let leaf = t.add(Some(at), text_leaf(), Some(true));
+        assert_eq!(t.run(leaf), Some(Brk::Paragraph));
+    }
+
+    #[test]
+    fn headings_lists_and_cells_inside_wrappers() {
+        let (mut t, _, _) = news_page();
+        let d3 = 5;
+        let mut h = el(UIA_TextControlTypeId, "heading");
+        h.heading = HeadingLevel2.0;
+        let h2 = t.add(Some(d3), h, Some(false));
+        let hl = t.add(Some(h2), text_leaf(), Some(true));
+        assert_eq!(t.run(hl), Some(Brk::Heading(2)));
+        let list = t.add(Some(d3), el(UIA_ListControlTypeId, "list"), Some(false));
+        let li1 = t.add(Some(list), el(UIA_ListItemControlTypeId, "listitem"), Some(true));
+        let li2 = t.add(Some(list), el(UIA_ListItemControlTypeId, "listitem"), Some(false));
+        let b1 = t.add(Some(li1), text_leaf(), Some(true));
+        let b2 = t.add(Some(li2), text_leaf(), Some(true));
+        assert_eq!(t.run(b1), Some(Brk::ListItem));
+        assert_eq!(t.run(b2), Some(Brk::ListItem), "every item, not just the first");
+        let row = t.add(Some(d3), el(UIA_DataItemControlTypeId, "row"), Some(false));
+        let c1 = t.add(Some(row), el(UIA_DataItemControlTypeId, "gridcell"), Some(true));
+        let c2 = t.add(Some(row), el(UIA_DataItemControlTypeId, "gridcell"), Some(false));
+        let cp = t.add(Some(c2), group(), Some(true)); // <td><p>
+        let t1 = t.add(Some(c1), text_leaf(), Some(true));
+        let t2 = t.add(Some(cp), text_leaf(), Some(true));
+        assert_eq!(t.run(t1), Some(Brk::TableRow));
+        assert_eq!(t.run(t2), Some(Brk::TableCell));
+    }
+
+    #[test]
+    fn inline_elements_and_failed_queries_give_no_marker() {
+        let (mut t, _, _) = news_page();
+        let p = 6;
+        // `(<a>link</a>)` / `(<code>x</code>)`: the inline element is not a first child
+        let a = t.add(Some(p), el(UIA_HyperlinkControlTypeId, "link"), Some(false));
+        assert_eq!(t.run(a), None, "a link mid-paragraph");
+        let code = t.add(Some(p), el(UIA_TextControlTypeId, "code"), Some(false));
+        let cl = t.add(Some(code), text_leaf(), Some(true));
+        assert_eq!(t.run(cl), None, "inline code");
+        // a nav link right under the landmark, a button in a dialog: no block passed
+        let nav = t.add(None, el(UIA_GroupControlTypeId, "navigation"), Some(true));
+        let link = t.add(Some(nav), el(UIA_HyperlinkControlTypeId, "link"), Some(false));
+        assert_eq!(t.run(link), None);
+        // a sibling query that fails is never "first child"
+        let mut t = Fake::new();
+        let art = t.add(None, el(UIA_GroupControlTypeId, "article"), Some(true));
+        let li = t.add(Some(art), el(UIA_ListItemControlTypeId, "listitem"), Some(true));
+        let leaf = t.add(Some(li), text_leaf(), None);
+        assert_eq!(t.run(leaf), None);
+        let p = t.add(Some(art), group(), Some(true));
+        let pl = t.add(Some(p), text_leaf(), None);
+        assert_eq!(t.run(pl), None, "no paragraph on an error either");
+    }
+
+    #[test]
+    fn an_empty_budget_stops_the_walk() {
+        let (mut t, l1, _) = news_page();
+        t.budget = 3;
+        assert_eq!(t.run(l1), None, "out of time before the answer: no marker");
+        assert!(t.reads <= 3, "no read after the budget ran out: {}", t.reads);
     }
 
     #[test]
@@ -508,6 +708,11 @@ mod with_ra_text {
             "First".into(),
             format!("{}Year", mark(Brk::TableRow)),
             format!("{}Count", mark(Brk::TableCell)),
+            // a numbered heading: Edge splits "1.1"; only the first piece is marked
+            format!("{}1", mark(Brk::Heading(2))),
+            ".".into(),
+            "1 ".into(),
+            "Introduction".into(),
         ]
         .to_vec();
         let words = normalize(&raw);
@@ -518,6 +723,15 @@ mod with_ra_text {
         assert_eq!(brk_of("Headline"), Some(Brk::Heading(1)));
         assert_eq!(brk_of("Year"), Some(Brk::TableRow));
         assert_eq!(brk_of("Count"), Some(Brk::TableCell));
+        let word_of = |src: usize| words.iter().find(|w| w.src.contains(&src));
+        assert_eq!(word_of(5).map(|w| w.brk), Some(Brk::ListItem), "bullet item");
+        assert_eq!(word_of(9).map(|w| w.brk), Some(Brk::ListItem), "numbered item");
+        assert_eq!(word_of(6).map(|w| w.brk), Some(Brk::ListItem), "the bullet folds into its word");
+        assert_eq!(word_of(7).map(|w| w.brk), Some(Brk::None), "the item text runs on");
+        let n = word_of(14).expect("the heading number");
+        assert_eq!(n.brk, Brk::Heading(2));
+        assert!(n.src.contains(&15) && n.src.contains(&16), "1.1 stays one word: {n:?}");
+        assert_eq!(word_of(17).map(|w| w.brk), Some(Brk::None));
         let srcs: Vec<usize> = words.iter().flat_map(|w| w.src.clone()).collect();
         let mut sorted = srcs.clone();
         sorted.sort_unstable();

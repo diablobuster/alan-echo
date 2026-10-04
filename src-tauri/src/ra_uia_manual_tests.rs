@@ -1272,6 +1272,13 @@ fn struct_fixture(tag: &str, reps: usize) -> String {
              <h4><a href=\"#x{r}\">Linked heading four</a></h4>\n\
              <ul><li><p>Item paragraph start</p></li><li><b>Bold</b>start of item</li></ul>\n\
              <div aria-hidden=true>Hidden decorative text</div>\n\
+             <h2>1.1 Introduction{r} to numbers</h2>\n\
+             <table><tr><th>Load</th><th>Factor</th></tr><tr><td>12.1</td><td>3.5</td></tr></table>\n\
+             <p>2024 saw 1.2 million riders.</p>\n\
+             <p>I think A.I. helps.</p>\n\
+             <div class=wrap><div class=inner><section><div class=body>\
+             <p>Deep para one{r} here.</p><p>Deep para two{r} here.</p><h3>Deep heading{r} here</h3><p>Deep para three{r} here.</p>\
+             </div></section></div></div>\n\
              <p>The council meets again next week to vote on the repair plan and the cost.</p>\n"
         ));
     }
@@ -1637,6 +1644,42 @@ fn uia_struct_live_manual() {
     for w in ["inline", "factor", "start", "Bullet", "decade", ",", "Home", "World", "Accept"] {
         assert!(unmarked(w), "{w} is not a block start of a known kind");
     }
+    // fix round 1: numbers and abbreviations Edge splits into glued pieces get no
+    // marker mid-word; paragraphs deep in wrapper divs are marked
+    let plain: Vec<&str> = all.iter().map(|t| split_mark(t).1.trim()).collect();
+    let brk_at = |i: usize| all.get(i).and_then(|t| split_mark(t).0);
+    let idx = |w: &str| plain.iter().position(|t| *t == w).unwrap_or_else(|| panic!("{w} not read"));
+    let n_marks = |a: usize, b: usize| (a..b).filter(|&i| brk_at(i).is_some()).count();
+    let intro = idx("Introduction0");
+    println!("numbers: {:?}", &plain[intro.saturating_sub(4)..(intro + 24).min(plain.len())]);
+    assert_eq!(n_marks(intro.saturating_sub(3), intro + 1), 1, "one heading marker on 1.1");
+    let head = (intro.saturating_sub(3)..intro).find(|&i| brk_at(i).is_some()).unwrap_or(intro);
+    assert_eq!(brk_at(head), Some(Brk::Heading(2)));
+    assert_eq!(plain[head..intro].concat(), "1.1", "the marker is on the first piece");
+    let y2024 = idx("2024");
+    let row: Vec<Option<Brk>> = (intro..y2024).filter_map(|i| brk_at(i).map(Some)).collect();
+    assert_eq!(
+        row,
+        [Some(Brk::TableRow), Some(Brk::TableCell)].repeat(2),
+        "Load | Factor, 12.1 | 3.5: four cells, no more"
+    );
+    assert_eq!(brk_at(y2024), Some(Brk::Paragraph));
+    let i_think = idx("I");
+    assert_eq!(n_marks(y2024 + 1, i_think), 0, "nothing inside 1.2 million");
+    assert_eq!(brk_at(i_think), Some(Brk::Paragraph));
+    let deep = idx("Deep");
+    assert_eq!(n_marks(i_think + 1, deep), 0, "nothing inside A.I.");
+    let (mut deep_ok, mut deep_all) = (0, 0);
+    for i in (0..plain.len()).filter(|&i| plain[i] == "Deep") {
+        let want = if plain.get(i + 1).is_some_and(|t| t.starts_with("heading")) { Brk::Heading(3) } else { Brk::Paragraph };
+        deep_all += 1;
+        deep_ok += usize::from(brk_at(i) == Some(want));
+        if brk_at(i) != Some(want) {
+            println!("  deep block #{i} {:?}: {:?}, want {want:?}", &plain[i..(i + 3).min(plain.len())], brk_at(i));
+        }
+    }
+    println!("deep wrapper blocks marked: {deep_ok} of {deep_all}");
+    assert!(deep_ok * 10 >= deep_all * 9, "deep blocks marked: {deep_ok} of {deep_all}");
     // every copy of the article got its markers (the budget held on each batch)
     let h2 = marks.iter().filter(|(_, b, _)| *b == Brk::Heading(2)).count();
     assert!(h2 >= 6, "an H2 per section: {h2}");
@@ -1652,7 +1695,7 @@ fn uia_struct_live_manual() {
             let mut read = UiaRead {
                 chromium: true,
                 cursor: Some(unsafe { start.Clone() }.unwrap()),
-                structure: if on { structure::Reader::new(&uia, true) } else { structure::Reader::default() },
+                structure: if on { structure::Reader::new(&uia, true, Some(tp.clone())) } else { structure::Reader::default() },
                 ..Default::default()
             };
             let mut times = Vec::new();
@@ -1710,7 +1753,7 @@ fn uia_struct_notepad_manual() {
     }
     let mut read = UiaRead {
         cursor: Some(start),
-        structure: structure::Reader::new(&uia, false),
+        structure: structure::Reader::new(&uia, false, None),
         ..Default::default()
     };
     assert_eq!(read.structure.mode, structure::Mode::Style);
@@ -1791,7 +1834,7 @@ fn uia_struct_word_manual() {
     let first = unsafe { start.GetText(-1) }.map(|b| b.to_string()).unwrap_or_default();
     let mut read = UiaRead {
         cursor: Some(start.clone()),
-        structure: structure::Reader::new(&uia, false),
+        structure: structure::Reader::new(&uia, false, None),
         ..Default::default()
     };
     let mut batch = structure::Batch::new(MORE_BATCH, None);

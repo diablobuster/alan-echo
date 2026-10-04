@@ -15,6 +15,7 @@
 use crate::{
     ra_follow::{anchor_of, Decision, Guard},
     ra_hook::{ClickTracker, MouseEv, PickHook, WatchHook},
+    ra_junk,
     ra_pause,
     ra_player::Player,
     ra_text::{self, Word},
@@ -190,6 +191,11 @@ pub struct Job {
 
 pub struct Session {
     pub words: Vec<Word>,
+    /// Per word: it belongs to a junk block (`ra_junk::junk_mask`), spoken as "".
+    junk: Vec<bool>,
+    /// The word range of the one block never skipped as junk: the block the read or
+    /// the last seek started in (Alex clicked it), set by `seek`.
+    protected: Range<usize>,
     /// Raw UIA tokens received so far (source index offset for the next batch).
     raw_len: usize,
     /// UIA said there is no more text (an empty `more()`).
@@ -226,6 +232,8 @@ impl Session {
     pub fn new(gen: Arc<AtomicU64>) -> Self {
         Session {
             words: Vec::new(),
+            junk: Vec::new(),
+            protected: 0..0,
             raw_len: 0,
             doc_ended: true,
             read_id: 0,
@@ -253,6 +261,7 @@ impl Session {
     /// New read from freshly picked words. The caller clears the player.
     pub fn start(&mut self, words: Vec<Word>, raw_len: usize, doc_ended: bool) {
         self.chunks = ra_text::chunk_ramped(&words, &[], FIRST_MAX, CHUNK_MAX, self.rate);
+        self.junk = ra_junk::junk_mask(&words, false);
         self.words = words;
         self.raw_len = raw_len;
         self.doc_ended = doc_ended;
@@ -273,6 +282,7 @@ impl Session {
     pub fn clear(&mut self) {
         self.seek(0);
         self.words.clear();
+        self.junk.clear();
         self.chunks.clear();
         self.raw_len = 0;
         self.doc_ended = true;
@@ -291,6 +301,7 @@ impl Session {
             let rest = ra_text::chunk_ramped(&self.words[from..end], &[], FIRST_MAX, CHUNK_MAX, self.rate);
             self.chunks.extend(rest.into_iter().map(|r| r.start + from..r.end + from));
         }
+        self.protected = self.chunks.get(idx).map_or(0..0, |r| self.block_of(r.start));
         self.ramp_from = idx;
         self.next_chunk = idx;
         self.next_push = idx;
@@ -301,6 +312,25 @@ impl Session {
         self.pushed = 0;
         self.base = idx;
         self.stop_at = None;
+    }
+
+    /// The word range of the block holding word `wi`: from the word whose boundary
+    /// starts it to just before the next boundary.
+    fn block_of(&self, wi: usize) -> Range<usize> {
+        let mut a = wi.min(self.words.len());
+        while a > 0 && self.words.get(a).is_some_and(|w| !w.brk.is_break()) {
+            a -= 1;
+        }
+        let mut b = a + 1;
+        while self.words.get(b).is_some_and(|w| !w.brk.is_break()) {
+            b += 1;
+        }
+        a..b.min(self.words.len())
+    }
+
+    /// Word `i` is skipped as page junk (a junk block other than the protected one).
+    fn is_junk(&self, i: usize) -> bool {
+        self.junk.get(i).copied().unwrap_or(false) && !self.protected.contains(&i)
     }
 
     /// Re-queue from word `wi` (a speed change): the chunk holding it is split at `wi`
@@ -350,17 +380,29 @@ impl Session {
     /// and the pause after the chunk from that boundary.
     fn job(&self, idx: usize, rate: f32) -> Option<Job> {
         let r = self.chunks.get(idx)?.clone();
+        let start = r.start;
         let ws = self.words.get(r)?;
-        let next = self.chunks.get(idx + 1).and_then(|c| self.words.get(c.start)).map(|w| w.brk);
+        // the next chunk's first word; inside a junk block its block's own boundary
+        let next = self.chunks.get(idx + 1).and_then(|c| {
+            let w = self.words.get(c.start)?;
+            Some(if self.is_junk(c.start) { self.words.get(self.block_of(c.start).start).map_or(w.brk, |b| b.brk) } else { w.brk })
+        });
         let words = ws
             .iter()
             .enumerate()
-            .map(|(i, w)| match ws.get(i + 1).map(|n| n.brk).or(next) {
-                Some(b) => ra_pause::speak_form(&w.text, b).into_owned(),
-                None => w.text.clone(),
+            .map(|(i, w)| {
+                if self.is_junk(start + i) {
+                    return String::new();
+                }
+                let text = ra_junk::strip_footnote(&w.text);
+                match ws.get(i + 1).map(|n| n.brk).or(next) {
+                    Some(b) => ra_pause::speak_form(&text, b).into_owned(),
+                    None => text.into_owned(),
+                }
             })
             .collect();
-        let pause_after_ms = ra_pause::after_ms(ws.last().map_or("", |w| w.text.as_str()), next, rate);
+        let last = ws.last().map_or(String::new(), |w| ra_junk::strip_footnote(&w.text).into_owned());
+        let pause_after_ms = ra_pause::after_ms(&last, next, rate);
         Some(Job { gen: self.gen(), idx, words, rate, pause_after_ms })
     }
 
@@ -420,7 +462,12 @@ impl Session {
         }
         self.raw_len += raw.len();
         let tail = self.chunks.get(self.next_chunk).map_or(self.words.len(), |c| c.start);
+        // junk blocks are found per block: redo the last old block (it may continue)
+        let from = self.block_of(self.words.len().saturating_sub(1)).start;
         self.words.extend(more);
+        self.junk.truncate(from);
+        let fresh = ra_junk::junk_mask(self.words.get(from..).unwrap_or(&[]), false);
+        self.junk.extend(fresh);
         self.chunks.truncate(self.next_chunk);
         // the not-yet-submitted tail continues the current ramp
         let prior: Vec<usize> = self.chunks.get(self.ramp_from..).unwrap_or(&[]).iter().map(|r| r.len()).collect();
@@ -2394,6 +2441,87 @@ mod session_tests {
         assert_eq!(j2.pause_after_ms, after_ms("one", None, 2.2), "no next word yet: a sentence pause");
         assert_eq!(s.words[1].text, "Takeaways", "Word::text is never changed");
         assert!(s.job(3, 2.2).is_none());
+    }
+
+    /// Spec §6: junk blocks mid-article are fed "" (one entry per word), footnote markers
+    /// are stripped before the boundary form, and the block the read starts in is spoken.
+    #[test]
+    fn job_skips_junk_blocks_and_strips_footnotes() {
+        use crate::ra_pause::{after_ms, pause_ms};
+        use crate::ra_struct::Brk;
+        let mk = |t: &str, brk| Word { text: t.into(), src: vec![0], para_break_before: false, brk };
+        let words = vec![
+            mk("Share", Brk::None),
+            mk("Facts", Brk::Paragraph),
+            mk("evidence.[1]", Brk::None),
+            mk("[12]", Brk::None),
+            mk("Advertisement", Brk::Paragraph),
+            mk("Skip", Brk::Paragraph),
+            mk("to", Brk::None),
+            mk("content", Brk::None),
+            mk("End", Brk::Paragraph),
+        ];
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(words.clone(), 9, true);
+        s.chunks = vec![0..2, 2..4, 4..5, 5..8, 8..9];
+        // the read started on the block "Share": spoken
+        assert_eq!(s.job(0, 2.2).unwrap().words, ["Share.", "Facts"]);
+        let j1 = s.job(1, 2.2).unwrap();
+        assert_eq!(j1.words, ["evidence.", ""], "footnotes stripped, lone marker is empty");
+        assert_eq!(j1.pause_after_ms, after_ms("", Some(Brk::Paragraph), 2.2).max(pause_ms(Brk::Paragraph, 2.2)));
+        // a whole junk chunk: one empty string per word, nothing else
+        assert_eq!(s.job(2, 2.2).unwrap().words, [""]);
+        assert_eq!(s.job(3, 2.2).unwrap().words, ["", "", ""]);
+        assert_eq!(s.job(4, 2.2).unwrap().words, ["End"]);
+        assert_eq!(s.words[4].text, "Advertisement", "Word::text is never changed");
+        // a seek that lands inside a junk block protects that block
+        s.seek(3);
+        s.chunks = vec![0..2, 2..4, 4..5, 5..8, 8..9]; // seek re-cuts; keep the test's cuts
+        assert_eq!(s.job(3, 2.2).unwrap().words, ["Skip", "to", "content."]);
+        assert_eq!(s.job(2, 2.2).unwrap().words, [""], "other junk blocks still skipped");
+        // a start inside a junk block that is not the first block: also spoken
+        s.seek(2);
+        s.chunks = vec![0..2, 2..4, 4..5, 5..8, 8..9];
+        assert_eq!(s.job(2, 2.2).unwrap().words, ["Advertisement."]);
+    }
+
+    /// Junk words keep exactly one timing entry: a silent chunk (the engine's empty audio
+    /// or `skip_failed`) is placed in order and the highlight never moves backwards.
+    #[test]
+    fn junk_chunk_keeps_timing_and_order() {
+        use crate::ra_struct::Brk;
+        let mk = |t: &str, brk| Word { text: t.into(), src: vec![0], para_break_before: false, brk };
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(vec![mk("Hello", Brk::None), mk("Advertisement", Brk::Paragraph), mk("World", Brk::Paragraph)], 3, true);
+        s.chunks = vec![0..1, 1..2, 2..3];
+        let g = s.gen();
+        let jobs = s.jobs(0, 2.2);
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[1].words, [""]);
+        let wt = |w, a, b| crate::ra_timing::WordTime { word: w, start: a, end: b };
+        let audio = |w| ChunkAudio { pcm: vec![0.0; 100], words: vec![wt(w, 0, 90)], device: Device::Cpu, covered: 1 };
+        s.on_chunk(g, 2, audio(0));
+        let (_, n) = s.skip_failed(g, 1);
+        assert_eq!(n, 0, "waits for chunk 0");
+        s.on_chunk(g, 0, audio(0));
+        assert_eq!(s.next_push, 3);
+        let seq: Vec<usize> = s.timeline.iter().map(|t| t.1).collect();
+        assert!(seq.windows(2).all(|x| x[0] <= x[1]), "{seq:?}");
+        assert_eq!(seq, [0, 2]);
+    }
+
+    /// Incremental junk marks: a block cut at a batch edge is judged whole.
+    #[test]
+    fn append_more_extends_the_junk_marks() {
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(ra_text::normalize(&["Intro.".to_string(), "
+".to_string(), "Skip".to_string(), "to".to_string()]), 4, false);
+        s.append_more(&["content".to_string(), "
+".to_string(), "Body.".to_string()]);
+        assert_eq!(s.junk.len(), s.words.len());
+        let texts: Vec<&str> = s.words.iter().map(|w| w.text.as_str()).collect();
+        let junk: Vec<&str> = texts.iter().zip(&s.junk).filter(|(_, j)| **j).map(|(t, _)| *t).collect();
+        assert_eq!(junk, ["Skip", "to", "content"], "{texts:?}");
     }
 
     #[test]

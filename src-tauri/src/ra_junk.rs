@@ -36,7 +36,6 @@ fn core(w: &str) -> String {
 
 /// True when the block's words are exactly a junk phrase (case and trailing
 /// punctuation ignored) or a run of 2+ social-button names ("copy link" is one).
-#[cfg_attr(not(test), allow(dead_code))] // wired in part B
 pub fn is_junk_block(words: &[&str]) -> bool {
     let cores: Vec<String> = words.iter().map(|w| core(w)).filter(|c| !c.is_empty()).collect();
     if cores.is_empty() || cores.len() > 12 {
@@ -62,7 +61,6 @@ pub fn is_junk_block(words: &[&str]) -> bool {
 
 /// Removes numeric footnote markers (`[1]`, `[12]`) and `[citation needed]` from `w`:
 /// "evidence.[1]" -> "evidence.", "[12]" -> "". Borrows when there is nothing to strip.
-#[cfg_attr(not(test), allow(dead_code))] // wired in part B
 pub fn strip_footnote(w: &str) -> Cow<'_, str> {
     if !w.contains('[') {
         return Cow::Borrowed(w);
@@ -94,7 +92,6 @@ pub fn strip_footnote(w: &str) -> Cow<'_, str> {
 /// One flag per word: true for the words of a junk block. A block runs from a word
 /// with `brk.is_break()` to the next one. With `protect_first` the first block (the
 /// one the read starts in, which Alex clicked) is never junk.
-#[cfg_attr(not(test), allow(dead_code))] // wired in part B
 pub fn junk_mask(words: &[Word], protect_first: bool) -> Vec<bool> {
     let mut mask = vec![false; words.len()];
     let mut start = 0usize;

@@ -781,14 +781,26 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
             }
             Req::ScrollBy(i, dy, queued, f) => {
                 let queued_ms = queued.elapsed().as_millis() as u64;
-                let r = match &mut st.read {
-                    Read::Uia(r) => r.scroll_by(&st.uia, Some(i), dy),
-                    Read::Acro(_) | Read::Ocr(_) => None,
+                let uia = st.uia.clone();
+                let mut fell_back = false;
+                let r = {
+                    let read = &mut st.read;
+                    let r = match read {
+                        Read::Uia(r) => r.scroll_by(&uia, Some(i), dy),
+                        Read::Acro(_) | Read::Ocr(_) => None,
+                    };
+                    scroll_by_or_fallback(|| r, || fell_back = true)
                 };
-                f(match r {
-                    Some((before, after, expected)) => ScrollRan { before: Some(before), after, queued_ms, expected: Some(expected) },
-                    None => ScrollRan { before: None, after: None, queued_ms, expected: None },
-                });
+                if fell_back {
+                    // SetScrollPercent failed: scroll the word's paragraph into view
+                    log::debug!("read-aloud: page scroll failed; paragraph scroll instead");
+                    let before = st.read.scroll_pos(&uia, Some(i));
+                    st.read.scroll_to(&uia, i);
+                    let after = st.read.scroll_pos(&uia, Some(i));
+                    f(ScrollRan { before, after, queued_ms, expected: None });
+                } else if let Some((before, after, expected)) = r {
+                    f(ScrollRan { before: Some(before), after, queued_ms, expected: Some(expected) });
+                }
             }
             Req::AtEnd(t) => {
                 let _ = t.send(st.read.at_end_of_screen());
@@ -1258,6 +1270,16 @@ fn scroll(uia: &IUIAutomation, read: &UiaRead, r: &IUIAutomationTextRange) {
     }
 }
 
+/// A page scroll (`SetScrollPercent`), or the paragraph scroll-into-view when it failed
+/// (no scroller any more, the call errored). Pure, so it is unit-tested.
+fn scroll_by_or_fallback<T>(scroll_by: impl FnOnce() -> Option<T>, fallback: impl FnOnce()) -> Option<T> {
+    let r = scroll_by();
+    if r.is_none() {
+        fallback();
+    }
+    r
+}
+
 /// One element on the walk up from the reading element (`choose_scroller`).
 #[derive(Clone, Copy, Debug)]
 struct Ancestor {
@@ -1370,6 +1392,18 @@ fn scroll_item(uia: &IUIAutomation, r: &IUIAutomationTextRange) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_page_scroll_falls_back_to_the_paragraph_scroll() {
+        use std::cell::Cell;
+        let fell_back = Cell::new(false);
+        let ran = scroll_by_or_fallback(|| None::<(i32, i32, f64)>, || fell_back.set(true));
+        assert!(ran.is_none() && fell_back.get(), "SetScrollPercent failed: paragraph scroll");
+        let fell_back = Cell::new(false);
+        let ran = scroll_by_or_fallback(|| Some((1, 2, 3.0)), || fell_back.set(true));
+        assert_eq!(ran, Some((1, 2, 3.0)));
+        assert!(!fell_back.get());
+    }
 
     #[test]
     fn the_scroller_is_the_nearest_vertical_one_or_the_document() {

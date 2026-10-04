@@ -32,6 +32,8 @@ mod ra_timing;
 #[cfg(target_os = "windows")]
 mod ra_wsola;
 #[cfg(target_os = "windows")]
+mod ra_level;
+#[cfg(target_os = "windows")]
 mod ra_tts;
 #[cfg(target_os = "windows")]
 mod ra_names;

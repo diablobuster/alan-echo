@@ -29,6 +29,16 @@ const JUNK_PHRASES: &[&str] = &[
 /// one button and is handled apart.
 const SOCIAL: &[&str] = &["facebook", "twitter", "x", "linkedin", "email", "reddit", "pinterest", "whatsapp", "print"];
 
+/// A block longer than this many words is never junk (the longest junk phrase is 4
+/// words, a social run a handful), so longer ones are skipped without any string work.
+pub const MAX_JUNK_WORDS: usize = 24;
+
+#[cfg(test)]
+thread_local! {
+    /// Words `junk_mask` looked at (test only): proves the work stays linear.
+    pub static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Lowercased letters and digits of `w`, so trailing punctuation never matters.
 fn core(w: &str) -> String {
     w.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
@@ -36,10 +46,12 @@ fn core(w: &str) -> String {
 
 /// True when the block's words are exactly a junk phrase (case and trailing
 /// punctuation ignored) or a run of 2+ social-button names ("copy link" is one).
-#[cfg_attr(not(test), allow(dead_code))] // wired in part B
 pub fn is_junk_block(words: &[&str]) -> bool {
+    if words.len() > MAX_JUNK_WORDS {
+        return false;
+    }
     let cores: Vec<String> = words.iter().map(|w| core(w)).filter(|c| !c.is_empty()).collect();
-    if cores.is_empty() || cores.len() > 12 {
+    if cores.is_empty() {
         return false;
     }
     if JUNK_PHRASES.contains(&cores.join(" ").as_str()) {
@@ -62,7 +74,6 @@ pub fn is_junk_block(words: &[&str]) -> bool {
 
 /// Removes numeric footnote markers (`[1]`, `[12]`) and `[citation needed]` from `w`:
 /// "evidence.[1]" -> "evidence.", "[12]" -> "". Borrows when there is nothing to strip.
-#[cfg_attr(not(test), allow(dead_code))] // wired in part B
 pub fn strip_footnote(w: &str) -> Cow<'_, str> {
     if !w.contains('[') {
         return Cow::Borrowed(w);
@@ -94,7 +105,6 @@ pub fn strip_footnote(w: &str) -> Cow<'_, str> {
 /// One flag per word: true for the words of a junk block. A block runs from a word
 /// with `brk.is_break()` to the next one. With `protect_first` the first block (the
 /// one the read starts in, which Alex clicked) is never junk.
-#[cfg_attr(not(test), allow(dead_code))] // wired in part B
 pub fn junk_mask(words: &[Word], protect_first: bool) -> Vec<bool> {
     let mut mask = vec![false; words.len()];
     let mut start = 0usize;
@@ -104,7 +114,9 @@ pub fn junk_mask(words: &[Word], protect_first: bool) -> Vec<bool> {
         while words.get(end).is_some_and(|w| !w.brk.is_break()) {
             end += 1;
         }
-        if !(first && protect_first) {
+        #[cfg(test)]
+        SCANNED.with(|c| c.set(c.get() + (end - start)));
+        if !(first && protect_first) && end - start <= MAX_JUNK_WORDS {
             let texts: Vec<&str> = words.get(start..end).unwrap_or(&[]).iter().map(|w| w.text.as_str()).collect();
             if is_junk_block(&texts) {
                 if let Some(m) = mask.get_mut(start..end) {

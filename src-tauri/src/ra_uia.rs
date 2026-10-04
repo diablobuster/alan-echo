@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::VARIANT;
 use windows::Win32::Foundation::{HWND, POINT};
@@ -44,6 +44,49 @@ pub struct Rect {
     pub h: f64,
 }
 
+/// The page's scroll offset in physical px (x, y) of the nearest scrollable ancestor of
+/// the reading element (UIA ScrollPattern), so a page that grows (lazy content) does not
+/// look like a scroll the way the bare percent would.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollPos {
+    pub x: f64,
+    pub y: f64,
+    /// The raw vertical ScrollPattern percent (for the log; -1 = not scrollable).
+    pub pct: f64,
+}
+
+/// Scroll offset in px from a ScrollPattern percent (0-100, or -1 = not scrollable), the
+/// view size (percent of the content that is visible) and the viewport extent in px.
+/// offset = pct/100 * (content - viewport), and content = viewport * 100 / view.
+pub fn scroll_offset(pct: f64, view: f64, extent: f64) -> f64 {
+    if !(pct >= 0.0 && view > 0.0 && view < 100.0 && extent > 0.0) {
+        return 0.0;
+    }
+    pct / 100.0 * (100.0 / view - 1.0) * extent
+}
+
+/// One look at the reading (round 3 follow mode): the spoken word's rects, the
+/// previously anchored word's rects measured again (when asked; `None` = no answer),
+/// and the page's scroll offset (`None` = not known for this read).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Look {
+    pub rects: Vec<Rect>,
+    pub prev: Option<Vec<Rect>>,
+    pub scroll: Option<ScrollPos>,
+}
+
+/// Echo's own scroll, measured on the worker when it actually ran: the scroll offset
+/// right before and after the call, and how long the request waited in the queue.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollRan {
+    pub before: Option<ScrollPos>,
+    pub after: Option<ScrollPos>,
+    pub queued_ms: u64,
+}
+
+/// Called on the UIA worker right after an own scroll ran (must only send to a channel).
+pub type ScrollAck = Box<dyn FnOnce(ScrollRan) + Send>;
+
 /// True when (x, y) lies inside any of the rects (edges inclusive).
 pub fn contains(rects: &[Rect], x: f64, y: f64) -> bool {
     rects
@@ -61,7 +104,10 @@ enum Req {
     CommitClick(u64),
     More(Sender<Result<Vec<String>, String>>),
     Rects(Vec<usize>, Sender<Option<Vec<Rect>>>),
-    Scroll(usize),
+    /// The spoken word, optionally the previous word, and the scroll offset (`Look`).
+    Look(Vec<usize>, Option<Vec<usize>>, Sender<Option<Look>>),
+    /// Scroll token `i` into view; the ack (with the time it was queued) runs after it.
+    Scroll(usize, Option<(Instant, ScrollAck)>),
     /// Is the current read an OCR read that reached the end of what is on screen?
     AtEnd(Sender<bool>),
 }
@@ -279,9 +325,24 @@ impl Uia {
         r.recv_timeout(Duration::from_millis(100)).ok().flatten()
     }
 
+    /// One look for follow mode (see `Look`): same contract and timeout as `rects` for
+    /// the spoken word; `prev` is measured in the same round trip.
+    pub fn look(&self, src: Vec<usize>, prev: Option<Vec<usize>>) -> Option<Look> {
+        let (t, r) = mpsc::channel();
+        self.tx.send(Req::Look(src, prev, t)).ok()?;
+        r.recv_timeout(Duration::from_millis(100)).ok().flatten()
+    }
+
     /// Scroll the source so token `src_idx` is visible (rule 4). Fire-and-forget.
+    #[cfg_attr(not(test), allow(dead_code))] // the controller uses scroll_to_acked()
     pub fn scroll_to(&self, src_idx: usize) {
-        let _ = self.tx.send(Req::Scroll(src_idx));
+        let _ = self.tx.send(Req::Scroll(src_idx, None));
+    }
+
+    /// `scroll_to`, then `ack` on the worker once the scroll actually ran (it may wait
+    /// behind a long `more()`), with the scroll offset before and after it.
+    pub fn scroll_to_acked(&self, src_idx: usize, ack: impl FnOnce(ScrollRan) + Send + 'static) {
+        let _ = self.tx.send(Req::Scroll(src_idx, Some((Instant::now(), Box::new(ack)))));
     }
 
     /// Switch the worker to the read staged by click lookup `id` (the controller
@@ -368,6 +429,27 @@ struct UiaRead {
     ranges: Vec<IUIAutomationTextRange>,
     /// Last word range handed out; `more` walks forward from here (rule 8).
     cursor: Option<IUIAutomationTextRange>,
+    /// The nearest scrollable ancestor of the reading element (ScrollPattern) and the
+    /// cache request that reads its offset in one round trip; looked up once per read.
+    scroller: Option<(IUIAutomationElement, IUIAutomationCacheRequest)>,
+    scroller_looked: bool,
+}
+
+impl UiaRead {
+    /// The page's scroll offset; the scroller is found from word `at` on first use.
+    fn scroll_pos(&mut self, uia: &IUIAutomation, at: Option<usize>) -> Option<ScrollPos> {
+        if !self.scroller_looked {
+            let range = self.ranges.get(at?)?;
+            self.scroller_looked = true;
+            self.scroller = find_scroller(uia, range);
+            log::info!(
+                "read-aloud: scroll offset {}",
+                if self.scroller.is_some() { "from ScrollPattern" } else { "unknown (wheel/drag evidence only)" }
+            );
+        }
+        let (el, cr) = self.scroller.as_ref()?;
+        scroll_pos_of(el, cr)
+    }
 }
 
 /// The current read, from whichever source the pick chose. Moved as a whole (click
@@ -436,6 +518,21 @@ impl Read {
             Read::Uia(r) => word_rects(r, src),
             Read::Acro(r) => r.rects(src),
             Read::Ocr(r) => r.rects(src),
+        }
+    }
+
+    /// Same contract as `Uia::look`.
+    fn look(&mut self, uia: &IUIAutomation, src: &[usize], prev: Option<&[usize]>) -> Option<Look> {
+        let rects = self.rects(src)?;
+        let prev = prev.and_then(|p| self.rects(p));
+        let scroll = self.scroll_pos(uia, src.first().copied());
+        Some(Look { rects, prev, scroll })
+    }
+
+    fn scroll_pos(&mut self, uia: &IUIAutomation, at: Option<usize>) -> Option<ScrollPos> {
+        match self {
+            Read::Uia(r) => r.scroll_pos(uia, at),
+            Read::Acro(_) | Read::Ocr(_) => None,
         }
     }
 
@@ -595,13 +692,28 @@ fn run(hwnd: isize, source: Arc<AtomicIsize>, rx: Receiver<Req>) {
                 // reading (the highlight): pick mode's hover caches are not needed now
                 st.drop_hover_caches();
                 // Coalesce like hovers: only the newest request is answered.
-                if superseded(&pending, |r| matches!(r, Req::Rects(..))) {
+                if superseded(&pending, |r| matches!(r, Req::Rects(..) | Req::Look(..))) {
                     let _ = t.send(None);
                     continue;
                 }
                 let _ = t.send(st.read.rects(&src));
             }
-            Req::Scroll(i) => st.read.scroll_to(&st.uia, i),
+            Req::Look(src, prev, t) => {
+                st.drop_hover_caches();
+                if superseded(&pending, |r| matches!(r, Req::Rects(..) | Req::Look(..))) {
+                    let _ = t.send(None);
+                    continue;
+                }
+                let _ = t.send(st.read.look(&st.uia, &src, prev.as_deref()));
+            }
+            Req::Scroll(i, ack) => {
+                let before = if ack.is_some() { st.read.scroll_pos(&st.uia, Some(i)) } else { None };
+                st.read.scroll_to(&st.uia, i);
+                if let Some((queued, f)) = ack {
+                    let after = st.read.scroll_pos(&st.uia, Some(i));
+                    f(ScrollRan { before, after, queued_ms: queued.elapsed().as_millis() as u64 });
+                }
+            }
             Req::AtEnd(t) => {
                 let _ = t.send(st.read.at_end_of_screen());
             }
@@ -964,6 +1076,7 @@ fn pick_uia(st: &mut State, x: i32, y: i32, retry: bool) -> Result<(Read, Vec<St
         chromium: st.target.chromium,
         ranges: vec![r.clone()],
         cursor: Some(r),
+        ..Default::default()
     };
     let mut out = Vec::with_capacity(FIRST_BATCH);
     out.push(first);
@@ -1069,6 +1182,62 @@ fn scroll(uia: &IUIAutomation, read: &UiaRead, r: &IUIAutomationTextRange) {
     }
 }
 
+/// The nearest ancestor of the range's element (itself included) with a ScrollPattern
+/// that can scroll, up to and including the Document (never the browser's own UI),
+/// with a cache request for its offset properties.
+fn find_scroller(
+    uia: &IUIAutomation,
+    r: &IUIAutomationTextRange,
+) -> Option<(IUIAutomationElement, IUIAutomationCacheRequest)> {
+    unsafe {
+        let walker = uia.RawViewWalker().ok()?;
+        let mut el = r.GetEnclosingElement().ok();
+        for _ in 0..MAX_ANCESTORS {
+            let e = el?;
+            if let Ok(sp) = e.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId) {
+                let v = sp.CurrentVerticallyScrollable().is_ok_and(|b| b.as_bool());
+                let h = sp.CurrentHorizontallyScrollable().is_ok_and(|b| b.as_bool());
+                if v || h {
+                    let cr = uia.CreateCacheRequest().ok()?;
+                    for id in [
+                        UIA_ScrollVerticalScrollPercentPropertyId,
+                        UIA_ScrollVerticalViewSizePropertyId,
+                        UIA_ScrollHorizontalScrollPercentPropertyId,
+                        UIA_ScrollHorizontalViewSizePropertyId,
+                        UIA_BoundingRectanglePropertyId,
+                    ] {
+                        cr.AddProperty(id).ok()?;
+                    }
+                    return Some((e, cr));
+                }
+            }
+            if e.CurrentControlType().is_ok_and(|t| t == UIA_DocumentControlTypeId) {
+                return None; // the page itself cannot scroll: never look at browser UI
+            }
+            el = walker.GetParentElement(&e).ok();
+        }
+        None
+    }
+}
+
+/// The scroller's offset in px, read in one cross-process round trip.
+fn scroll_pos_of(el: &IUIAutomationElement, cr: &IUIAutomationCacheRequest) -> Option<ScrollPos> {
+    unsafe {
+        let e = el.BuildUpdatedCache(cr).ok()?;
+        let get = |id| e.GetCachedPropertyValue(id).ok().and_then(|v| f64::try_from(&v).ok());
+        let vp = get(UIA_ScrollVerticalScrollPercentPropertyId)?;
+        let vv = get(UIA_ScrollVerticalViewSizePropertyId)?;
+        let hp = get(UIA_ScrollHorizontalScrollPercentPropertyId)?;
+        let hv = get(UIA_ScrollHorizontalViewSizePropertyId)?;
+        let b = e.CachedBoundingRectangle().ok()?;
+        Some(ScrollPos {
+            x: scroll_offset(hp, hv, (b.right - b.left) as f64),
+            y: scroll_offset(vp, vv, (b.bottom - b.top) as f64),
+            pct: vp,
+        })
+    }
+}
+
 /// ScrollItemPattern on the range's enclosing element or its nearest ancestor that has one.
 fn scroll_item(uia: &IUIAutomation, r: &IUIAutomationTextRange) -> bool {
     let Ok(walker) = (unsafe { uia.ControlViewWalker() }) else {
@@ -1098,6 +1267,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scroll_offset_is_pixels_not_percent() {
+        // 4000 px page, 800 px viewport (view 20%): 50% = 1600 px down
+        assert!((scroll_offset(50.0, 20.0, 800.0) - 1600.0).abs() < 1e-9);
+        // the page grows to 8000 px (lazy content) while the offset stays 1600 px:
+        // the percent drops to 22.2..., the offset in px does not change
+        let pct = 1600.0 / (8000.0 - 800.0) * 100.0;
+        assert!((scroll_offset(pct, 10.0, 800.0) - 1600.0).abs() < 1e-6);
+        assert_eq!(scroll_offset(-1.0, 100.0, 800.0), 0.0, "not scrollable");
+        assert_eq!(scroll_offset(0.0, 20.0, 800.0), 0.0);
+        assert_eq!(scroll_offset(f64::NAN, 20.0, 800.0), 0.0);
+    }
+
+    #[test]
     fn contains_checks_any_rect() {
         let r = vec![
             Rect {
@@ -1123,7 +1305,7 @@ mod tests {
     fn newer_request_of_the_same_kind_supersedes() {
         let (t, _r) = mpsc::channel();
         let (h, _r2) = mpsc::channel();
-        let q: VecDeque<Req> = [Req::Hover(1, 1, h), Req::Scroll(3)].into_iter().collect();
+        let q: VecDeque<Req> = [Req::Hover(1, 1, h), Req::Scroll(3, None)].into_iter().collect();
         assert!(superseded(&q, |r| matches!(r, Req::Hover(..))));
         assert!(!superseded(&q, |r| matches!(r, Req::Rects(..))));
         let q: VecDeque<Req> = [Req::Rects(vec![0], t)].into_iter().collect();

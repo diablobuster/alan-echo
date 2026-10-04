@@ -13,11 +13,12 @@
 //! worker, hook and player all live only for a session.
 
 use crate::{
+    ra_follow::{anchor_of, Decision, Guard},
     ra_hook::{ClickTracker, MouseEv, PickHook, WatchHook},
     ra_player::Player,
     ra_text::{self, Word},
     ra_tts::{self, ChunkAudio, Device, Engine},
-    ra_uia::{self, Rect, Uia},
+    ra_uia::{self, Rect, ScrollRan, Uia},
 };
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
@@ -133,12 +134,13 @@ pub fn step(p: &Phase, ev: Ev) -> (Phase, Vec<Act>) {
 // the highlight still shows when the word is visible, Echo never scrolls); the pill's
 // "Go to word" button or any jump turns it back ON.
 //
-// Detection is input-independent (wheel, keyboard, touchpad, scroll bar alike): the
-// page moved under a word that Echo did not scroll to (see `user_scrolled`).
+// Detection (round 3, `ra_follow::Guard`): the spoken word moved or left the screen AND
+// there is scroll evidence (a wheel or drag over the source, or the page's scroll
+// offset changed and Echo did not do it). Movement alone is a page reflow: follow stays on.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FollowEv {
-    /// The page moved under the reader's words: see `user_scrolled` / `scroll_plan`.
+    /// The user scrolled the page (`ra_follow::Decision::Off`).
     UserScrolled,
     /// The pill's "Go to word" button.
     GoToWord,
@@ -150,60 +152,6 @@ pub fn follow_next(_on: bool, ev: FollowEv) -> bool {
     match ev {
         FollowEv::UserScrolled => false,
         FollowEv::GoToWord | FollowEv::Jump => true,
-    }
-}
-
-/// What to do when the spoken word has no rects (it is off screen).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ScrollPlan {
-    /// Natural reading flow ran off the screen: scroll it into view.
-    Scroll,
-    /// The user scrolled the page away: follow off, leave the page alone.
-    UserScrolled,
-    /// Leave the page alone.
-    Leave,
-}
-
-/// `changed` = the word just became current (a word is scrolled to once, never
-/// re-tried every tick, which would fight the user). `prev_word_moved` = the previous
-/// word, re-read now, moved or left the screen since the last refresh (`user_scrolled`).
-pub fn scroll_plan(follow: bool, changed: bool, prev_word_moved: bool) -> ScrollPlan {
-    match (follow, changed, prev_word_moved) {
-        (false, ..) | (_, false, _) => ScrollPlan::Leave,
-        (true, true, true) => ScrollPlan::UserScrolled,
-        (true, true, false) => ScrollPlan::Scroll,
-    }
-}
-
-/// Where a word was last seen: its first rect's top-left relative to the source
-/// window (`None` = off screen), and the source window's rect (x, y, w, h).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Anchor {
-    pub word: usize,
-    pub pos: Option<(f64, f64)>,
-    pub win: (i32, i32, i32, i32),
-}
-
-/// `word`'s anchor from fresh screen rects and the source window rect (x, y, w, h).
-pub fn anchor_of(word: usize, rects: &[Rect], win: (i32, i32, i32, i32)) -> Anchor {
-    Anchor { word, pos: rects.first().map(|r| (r.x - win.0 as f64, r.y - win.1 as f64)), win }
-}
-
-/// Movement (px) of the same word inside the window that counts as a scroll.
-const SHIFT_PX: f64 = 3.0;
-
-/// The user scrolled the page: the same word moved (>= SHIFT_PX) inside the source
-/// window, or went from on screen to off screen, while the window itself did not move
-/// or resize, and not right after a scroll of Echo's own.
-pub fn user_scrolled(prev: Option<Anchor>, now: Anchor, own_scroll_recent: bool) -> bool {
-    let Some(prev) = prev else { return false };
-    if prev.word != now.word || prev.win != now.win || own_scroll_recent {
-        return false;
-    }
-    match (prev.pos, now.pos) {
-        (Some(a), Some(b)) => (a.0 - b.0).abs() >= SHIFT_PX || (a.1 - b.1).abs() >= SHIFT_PX,
-        (Some(_), None) => true, // scrolled off screen
-        _ => false,
     }
 }
 
@@ -597,6 +545,8 @@ pub enum Msg {
     ClickPicked(u64, Result<Vec<String>, String>),
     /// The pill's "Go to word" button: scroll the spoken word into view, follow ON.
     GoToWord,
+    /// Echo's own scroll actually ran on the UIA worker (starts its settle grace).
+    OwnScrollRan(ScrollRan),
 }
 
 const HOTKEY: &str = "CmdOrCtrl+Shift+E";
@@ -607,8 +557,6 @@ const HOVER_MIN_MS: u64 = 33;
 /// Word rects are re-read this often even when the word did not change (the page may
 /// have scrolled; rects are never cached).
 const RECTS_REFRESH: Duration = Duration::from_millis(250);
-/// After our own scroll, a word shift within this long is ours, not the user's.
-const OWN_SCROLL_GRACE: Duration = Duration::from_millis(800);
 /// Click-vs-drag slop in logical px (scaled by the monitor's DPI).
 const CLICK_SLOP: f64 = 6.0;
 /// The pill re-sends its state this often while reading (an event emitted before the
@@ -992,10 +940,10 @@ struct Controller {
     click_seq: u64,
     /// The click lookup running off-thread (at most one).
     click_inflight: Option<u64>,
-    /// When Echo last scrolled the source.
-    own_scroll_at: Option<Instant>,
-    /// Where the spoken word was last seen (user-scroll detection).
-    anchor: Option<Anchor>,
+    /// Follow mode's user-scroll detector (anchor, scroll offset, evidence, own-scroll grace).
+    guard: Guard,
+    /// A left press in the source window (a drag from it is scroll evidence).
+    press: Option<(i32, i32)>,
 }
 
 impl Controller {
@@ -1048,8 +996,8 @@ impl Controller {
             click_due: None,
             click_seq: 0,
             click_inflight: None,
-            own_scroll_at: None,
-            anchor: None,
+            guard: Guard::default(),
+            press: None,
         }
     }
 
@@ -1185,6 +1133,15 @@ impl Controller {
             }
             Msg::Mouse(ev) => self.on_mouse(ev),
             Msg::GoToWord => self.go_to_word(),
+            Msg::OwnScrollRan(r) => {
+                log::debug!(
+                    "read-aloud: own scroll ran after {} ms in the queue; scroll {:?} -> {:?}",
+                    r.queued_ms,
+                    r.before,
+                    r.after
+                );
+                self.guard.own_ran(Instant::now(), r.before, r.after);
+            }
             Msg::ClickPicked(id, r) => self.on_click_picked(id, r),
             Msg::Chunk(g, idx, r) => self.on_chunk(g, idx, r),
             Msg::More(id, r) => self.on_more(id, r),
@@ -1407,7 +1364,7 @@ impl Controller {
         self.cur_word = None;
         self.last_word = None;
         self.follow = follow_next(self.follow, FollowEv::Jump);
-        self.anchor = None;
+        self.guard.rearm();
         self.ensure_watch();
         self.ensure_pill();
         self.pump();
@@ -1596,49 +1553,46 @@ impl Controller {
         if self.style == "off" || !win::window_shown(source) {
             return self.emit_word(Vec::new());
         }
+        // The previously anchored word, measured again in the same look when the
+        // spoken word changed (movement is measured on one word).
+        let prev_src = self
+            .guard
+            .anchor_word()
+            .filter(|&p| p != wi)
+            .and_then(|p| self.s.words.get(p))
+            .map(|w| w.src.clone())
+            .filter(|v| !v.is_empty());
         // None = UIA timed out / errored: keep what is drawn, never scroll on it
-        let Some(rects) = u.rects(src.clone()) else { return };
-        let win_rect = win::window_rect(source);
-        let own_recent = self.own_scroll_recent();
-        let now = win_rect.map(|w| anchor_of(wi, &rects, w));
-        if let Some(now) = now {
-            if self.follow && user_scrolled(self.anchor, now, own_recent) {
-                log::info!("read-aloud: the page moved under the spoken word; follow off");
-                self.set_follow(follow_next(self.follow, FollowEv::UserScrolled));
-            }
-        }
-        let prev = std::mem::replace(&mut self.anchor, now);
-        if rects.is_empty() {
-            // The new word is off screen. If the previous word also moved since the
-            // last look, the user scrolled (follow off); otherwise reading ran off the
-            // screen and the page follows.
-            let prev_moved = changed
-                && self.follow
-                && !own_recent
-                && prev.filter(|p| p.word != wi && p.pos.is_some()).is_some_and(|p| {
-                    let src = self.s.words.get(p.word).map(|w| w.src.clone()).unwrap_or_default();
-                    match (self.uia.as_ref().and_then(|u| u.rects(src)), win_rect) {
-                        (Some(r), Some(w)) => user_scrolled(Some(p), anchor_of(p.word, &r, w), false),
-                        _ => false,
-                    }
-                });
-            match scroll_plan(self.follow, changed, prev_moved) {
-                ScrollPlan::Scroll => {
-                    if let (Some(&first), Some(u)) = (src.first(), &self.uia) {
-                        u.scroll_to(first);
-                        self.own_scroll_at = Some(Instant::now());
-                    }
-                    self.rects_retry = true;
-                }
-                ScrollPlan::UserScrolled => {
-                    log::info!("read-aloud: the page was scrolled away from the reading; follow off");
+        let Some(look) = u.look(src.clone(), prev_src) else { return };
+        if let Some(w) = win::window_rect(source) {
+            let obs = anchor_of(wi, &look.rects, w);
+            let prev_again = match (self.guard.anchor_word(), &look.prev) {
+                (Some(p), Some(r)) if p != wi => Some(anchor_of(p, r, w)),
+                _ => None,
+            };
+            match self.guard.look(Instant::now(), self.follow, obs, prev_again, look.scroll) {
+                Decision::Off(r) => {
+                    log::info!("{r}");
                     self.set_follow(follow_next(self.follow, FollowEv::UserScrolled));
                 }
-                ScrollPlan::Leave => {
-                    if retrying {
-                        log::debug!("read-aloud: word still has no rects after scrolling");
+                Decision::Ignored(i) => log::debug!("{i}"),
+                // one empty answer (Chrome rebuilding its tree): keep the box, look again
+                Decision::Wait => {
+                    self.rects_retry = true;
+                    return;
+                }
+                Decision::Scroll => {
+                    if let Some(&first) = src.first() {
+                        self.scroll_own(first);
                     }
                 }
+                Decision::Nothing => {}
+            }
+        }
+        let rects = look.rects;
+        if rects.is_empty() {
+            if retrying {
+                log::debug!("read-aloud: word still has no rects after scrolling");
             }
             return self.emit_word(Vec::new());
         }
@@ -1667,8 +1621,17 @@ impl Controller {
         self.uia.as_ref().map_or(self.source_hwnd, |u| u.source_hwnd())
     }
 
-    fn own_scroll_recent(&self) -> bool {
-        self.own_scroll_at.is_some_and(|t| t.elapsed() < OWN_SCROLL_GRACE)
+    /// Echo scrolls source token `first` into view. Its settle grace starts when the UIA
+    /// worker actually ran it (`Msg::OwnScrollRan`), not now.
+    fn scroll_own(&mut self, first: usize) {
+        let Some(u) = &self.uia else { return };
+        let tx = self.tx.clone();
+        u.scroll_to_acked(first, move |ran| {
+            let _ = tx.send(Msg::OwnScrollRan(ran));
+        });
+        log::debug!("read-aloud: own scroll queued for token {first}");
+        self.guard.own_queued(Instant::now());
+        self.rects_retry = true;
     }
 
     fn set_follow(&mut self, on: bool) {
@@ -1677,7 +1640,7 @@ impl Controller {
         }
         self.follow = on;
         if on {
-            self.anchor = None;
+            self.guard.rearm();
         }
         self.emit_state();
     }
@@ -1710,12 +1673,28 @@ impl Controller {
             MouseEv::Down { x, y, t, mods } => {
                 let src = self.source();
                 let in_source = src != 0 && win::root_at(x, y) == src;
+                self.press = in_source.then_some((x, y));
                 let slop = click_slop(x, y);
                 if self.clicks.down(x, y, t, in_source, mods, win::double_click_ms(), slop) {
                     self.click_due = None; // a double-click: the first click is not a jump
                 }
             }
+            MouseEv::Wheel { x, y } => {
+                let src = self.source();
+                if src != 0 && win::root_at(x, y) == src {
+                    self.guard.wheel(Instant::now());
+                }
+            }
+            MouseEv::Move { x, y } => {
+                if let Some((px, py)) = self.press {
+                    let slop = click_slop(px, py);
+                    if (x - px).abs() > slop || (y - py).abs() > slop {
+                        self.guard.drag(Instant::now());
+                    }
+                }
+            }
             MouseEv::Up { x, y, t, mods } => {
+                self.press = None;
                 if self.clicks.up(x, y, t, mods, click_slop(x, y)).is_some() {
                     // wait out the double-click time before deciding it is a jump
                     self.click_due = Some(Instant::now() + Duration::from_millis(win::double_click_ms() as u64));
@@ -1786,9 +1765,7 @@ impl Controller {
         let Some(u) = &self.uia else { return };
         let on_screen = u.rects(vec![first]).is_some_and(|r| !r.is_empty());
         if !on_screen {
-            u.scroll_to(first);
-            self.own_scroll_at = Some(Instant::now());
-            self.rects_retry = true;
+            self.scroll_own(first);
         }
         self.rects_due = true;
     }
@@ -1887,8 +1864,8 @@ impl Controller {
         self.clicks.reset();
         self.click_due = None;
         self.click_inflight = None; // a late result is stale (click_seq is not reset)
-        self.own_scroll_at = None;
-        self.anchor = None;
+        self.guard = Guard::default();
+        self.press = None;
         self.pick_deadline = None;
         self.more_retry_at = None;
         self.hook_to_drop = None;
@@ -2283,64 +2260,6 @@ mod tests {
             assert!(follow_next(on, FollowEv::GoToWord));
             assert!(follow_next(on, FollowEv::Jump));
         }
-    }
-
-    #[test]
-    fn off_screen_word_is_scrolled_only_when_following() {
-        assert_eq!(scroll_plan(true, true, false), ScrollPlan::Scroll, "natural reading flow");
-        assert_eq!(scroll_plan(false, true, false), ScrollPlan::Leave, "follow off: never scroll");
-        assert_eq!(scroll_plan(false, true, true), ScrollPlan::Leave);
-    }
-
-    #[test]
-    fn word_change_after_a_hand_scroll_is_not_followed() {
-        // the previous word also moved since the last look: the user scrolled away
-        assert_eq!(scroll_plan(true, true, true), ScrollPlan::UserScrolled);
-    }
-
-    #[test]
-    fn same_word_is_never_rescrolled_every_tick() {
-        // the old snap-back: a word that stays off screen is not scrolled again
-        assert_eq!(scroll_plan(true, false, false), ScrollPlan::Leave);
-        assert_eq!(scroll_plan(true, false, true), ScrollPlan::Leave);
-    }
-
-    const WIN: (i32, i32, i32, i32) = (50, 40, 1200, 900);
-
-    fn at(word: usize, pos: Option<(f64, f64)>) -> Anchor {
-        Anchor { word, pos, win: WIN }
-    }
-
-    #[test]
-    fn any_page_movement_under_the_word_is_a_user_scroll() {
-        // keyboard, touchpad, wheel or scroll bar alike: no input needed
-        let prev = Some(at(5, Some((100.0, 400.0))));
-        assert!(user_scrolled(prev, at(5, Some((100.0, 250.0))), false), "scrolled down");
-        assert!(user_scrolled(prev, at(5, Some((100.0, 403.0))), false), "3 px is enough");
-        assert!(user_scrolled(prev, at(5, None), false), "scrolled off screen");
-        assert!(user_scrolled(prev, at(5, Some((40.0, 400.0))), false), "horizontal");
-    }
-
-    #[test]
-    fn word_moves_that_are_not_the_users_scroll() {
-        let prev = Some(at(5, Some((100.0, 400.0))));
-        assert!(!user_scrolled(prev, at(5, Some((100.0, 250.0))), true), "right after our own scroll");
-        assert!(!user_scrolled(prev, at(6, Some((100.0, 250.0))), false), "a different word");
-        assert!(!user_scrolled(prev, at(5, Some((101.0, 401.5))), false), "jitter");
-        let moved = Anchor { win: (80, 40, 1200, 900), ..at(5, Some((100.0, 250.0))) };
-        assert!(!user_scrolled(prev, moved, false), "window moved");
-        let resized = Anchor { win: (50, 40, 1000, 900), ..at(5, Some((100.0, 250.0))) };
-        assert!(!user_scrolled(prev, resized, false), "window resized (reflow)");
-        assert!(!user_scrolled(None, at(5, Some((100.0, 250.0))), false), "nothing seen before");
-        assert!(!user_scrolled(Some(at(5, None)), at(5, Some((1.0, 1.0))), false), "scrolled back into view");
-        assert!(!user_scrolled(Some(at(5, None)), at(5, None), false), "still off screen");
-    }
-
-    #[test]
-    fn anchor_is_window_relative() {
-        let r = [Rect { x: 150.0, y: 440.0, w: 30.0, h: 12.0 }, Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }];
-        assert_eq!(anchor_of(3, &r, WIN), Anchor { word: 3, pos: Some((100.0, 400.0)), win: WIN });
-        assert_eq!(anchor_of(3, &[], WIN).pos, None);
     }
 
     #[test]

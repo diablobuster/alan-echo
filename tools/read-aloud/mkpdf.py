@@ -1,8 +1,10 @@
 # Test tool for ra_acro's manual test (acro_live): writes a hand-built 3-page text PDF.
-# Usage: py mkpdf.py OUT.pdf [--untagged] [--dense] [--struct]   (no dependencies)
+# Usage: py mkpdf.py OUT.pdf [--untagged] [--dense] [--struct] [--prose]   (no dependencies)
 # --dense: page one holds 40 lines (~440 words) at 11 pt, for the hover bench.
 # --struct: page one is tagged H1, P, then a list (L > LI > LBody) of two items;
 #   every other line stays a P.
+# --prose: page one is a heading, two hard-wrapped paragraphs, a bullet list and a
+#   numbered list, one line each (for the untagged line-break rules, task 5b).
 # Page 3 holds the marker word ZEBRAFINCH, which the test reads up to and scrolls to.
 import sys
 PAGES = [
@@ -20,8 +22,21 @@ PAGES = [
   "Last line on page three with Pelosi one more time."],
 ]
 def esc(s): return s  # test text has no parens or backslashes
-def build(tagged, out, dense=False, struct=False):
+PROSE = [
+ "Budget Report 2026",
+ "The committee met on Tuesday to discuss the budget for",
+ "the coming year and they agreed.",
+ "Members also asked the treasurer to report on fees",
+ "before the month ends.",
+ "\x95 Milk and bread",
+ "\x95 Eggs",
+ "1. Open the box",
+ "2. Read the guide",
+]
+def build(tagged, out, dense=False, struct=False, prose=False):
     pages = [list(p) for p in PAGES]
+    if prose:
+        pages[0] = list(PROSE)
     if dense:
         words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo".split()
         pages[0] += [f"Row{i:02} " + ' '.join(words[(i + k) % len(words)] for k in range(10)) for i in range(36)]
@@ -100,7 +115,7 @@ def build(tagged, out, dense=False, struct=False):
     open(out,'wb').write(buf)
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("usage: mkpdf.py OUT.pdf [--untagged] [--dense]")
+        sys.exit("usage: mkpdf.py OUT.pdf [--untagged] [--dense] [--struct] [--prose]")
     a = sys.argv[2:]
-    build("--untagged" not in a, sys.argv[1], "--dense" in a, "--struct" in a)
+    build("--untagged" not in a, sys.argv[1], "--dense" in a, "--struct" in a, "--prose" in a)
     print("ok")

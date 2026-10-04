@@ -304,6 +304,15 @@ fn default_pause_ms(last: Option<&str>, rate: f32) -> f32 {
     ra_pause::after_ms(last.unwrap_or(""), Some(ra_struct::Brk::None), rate)
 }
 
+/// The pause after a chunk the model covered only up to word `covered` (510-id split,
+/// or no `pause_after_ms`): `default_pause_ms`, or the structural pause at the split
+/// (`inner_pauses` entry `covered - 1`) when that is longer, so a list/cell boundary
+/// at the split never fuses.
+fn split_pause_ms(last: Option<&str>, covered: usize, inner_pauses: &[(usize, f32)], rate: f32) -> f32 {
+    let d = default_pause_ms(last, rate);
+    inner_pauses.iter().find(|&&(i, _)| i + 1 == covered).map_or(d, |&(_, ms)| d.max(ms))
+}
+
 /// Trims a chunk's leading silence to `ra_pause::lead_ms(rate)` and makes its trailing
 /// silence exactly `pause_after_ms - lead_ms(rate)`, but at least `MIN_TAIL_KEEP_MS`
 /// (sample-exact after the last loud 10 ms window): the model's audio is cut to that,
@@ -845,7 +854,7 @@ impl Engine {
         let eff = model_speed * rate;
         let pause = match pause_after_ms {
             Some(p) if covered >= words.len() => p,
-            _ => default_pause_ms(words.get(covered.saturating_sub(1)).copied(), eff),
+            _ => split_pause_ms(words.get(covered.saturating_sub(1)).copied(), covered, inner_pauses, eff),
         };
         let mut pcm = trim_silence(pcm, &mut words_t, eff, pause);
         level_chunk(&mut pcm);
@@ -2783,6 +2792,16 @@ mod tests {
             assert!(removed_lead <= onset_at, "{rate}x");
             assert!(out.iter().filter(|x| x.abs() > 0.0 && x.abs() < 0.01).count() >= sr * 80 / 1000, "{rate}x: onset clipped (cut {cut})");
         }
+    }
+
+    /// Final review minor 1: a coverage split on a structural boundary keeps its pause.
+    #[test]
+    fn coverage_split_on_a_boundary_keeps_the_structural_pause() {
+        let d = default_pause_ms(Some("sliced"), 3.0);
+        assert_eq!(split_pause_ms(Some("sliced"), 3, &[(2, d + 100.0), (4, 999.0)], 3.0), d + 100.0);
+        assert_eq!(split_pause_ms(Some("sliced"), 3, &[(4, 999.0)], 3.0), d, "no boundary at the split");
+        assert_eq!(split_pause_ms(Some("sliced"), 3, &[(2, 1.0)], 3.0), d, "never shorter than the punctuation pause");
+        assert_eq!(split_pause_ms(None, 0, &[(0, 500.0)], 3.0), default_pause_ms(None, 3.0));
     }
 
     #[test]

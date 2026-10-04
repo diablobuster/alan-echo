@@ -245,7 +245,8 @@ pub(super) fn walk<T: Tree>(t: &mut T, leaf: T::El, leaf_info: ElInfo) -> Option
         }
         match step {
             Step::Mark(b) => return Some(b),
-            Step::Block(b) => return if first(t, &parent)? { Some(b) } else { paragraph(t, &el, para) },
+            // not a first child (inline `code` after text): judge by what precedes the element itself
+            Step::Block(b) => return if first(t, &parent)? { Some(b) } else { paragraph(t, &parent, para) },
             Step::Cell => return Some(if first(t, &parent)? { Brk::TableRow } else { Brk::TableCell }),
             Step::Up | Step::Stop => {}
         }
@@ -700,6 +701,13 @@ mod tests {
         let code = t.add(Some(p), el(UIA_TextControlTypeId, "code"), Some(false));
         let cl = t.add(Some(code), text_leaf(), Some(true));
         assert_eq!(t.run(cl), None, "inline code");
+        // final review: `text <code><span-group>x</span></code>`: a Group first inside
+        // inline code after text is still mid-sentence (the paragraph check looks
+        // before the code element, not before the group inside it)
+        let code2 = t.add_after_text(p, el(UIA_TextControlTypeId, "code"));
+        let g = t.add(Some(code2), group(), Some(true));
+        let gl = t.add(Some(g), text_leaf(), Some(true));
+        assert_eq!(t.run(gl), None, "a group first inside inline code after text");
         // a nav link right under the landmark, a button in a dialog: no block passed
         let nav = t.add(None, el(UIA_GroupControlTypeId, "navigation"), Some(true));
         let link = t.add(Some(nav), el(UIA_HyperlinkControlTypeId, "link"), Some(false));

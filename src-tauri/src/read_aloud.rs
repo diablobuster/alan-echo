@@ -279,6 +279,7 @@ impl Session {
         self.words = words;
         self.raw_len = raw_len;
         self.doc_ended = doc_ended;
+        self.judge_tail();
         self.closed = false;
         self.line_end = line_end;
         self.read_id += 1;
@@ -510,6 +511,7 @@ impl Session {
         }
         if raw.is_empty() {
             self.doc_ended = true;
+            self.judge_tail();
             return;
         }
         // a batch is cut by token count: its first word starts a block only after a line end
@@ -545,11 +547,22 @@ impl Session {
         } else if long {
             self.tail_block = self.tail_block.min(old);
         }
+        self.judge_tail();
         self.chunks.truncate(self.next_chunk);
         // the not-yet-submitted tail continues the current ramp
         let prior: Vec<usize> = self.chunks.get(self.ramp_from..).unwrap_or(&[]).iter().map(|r| r.len()).collect();
         let rest = ra_text::chunk_ramped(&self.words[tail..], &prior, FIRST_MAX, CHUNK_MAX, self.rate);
         self.chunks.extend(rest.into_iter().map(|r| r.start + tail..r.end + tail));
+    }
+
+    /// The last block may continue in the next batch ("Share" + "this recipe with
+    /// friends"): while more text can come it is never junk; once the document ended
+    /// it is judged whole.
+    fn judge_tail(&mut self) {
+        let t = self.tail_block.min(self.words.len());
+        let mask = if self.doc_ended { ra_junk::junk_mask(&self.words[t..], false) } else { vec![false; self.words.len() - t] };
+        self.junk.truncate(t);
+        self.junk.extend(mask);
     }
 
     /// A failed job. Returns false when it is stale (ignore it).
@@ -2769,8 +2782,35 @@ mod session_tests {
         s.append_more(&["Advertisement".to_string()]);
         assert!(s.junk.iter().all(|j| !j), "continuation of a 30-word block is text");
         s.append_more(&["tail".to_string(), "
-".to_string(), "Advertisement".to_string()]);
-        assert_eq!(s.junk.last(), Some(&true), "a real junk block after a break is found");
+".to_string(), "Advertisement\n".to_string()]);
+        assert_eq!(s.junk.last(), Some(&false), "the open last block is not judged yet");
+        s.append_more(&["Body".to_string()]);
+        let ad = s.words.iter().rposition(|w| w.text == "Advertisement").unwrap();
+        assert!(s.junk[ad], "a real junk block after a break is found once it is closed");
+    }
+
+    /// Final review minor 3: an unfinished last block is not judged junk until the next
+    /// batch shows where it ends (or the document ends).
+    #[test]
+    fn open_last_block_is_judged_only_when_closed() {
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(ra_text::normalize(&["Intro.".to_string(), "
+".to_string(), "Share".to_string()]), 3, false, false);
+        assert_eq!(s.junk.last(), Some(&false), "\"Share\" may continue");
+        s.append_more(&["this".to_string(), "recipe".to_string(), "with".to_string(), "friends.".to_string()]);
+        assert!(s.junk.iter().all(|j| !j));
+        // a block that stays a junk phrase is skipped once the document ends
+        let mut e = Session::new(Arc::new(AtomicU64::new(0)));
+        e.start(ra_text::normalize(&["Intro.".to_string(), "
+".to_string(), "Advertisement".to_string()]), 3, false, false);
+        assert_eq!(e.junk.last(), Some(&false));
+        e.append_more(&[]);
+        assert_eq!(e.junk.last(), Some(&true));
+        // a finished document judges its last block at once
+        let mut d = Session::new(Arc::new(AtomicU64::new(0)));
+        d.start(ra_text::normalize(&["Intro.".to_string(), "
+".to_string(), "Advertisement".to_string()]), 3, true, false);
+        assert_eq!(d.junk.last(), Some(&true));
     }
 
     /// A speed change on a junk word resumes after the junk block and does not protect it.

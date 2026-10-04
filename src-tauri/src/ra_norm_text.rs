@@ -789,6 +789,16 @@ pub fn glued_unit(key: &str) -> Option<(&'static str, &'static str)> {
     unit(key).filter(|u| u.2).map(|u| (u.0, u.1))
 }
 
+/// `word` with a "." appended is in the abbreviation table, any case ("St" -> "St."
+/// = saint/street, "no" -> "No." = number): `ra_pause::speak_form` never adds that ".".
+pub fn expands_when_dotted(word: &str) -> bool {
+    let n = word.len();
+    n > 0
+        && ABBREVS
+            .iter()
+            .any(|e| e.0.len() == n + 1 && e.0.ends_with('.') && e.0.get(..n).is_some_and(|k| k.eq_ignore_ascii_case(word)))
+}
+
 /// An abbreviation that never ends a sentence: a title (`Sen.`, `Gen.`), `Dr.`,
 /// `St.`, `v.`, or one that needs a number after it (`Fig.`, `Vol.`). Used by
 /// `ra_text::chunk`, so a chunk never ends on one and loses its expansion.

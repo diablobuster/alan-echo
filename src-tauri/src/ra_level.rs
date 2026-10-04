@@ -38,7 +38,7 @@ fn soft_limit(x: f32) -> f32 {
     if a <= LIMIT_KNEE {
         x
     } else {
-        (LIMIT_KNEE + LIMIT_SPAN * ((a - LIMIT_KNEE) / LIMIT_SPAN).tanh()).copysign(x)
+        (LIMIT_KNEE + LIMIT_SPAN * ((a - LIMIT_KNEE) / LIMIT_SPAN).tanh()).min(LIMIT_KNEE + LIMIT_SPAN).copysign(x)
     }
 }
 

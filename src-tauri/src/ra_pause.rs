@@ -104,7 +104,8 @@ pub fn after_ms(last_word: &str, next_brk: Option<Brk>, rate: f32) -> f32 {
 /// a final `,` or dash is replaced by "." and a word not ending in `.` `!` `?` `:` `;`
 /// gets a "." (a falling end). Before a table cell: a final dash is replaced by "," and
 /// a word ending in a letter or digit gets a ",". Closing quotes and brackets are looked
-/// past and kept after the mark. A word with no letter or digit is left alone.
+/// past and kept after the mark. A word with no letter or digit is left alone, and so
+/// is one the abbreviation table would expand once dotted (`St`, `Dr`, `no`).
 pub fn speak_form(word: &str, next_brk: Brk) -> Cow<'_, str> {
     if next_brk == Brk::None || !word.chars().any(char::is_alphanumeric) {
         return Cow::Borrowed(word);
@@ -129,6 +130,11 @@ pub fn speak_form(word: &str, next_brk: Brk) -> Cow<'_, str> {
         (false, '.')
     };
     let keep = if cut { body.get(..body.len() - last.len_utf8()).unwrap_or(body) } else { body };
+    // final-review ruling: a "." the normalizer would expand ("St." = saint) is never
+    // added; the pause alone marks the break
+    if mark == '.' && crate::ra_norm_text::expands_when_dotted(keep.trim_start_matches(|c: char| !c.is_alphanumeric())) {
+        return Cow::Borrowed(word);
+    }
     let mut s = String::with_capacity(word.len() + 1);
     s.push_str(keep);
     s.push(mark);
@@ -257,5 +263,37 @@ mod tests {
         assert_eq!(speak_form("\u{2022}", Brk::ListItem), "\u{2022}");
         assert_eq!(speak_form("", Brk::Heading(1)), "");
         assert!(matches!(speak_form("grew.", Brk::Paragraph), Cow::Borrowed(_)));
+    }
+
+    /// Final-review ruling: a word the abbreviation table would expand once dotted
+    /// ("St." = saint, "Dr." = doctor, "No." = number) never gets the ".": the pause
+    /// alone marks the break. Matched as written in the table, or ALL CAPS; a lowercase
+    /// common word ("sun", "no") still falls.
+    #[test]
+    fn speak_form_never_dots_an_abbreviation() {
+        let line: Vec<String> = ["Main", "St"].iter().map(|w| speak_form(w, Brk::None).into_owned()).collect();
+        assert_eq!(line, ["Main", "St"]);
+        assert_eq!(speak_form("St", Brk::Line), "St", "14 Main St / Springfield");
+        assert_eq!(speak_form("Dr", Brk::Line), "Dr");
+        assert_eq!(speak_form("No", Brk::ListItem), "No");
+        assert_eq!(speak_form("Mr", Brk::Line), "Mr");
+        assert_eq!(speak_form("ST", Brk::Paragraph), "ST");
+        assert_eq!(speak_form("DR", Brk::Line), "DR");
+        // controller ruling: never the lowercase common word
+        let the_sun: Vec<String> = [("the", Brk::None), ("sun", Brk::Paragraph)].iter().map(|(w, b)| speak_form(w, *b).into_owned()).collect();
+        assert_eq!(the_sun, ["the", "sun."]);
+        let say_no: Vec<String> = [("Say", Brk::None), ("no", Brk::Paragraph)].iter().map(|(w, b)| speak_form(w, *b).into_owned()).collect();
+        assert_eq!(say_no, ["Say", "no."]);
+        for w in ["cat", "art", "wed", "st", "dr", "mar"] {
+            assert_eq!(speak_form(w, Brk::Paragraph), format!("{w}."), "{w}");
+        }
+        assert_eq!(speak_form("sT", Brk::Paragraph), "sT.", "mixed case is not the table form");
+        assert_eq!(speak_form("Ave", Brk::AfterHeading), "Ave");
+        assert_eq!(speak_form("Inc", Brk::Heading(2)), "Inc");
+        assert_eq!(speak_form("(Jr)", Brk::Paragraph), "(Jr)");
+        assert_eq!(speak_form("St,", Brk::Line), "St,", "a comma is not replaced by an expanding dot");
+        assert_eq!(speak_form("St", Brk::TableCell), "St,", "a cell comma never expands");
+        assert_eq!(speak_form("Street", Brk::Line), "Street.");
+        assert_eq!(speak_form("Takeaways", Brk::AfterHeading), "Takeaways.");
     }
 }

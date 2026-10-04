@@ -63,14 +63,22 @@ pauses fit the structure, and chunks sound like one voice at one loudness.
   `Word::text`): a word followed by a heading/list/row/paragraph/caption boundary that
   has no terminal punctuation gets a "." so the model gives a falling end; a word
   before a `TableCell` gets ",". Headings therefore end with a falling tone even when
-  the page has no period.
+  the page has no period. (Final-review ruling: a word the abbreviation table would
+  expand once dotted (matched as written in the table or ALL CAPS: "St", "Dr",
+  "No", "ST"; never a lowercase word like "sun" or "no") gets no "."; the pause alone marks
+  the break, so "14 Main St" / "Springfield" never reads "Main saint".)
 
 ## 3. Chunking aligned to structure (`ra_text::chunk_with`)
 - Every `Brk` except `None` splits sentences (as `para_break_before` does today).
-- A short block never "carries" across a structural break, except list items and
-  table cells shorter than the ramp minimum, which join the next item; the speak
-  form's "." / "," then gives the pause inside the chunk.
-- A heading is never cut mid-heading.
+- During the ramp (limit below max), a block shorter than the ramp minimum joins the
+  next one across any structural break (heading, paragraph, list item, cell), as
+  before this branch, so a read starting on a 2-word heading does not make a 2-word
+  first chunk. The exact pause is rendered inside the chunk (Task 10 inner silence)
+  and the speak form gives the falling end. After the ramp every break ends a chunk.
+  (Final-review ruling; replaces "only list items and cells join".)
+- A heading is never cut mid-heading by a sentence end, and a heading carried into a
+  ramp chunk is never cut. A heading longer than the chunk limit is still cut at the
+  limit (gapless playback wins; final-review note).
 - Mid-sentence ramp cuts prefer `;` `:` `—` over `,`, then the existing rules.
 
 ## 4. Audio consistency
@@ -107,7 +115,9 @@ pauses fit the structure, and chunks sound like one voice at one loudness.
   like "Facebook Twitter LinkedIn Email") is not spoken. Footnote markers glued to a
   word (`evidence.[1]`, `[12]`) are not spoken.
 - A skipped word keeps its one timing entry (zero length); the highlight passes over it.
-- Never skips the block the read starts on (Alex clicked it).
+- Never skips the block the read starts on (Alex clicked it). Only a new read (a pick
+  or a click-to-jump) protects a block; skip forward/back, device recovery and a speed
+  change step past chunks that are all junk (to the first spoken word, or the end).
 
 ## 7. Small naturalness rules
 - A bare URL longer than 40 chars reads "link to example dot com" (host only).

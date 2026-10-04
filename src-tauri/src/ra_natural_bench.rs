@@ -358,7 +358,7 @@ fn synth(e: &Arc<Engine>, ctl: u64, j: &Job) -> Result<ChunkAudio, String> {
 fn render(e: &Arc<Engine>, words: Vec<Word>, raw_len: usize, rate: f32) -> Result<Render, String> {
     let mut s = Session::new(Arc::new(AtomicU64::new(0)));
     s.set_rate(rate);
-    s.start(words, raw_len, true);
+    s.start(words, raw_len, true, false);
     let ctl = e.controller_gen();
     let mut r = Render::default();
     let mut times: HashMap<usize, Vec<crate::ra_timing::WordTime>> = HashMap::new();

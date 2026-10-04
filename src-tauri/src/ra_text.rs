@@ -758,12 +758,6 @@ fn breaks_at(words: &[Word], i: usize) -> bool {
     words.get(i).is_some_and(|w| w.para_break_before || w.brk.is_break())
 }
 
-/// A short block of kind `a` may join the next block of kind `b` in one chunk: list
-/// items join list items, table cells join cells and rows (spec §3).
-fn joins_block(a: Brk, b: Brk) -> bool {
-    matches!((a, b), (Brk::ListItem, Brk::ListItem) | (Brk::TableCell | Brk::TableRow, Brk::TableCell | Brk::TableRow))
-}
-
 /// A marked heading longer than this is running text that lost its closing break:
 /// its sentence ends split it again.
 const HEADING_MAX: usize = 20;
@@ -823,8 +817,10 @@ pub fn ramp_limit(sizes: &[usize], first_max: usize, max: usize, rate: f32) -> u
 /// already made (a re-chunk of the not-yet-submitted tail passes them; a fresh start
 /// passes none). While the ramp is below `max`, no chunk is shorter than
 /// `RAMP_MIN` words (8 for the first chunk above 2.5x): a shorter clause is not a cut,
-/// and a shorter sentence joins the next one (not across a paragraph break). After
-/// the ramp, chunks are cut as `chunk` cuts them.
+/// and a shorter sentence or block joins the next one across any structural break
+/// (a heading, paragraph, list item or cell; the engine renders that break's pause
+/// inside the chunk, `Job::inner_pauses`). After the ramp, chunks are cut as `chunk`
+/// cuts them: every structural break ends a chunk.
 pub fn chunk_ramped(words: &[Word], prior: &[usize], first_max: usize, max: usize, rate: f32) -> Vec<Range<usize>> {
     let sizes = |out: &[Range<usize>]| -> Vec<usize> { prior.iter().copied().chain(out.iter().map(|r| r.len())).collect() };
     chunk_with(
@@ -846,8 +842,9 @@ pub fn chunk_ramped(words: &[Word], prior: &[usize], first_max: usize, max: usiz
 /// Sentences, then each cut to `limit(chunks so far)` words (at a clause when possible).
 /// Every structural break (`Word::brk`) starts a sentence, and a heading block is one
 /// sentence. No chunk is shorter than `min_len(chunks so far)` words where it can be
-/// avoided: no cut that leaves less, and a shorter sentence joins the next one in the
-/// same block, or the next list item / table cell after a list item / table cell.
+/// avoided: no cut that leaves less, and a shorter sentence joins the next one, across
+/// any structural break (only the ramp has a `min_len` above 1). A heading that joins
+/// the next block is never cut inside.
 fn chunk_with(
     words: &[Word],
     limit: &dyn Fn(&[Range<usize>]) -> usize,
@@ -889,19 +886,20 @@ fn chunk_with(
     let mut out = Vec::new();
     // start of a short chunk that joins the next sentence
     let mut carry: Option<usize> = None;
+    // no cut before this word: the end of a heading carried into the chunk
+    let mut floor = 0;
     for (si, s) in sentences.iter().enumerate() {
         let mut a = carry.take().unwrap_or(s.start);
         while a < s.end {
             let limit = limit(&out).max(1); // a 0 limit would never advance
             let min = min_len(&out).clamp(1, limit);
             if s.end - a <= limit {
-                // never across a structural break, except item to item / cell to cell
-                let next_joins = sentences.get(si + 1).is_some_and(|n| {
-                    !breaks_at(words, n.start)
-                        || words.get(n.start).is_some_and(|w| joins_block(kinds.get(si).copied().unwrap_or(Brk::None), w.brk))
-                });
-                if s.end - a < min && next_joins {
+                // the ramp (min > 1) joins across any break; after it nothing joins
+                if s.end - a < min && si + 1 < sentences.len() {
                     carry = Some(a);
+                    if kinds.get(si).is_some_and(|k| k.is_heading()) {
+                        floor = s.end;
+                    }
                 } else {
                     out.push(a..s.end);
                 }
@@ -931,7 +929,8 @@ fn chunk_with(
                         .find(|&k| quiet(k) && joins_phrase(&words[k].text))
                         .or_else(|| near.rev().find(|&k| quiet(k)))
                         // a short ramp chunk: an earlier quiet gap still beats `3.5 | ft`
-                        .or_else(|| (a + 1..hard).rev().find(|&k| quiet(k)))
+                        // (never inside a carried heading)
+                        .or_else(|| ((a + 1).max(floor)..hard).rev().find(|&k| quiet(k)))
                         .unwrap_or(hard)
                 });
             out.push(a..cut);
@@ -1285,13 +1284,17 @@ mod tests {
         let w = words("Eight times a year, twelve people sit around a long table in Washington and decide.");
         assert!(chunk_ramped(&w, &[], 12, 30, 2.2)[0].len() >= 6);
         assert!(chunk_ramped(&w, &[], 12, 30, 3.5)[0].len() >= 8);
-        // in the ramp a short sentence joins the next one, not across a paragraph
+        // in the ramp a short sentence joins the next one, also across a paragraph
+        // (final-review ruling: the engine renders the break's pause inside the chunk)
         let w = words("Rates fell. The Fed cut its rate by a quarter point on Wednesday afternoon.");
         let c = chunk_ramped(&w, &[], 12, 30, 2.2);
         assert!(c[0].start == 0 && c[0].end >= 8, "{c:?}");
         let mut w = words("Rates fell. The Fed cut its rate by a quarter point on Wednesday afternoon.");
         w[2].para_break_before = true;
-        assert_eq!(chunk_ramped(&w, &[], 12, 30, 2.2)[0], 0..2);
+        let c = chunk_ramped(&w, &[], 12, 30, 2.2);
+        assert!(c[0].start == 0 && c[0].end >= 8, "{c:?}");
+        // after the ramp the paragraph break ends the chunk
+        assert_eq!(chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2)[0], 0..2);
         // a short ramp chunk never parts a number from its unit
         let w = words("The cable was 1 ft long, but the next one was 3.5 ft long.");
         let c = chunk_ramped(&w, &[], 12, 30, 2.2);
@@ -1506,6 +1509,11 @@ mod tests {
         );
         assert!(w[2].para_break_before && w[4].para_break_before);
         for c in [chunk(&w, 12, 50), chunk_ramped(&w, &[], 12, 30, 2.2), chunk_ramped(&w, &[], 12, 30, 3.5)] {
+            assert!(joined(&w, &c, "Key", "Takeaways"), "the heading is never cut: {c:?}");
+        }
+        // after the ramp (and in fixed chunks) the heading is a chunk of its own; in the
+        // ramp a short block joins the next across the break (final-review ruling)
+        for c in [chunk(&w, 12, 50), chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2)] {
             assert!(!joined(&w, &c, "2024", "Key"), "{c:?}");
             assert!(!joined(&w, &c, "Takeaways", "The"), "{c:?}");
         }
@@ -1867,35 +1875,46 @@ mod tests {
         let mut w = words("no period here next para");
         w[3].brk = Brk::TableCell;
         assert_eq!(chunk(&w, 12, 50), vec![0..3, 3..5]);
-        // a short sentence never carries across a heading break
+        // after the ramp a short sentence never carries across a heading break
         let w = with_brks("Rates fell. Key Takeaways The Fed cut its rate by a quarter point on Wednesday.", &[(2, Brk::Heading(0)), (4, Brk::AfterHeading)]);
-        let c = chunk_ramped(&w, &[], 12, 30, 2.2);
+        let c = chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2);
         assert_eq!(&c[..2], &[0..2, 2..4], "{c:?}");
+        // in the ramp it does (final-review ruling), and the heading is never cut
+        let c = chunk_ramped(&w, &[], 12, 30, 2.2);
+        assert!(c[0].start == 0 && c[0].len() >= RAMP_MIN, "{c:?}");
+        assert!(c.iter().all(|r| r.start != 3), "{c:?}");
     }
 
     #[test]
     fn short_list_items_and_cells_join_the_next_of_their_kind() {
         let li = Brk::ListItem;
+        // final-review ruling: in the ramp a short block joins the next across any
+        // break; after the ramp every block is a chunk of its own
         let w = with_brks("We need: Apples Pears Plums and some cherries for the pie tonight.", &[(2, li), (3, li), (4, li)]);
         let c = chunk_ramped(&w, &[], 12, 30, 2.2);
-        assert_eq!(c[0], 0..2, "the lead-in never joins a list item: {c:?}");
+        assert!(c[0].start == 0 && c[0].len() >= RAMP_MIN, "a short lead-in joins the items in the ramp: {c:?}");
+        let c = chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2);
+        assert_eq!(c[0], 0..2, "after the ramp the lead-in is its own chunk: {c:?}");
         let w = with_brks("We need these things for the trip: Apples Pears Plums and some cherries.", &[(7, li), (8, li), (9, li)]);
         let c = chunk_ramped(&w, &[], 12, 30, 2.2);
         assert_eq!(c, vec![0..7, 7..13], "short items join the next item");
         // without the ramp minimum, every item is its own chunk
         assert_eq!(chunk(&w, 12, 50), vec![0..7, 7..8, 8..9, 9..13]);
-        // a list item never joins a paragraph after it
+        // short list items join a paragraph after them in the ramp, not after it
         let w = with_brks("Apples Pears Then the long paragraph goes on and on here.", &[(0, li), (1, li), (2, Brk::Paragraph)]);
         let c = chunk_ramped(&w, &[], 12, 30, 2.2);
-        assert_eq!(c[0], 0..2, "{c:?}");
+        assert!(c[0].start == 0 && c[0].len() >= RAMP_MIN, "{c:?}");
+        let c = chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2);
+        assert_eq!(&c[..3], &[0..1, 1..2, 2..11], "{c:?}");
         // table cells join cells and rows
         let (tc, tr) = (Brk::TableCell, Brk::TableRow);
         let w = with_brks("Name Age City Ann 31 Oslo Bob 42 Rome Cy 50 Nice", &[(0, tr), (1, tc), (2, tc), (3, tr), (4, tc), (5, tc), (6, tr), (7, tc), (8, tc), (9, tr), (10, tc), (11, tc)]);
         let c = chunk_ramped(&w, &[], 12, 30, 2.2);
         assert_eq!(c[0], 0..6, "cells join while shorter than the minimum: {c:?}");
-        // a cell never joins a list item
+        // a cell joins a list item in the ramp, not after it
         let w = with_brks("Ann 31 Apples is the next thing to read in this list.", &[(0, tc), (1, tc), (2, li)]);
-        assert_eq!(chunk_ramped(&w, &[], 12, 30, 2.2)[0], 0..2);
+        assert!(chunk_ramped(&w, &[], 12, 30, 2.2)[0].len() >= RAMP_MIN);
+        assert_eq!(chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2)[..2], [0..1, 1..2]);
     }
 
     #[test]

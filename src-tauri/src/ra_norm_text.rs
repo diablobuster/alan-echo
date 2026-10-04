@@ -789,6 +789,25 @@ pub fn glued_unit(key: &str) -> Option<(&'static str, &'static str)> {
     unit(key).filter(|u| u.2).map(|u| (u.0, u.1))
 }
 
+/// `word` with a "." appended is in the abbreviation table, as written there ("St" ->
+/// "St." = saint/street, "No" -> "No." = number; capitalised entries only) or in ALL
+/// CAPS ("ST", "DR"); never a lowercase word ("sun", "no"): `ra_pause::speak_form`
+/// never adds that ".".
+pub fn expands_when_dotted(word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    // only the capitalised entries: the lowercase ones ("no.", "etc.") are also common
+    // words or read fine with the dot
+    let key = format!("{word}.");
+    let capitalised = |e: &str| e.starts_with(|c: char| c.is_ascii_uppercase());
+    if abbrev(&key).is_some_and(|_| capitalised(&key)) {
+        return true;
+    }
+    let caps = word.chars().any(|c| c.is_ascii_uppercase()) && !word.chars().any(|c| c.is_lowercase());
+    caps && ABBREVS.iter().any(|e| capitalised(e.0) && e.0.to_ascii_uppercase() == key)
+}
+
 /// An abbreviation that never ends a sentence: a title (`Sen.`, `Gen.`), `Dr.`,
 /// `St.`, `v.`, or one that needs a number after it (`Fig.`, `Vol.`). Used by
 /// `ra_text::chunk`, so a chunk never ends on one and loses its expansion.

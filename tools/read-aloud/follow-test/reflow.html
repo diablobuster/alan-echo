@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Echo follow reflow test</title>
+<!--
+  Round 3 follow-mode lab page (ra_uia_manual_tests::follow_reflow_manual).
+  Everything here moves the page WITHOUT a user scroll. Follow must stay on:
+  - smooth scrolling (html{scroll-behavior:smooth}) slows Echo's own scrolls down
+  - every 5 s a 120 px block is inserted above the paragraph in the middle of the view
+  - an "ad" slot near the top grows and shrinks (0 <-> 250 px) every 4 s
+  - a lazy <img> without a reserved size, and a JS lazy block that grows when it nears the view
+  - a sticky header whose clock text node is replaced every 3 s
+  - a "Page down" button (window.scrollBy, like the PageDown key) the test presses via UIA
+  Open it by hand to watch it: no network, no input needed.
+-->
+<style>
+  html { scroll-behavior: smooth; }
+  body { font: 18px Georgia, serif; max-width: 700px; margin: 0 auto; padding: 0 20px; background: #fff; color: #111; }
+  header { position: sticky; top: 0; background: #fafafa; border-bottom: 1px solid #ccc; padding: 10px 0; z-index: 2; }
+  .ad { background: #e8eef7; overflow: hidden; transition: none; }
+  .shift { height: 120px; background: #f7eee8; margin: 4px 0; }
+  .lazyblock { background: #eef7e8; height: 0; }
+</style>
+</head>
+<body>
+<header>Sticky header. Live clock: <span id="clock">0</span>
+  <button id="pgdn" type="button">Page down</button></header>
+<h1>Read aloud follow test</h1>
+<div id="ad" class="ad" style="height:0"></div>
+<div id="article"></div>
+<script>
+  // ?static: no moving parts (for measuring Echo's own scrolling alone)
+  const STATIC = location.search.includes("static");
+  const words = ["children", "bridges", "stone", "carried", "quiet", "golden", "clouds", "ancient", "valleys", "river"];
+  const art = document.getElementById("article");
+  for (let p = 0; p < 60; p++) {
+    const el = document.createElement("p");
+    let t = "Paragraph" + String(p).padStart(2, "0") + " begins here.";
+    for (let i = 0; i < 70; i++) t += " " + words[(p * 7 + i * 3) % words.length];
+    el.textContent = t + ".";
+    art.appendChild(el);
+    if (p === 7 && !STATIC) {
+      // a real lazy image with no reserved size: the page shifts when it loads
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.alt = "";
+      img.src = "data:image/svg+xml," + encodeURIComponent(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='600' height='260'><rect width='600' height='260' fill='#ddd'/></svg>");
+      art.appendChild(img);
+    }
+    if (p % 9 === 4 && !STATIC) {
+      // a JS lazy block: grows to 300 px once it comes near the view
+      const b = document.createElement("div");
+      b.className = "lazyblock";
+      art.appendChild(b);
+      new IntersectionObserver((es, ob) => {
+        for (const e of es) if (e.isIntersecting) { e.target.style.height = "300px"; ob.unobserve(e.target); }
+      }, { rootMargin: "200px" }).observe(b);
+    }
+  }
+  // the manual test presses this through UIA: a PageDown done by the page's own JS
+  document.getElementById("pgdn").addEventListener("click", () => window.scrollBy(0, innerHeight * 0.875));
+  // the sticky header's clock: its text node is replaced every 3 s
+  const clock = document.getElementById("clock");
+  let n = 0;
+  setInterval(() => { clock.replaceChild(document.createTextNode(String(++n)), clock.firstChild); }, 3000);
+  // the ad slot near the top grows and shrinks
+  const ad = document.getElementById("ad");
+  if (!STATIC) setInterval(() => { ad.style.height = ad.style.height === "0px" ? "250px" : "0px"; }, 4000);
+  // a 120 px block above the paragraph in the middle of the view
+  if (!STATIC) setInterval(() => {
+    const el = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    const para = el && el.closest("p");
+    if (para) {
+      const s = document.createElement("div");
+      s.className = "shift";
+      para.parentNode.insertBefore(s, para);
+    }
+  }, 5000);
+</script>
+</body>
+</html>

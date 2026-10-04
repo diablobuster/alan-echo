@@ -84,8 +84,9 @@ pub fn normalize(raw: &[String]) -> Vec<Word> {
                 i += 1;
                 continue;
             }
-            // punctuation-only token glues onto the previous word (text only)
-            if !has_alnum(t) && !is_dash(t) && !pending_para {
+            // punctuation-only token glues onto the previous word (text only), except a
+            // spoken symbol after a space: "dispute ¶ 8", "β = 0.62", "clause (§ 14.2)"
+            if !has_alnum(t) && !is_dash(t) && !pending_para && !(!prev_glued && is_spoken_symbol(t)) {
                 last.text.push_str(t);
                 pending_para |= breaks;
                 prev_glued = glued;
@@ -103,6 +104,13 @@ pub fn normalize(raw: &[String]) -> Vec<Word> {
 
 fn breaks_before(raw: &[String], i: usize) -> bool {
     i > 0 && (raw[i - 1].contains('\r') || raw[i - 1].contains('\n'))
+}
+
+/// A token that is a symbol read aloud on its own (`¶`, `¶¶`, `=`, `<`, `(§`), possibly
+/// opened by a bracket and closed by punctuation.
+fn is_spoken_symbol(t: &str) -> bool {
+    let core = t.trim_start_matches(['(', '[']).trim_end_matches([',', ';', ':', '.', ')', ']']);
+    !core.is_empty() && core.chars().all(|c| matches!(c, '¶' | '§' | '=' | '<' | '>' | '≤' | '≥' | '≈' | '≠' | '×' | '÷' | '±'))
 }
 
 fn is_prefix_char(c: char) -> bool {
@@ -565,6 +573,21 @@ mod tests {
         }
     }
     fn raw(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn a_spoken_symbol_after_a_space_is_its_own_word() {
+        // round 3: "dispute ¶ 8", "β = 0.62", "clause (§ 14.2)" were glued onto the
+        // previous word as punctuation and never read
+        let t = |v: &[&str]| normalize(&raw(v)).into_iter().map(|w| w.text).collect::<Vec<_>>();
+        assert_eq!(t(&["dispute ", "¶ ", "8"]), ["dispute", "¶", "8"]);
+        assert_eq!(t(&["in ", "¶¶ ", "3-17"]), ["in", "¶¶", "3-17"]);
+        assert_eq!(t(&["β ", "= ", "0.62"]), ["β", "=", "0.62"]);
+        assert_eq!(t(&["p ", "< ", "0.05"]), ["p", "<", "0.05"]);
+        assert_eq!(t(&["clause ", "(§ ", "14.2)"]), ["clause", "(§", "14.2)"]);
+        // glued punctuation still glues; plain punctuation after a space too
+        assert_eq!(t(&["end", ". ", "Next"]), ["end.", "Next"]);
+        assert_eq!(t(&["wait ", "... ", "what"]), ["wait...", "what"]);
+    }
     fn texts(w: &[Word]) -> Vec<&str> { w.iter().map(|x| x.text.as_str()).collect() }
 
     #[test]

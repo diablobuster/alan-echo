@@ -1278,6 +1278,18 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
     if !has_digit(core) {
         return core.to_string();
     }
+    // code-ish text with digits, read by the text rules: "/v1/orders",
+    // "PORT=http://localhost:8080"
+    let code = if core.starts_with('/') {
+        crate::ra_norm_text::path_words(core)
+    } else if core.contains("://") && core.contains('=') {
+        crate::ra_norm_text::ident_words(core)
+    } else {
+        None
+    };
+    if let Some(s) = code {
+        return s;
+    }
     if let Some(s) = decade(core) {
         return s;
     }
@@ -1331,6 +1343,12 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
         if let Some((unit, "c2" | "c²")) = core.split_once('/') {
             if !unit.is_empty() && unit.chars().all(|c| c.is_ascii_alphabetic()) {
                 return format!("{unit} per c squared");
+            }
+        }
+        // `kg/m2` (a BMI): a unit per square meter
+        if let Some((unit, "m2" | "m²")) = core.split_once('/') {
+            if let Some((_, many)) = crate::ra_norm_text::glued_unit(unit) {
+                return format!("{many} per square meter");
             }
         }
         if let Some(s) = slash_number(core, ctx) {

@@ -10,7 +10,7 @@
 //! Only one `PickHook` may be alive at a time (callbacks live in statics); a second
 //! `install` while one is alive returns an inactive no-op hook.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetMessageW, GetWindowThreadProcessId, PeekMessageW,
     PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK,
     HOOKPROC, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_QUIT, WM_USER,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_USER,
 };
 
 type Cb = Box<dyn Fn(i32, i32) + Send>;
@@ -204,13 +204,27 @@ impl Drop for PickHook {
 
 // ── Watch hook (observe-only, alive only while a read session is active) ──────────
 
-/// A left-button event seen by the watch hook. `t` = the event's time stamp in ms
+/// An event seen by the watch hook. `t` = the event's time stamp in ms
 /// (`MSLLHOOKSTRUCT::time`, wraps); coordinates are physical screen pixels; `mods` =
 /// Shift, Ctrl or Alt was held (selection / app shortcuts: never a jump).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MouseEv {
     Down { x: i32, y: i32, t: u32, mods: bool },
     Up { x: i32, y: i32, t: u32, mods: bool },
+    /// A vertical or horizontal wheel notch at the cursor (follow mode's scroll evidence).
+    Wheel { x: i32, y: i32 },
+    /// The mouse moved while the left button is held (a scroll bar or selection drag),
+    /// at most every `DRAG_MOVE_MS`.
+    Move { x: i32, y: i32 },
+}
+
+/// Moves with the left button held are reported at most this often.
+pub const DRAG_MOVE_MS: u32 = 50;
+
+/// Report a move now? Only while the left button is held, and throttled (time stamps
+/// wrap). Pure, so it is unit-tested.
+pub fn drag_move_due(held: bool, t: u32, last: u32) -> bool {
+    held && t.wrapping_sub(last) >= DRAG_MOVE_MS
 }
 
 /// Shift, Ctrl or Alt is down right now (async state: the hook thread has no input
@@ -226,6 +240,9 @@ type WatchCb = Box<dyn Fn(MouseEv) + Send>;
 
 static WATCH: OnceLock<Mutex<Option<WatchCb>>> = OnceLock::new();
 static WATCH_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// The left button is down (seen by the watch hook), and when a held move was last sent.
+static WATCH_HELD: AtomicBool = AtomicBool::new(false);
+static WATCH_LAST_MOVE: AtomicU32 = AtomicU32::new(0);
 
 fn watch_slot() -> &'static Mutex<Option<WatchCb>> {
     WATCH.get_or_init(|| Mutex::new(None))
@@ -236,9 +253,24 @@ unsafe extern "system" fn watch_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
         let info = &*(l.0 as *const MSLLHOOKSTRUCT);
         let (x, y, t) = (info.pt.x, info.pt.y, info.time);
         let ev = match w.0 as u32 {
-            WM_LBUTTONDOWN => Some(MouseEv::Down { x, y, t, mods: modifiers_held() }),
-            WM_LBUTTONUP => Some(MouseEv::Up { x, y, t, mods: modifiers_held() }),
-            _ => None, // moves are not reported (no traffic while the mouse just moves)
+            WM_LBUTTONDOWN => {
+                WATCH_HELD.store(true, Ordering::Relaxed);
+                WATCH_LAST_MOVE.store(t, Ordering::Relaxed);
+                Some(MouseEv::Down { x, y, t, mods: modifiers_held() })
+            }
+            WM_LBUTTONUP => {
+                WATCH_HELD.store(false, Ordering::Relaxed);
+                Some(MouseEv::Up { x, y, t, mods: modifiers_held() })
+            }
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => Some(MouseEv::Wheel { x, y }),
+            // plain moves are not reported (no traffic while the mouse just moves)
+            WM_MOUSEMOVE
+                if drag_move_due(WATCH_HELD.load(Ordering::Relaxed), t, WATCH_LAST_MOVE.load(Ordering::Relaxed)) =>
+            {
+                WATCH_LAST_MOVE.store(t, Ordering::Relaxed);
+                Some(MouseEv::Move { x, y })
+            }
+            _ => None,
         };
         if let Some(ev) = ev {
             if let Some(cb) = watch_slot().lock().as_ref() {
@@ -250,8 +282,8 @@ unsafe extern "system" fn watch_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
     CallNextHookEx(HHOOK::default(), code, w, l)
 }
 
-/// Observe-only WH_MOUSE_LL hook: reports left down/up events, swallows
-/// nothing. The callback runs inside the hook proc, so it must only send to a channel.
+/// Observe-only WH_MOUSE_LL hook: reports left down/up, wheel, and held-button moves;
+/// swallows nothing. The callback runs inside the hook proc, so it must only send to a channel.
 /// Only one may be alive at a time (a second `install` returns an inactive no-op).
 /// Drop to uninstall it.
 pub struct WatchHook {
@@ -268,6 +300,7 @@ impl WatchHook {
             return WatchHook { owner: false, active: false, thread_id: 0, thread: None };
         }
         *watch_slot().lock() = Some(Box::new(on_event));
+        WATCH_HELD.store(false, Ordering::Relaxed);
         let (thread_id, active, thread) = spawn_hook_thread("ra-watch", Some(watch_proc));
         WatchHook { owner: true, active, thread_id, thread }
     }
@@ -358,6 +391,14 @@ impl ClickTracker {
 #[cfg(test)]
 mod click_tests {
     use super::*;
+
+    #[test]
+    fn held_moves_are_reported_throttled_plain_moves_never() {
+        assert!(!drag_move_due(false, 1000, 0), "button up: no move traffic");
+        assert!(drag_move_due(true, 1000, 900));
+        assert!(!drag_move_due(true, 1000, 980), "throttled");
+        assert!(drag_move_due(true, 20, u32::MAX - 40), "time stamps wrap");
+    }
 
     #[test]
     fn a_short_still_press_is_a_click() {
@@ -843,7 +884,10 @@ mod bench {
         }));
         let tw = tx.clone();
         *watch_slot().lock() = Some(Box::new(move |ev| {
-            let (MouseEv::Down { x, y, .. } | MouseEv::Up { x, y, .. }) = ev;
+            let (MouseEv::Down { x, y, .. }
+            | MouseEv::Up { x, y, .. }
+            | MouseEv::Wheel { x, y }
+            | MouseEv::Move { x, y }) = ev;
             let _ = tw.send((x, y));
         }));
         let n = 20_000;

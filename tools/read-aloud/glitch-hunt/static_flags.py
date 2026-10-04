@@ -234,7 +234,9 @@ def main():
                 if sym and not any(x in phs_n for x in ("dˈɑlɚ", "jˈʊɹO", "jˈʊɹɹO", "pˈWnd", "jˈɛn")) and not money_sub:
                     flags.append("CURRENCY_UNIT_MISSING")
             # (round 2) shorthand left as written (static: fed text unchanged or spelled)
-            if spoken_txt is None and SHORTHAND.match(core) and (fed.strip("()[],.;:") == core or "[" in fed):
+            # (round 3) "SE = 0.08" is a standard error, not south-east: spelled is right
+            stat = core in ("SE", "NE", "NW", "SW") and i + 1 < n and words[i + 1][0].startswith("=")
+            if spoken_txt is None and SHORTHAND.match(core) and not stat and (fed.strip("()[],.;:") == core or "[" in fed):
                 flags.append("SHORTHAND_UNEXPANDED")
             # a W/L/D result letter before a score ("Arsenal W 3-1")
             if spoken_txt is None and core in ("W", "L", "D") and i + 1 < n and SCORE.match(words[i + 1][0]):

@@ -37,6 +37,8 @@ mod ra_names;
 #[cfg(target_os = "windows")]
 mod ra_homograph;
 #[cfg(target_os = "windows")]
+mod ra_follow;
+#[cfg(target_os = "windows")]
 mod read_aloud;
 #[cfg(target_os = "windows")]
 mod ra_g2pen;

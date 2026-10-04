@@ -54,6 +54,19 @@ cached in `cache/`, so later builds are offline and identical).
 - `glitch_synth` takes `GH_RATE` (default 1.0) and `GH_GAP_MS` (default 100); the
   round-2 board lines use `GH_RATE=2.2 GH_GAP_MS=0` (chunks back to back).
 
+## Round 3 corpus
+
+- `gen_stress_round3.py` writes `stress_round3.txt` (committed, ours) and
+  `corpus_round3.tsv` (git-ignored): 1,500 self-written lines of legal / court text,
+  medical and health news, academic abstracts with citations and statistics,
+  Reddit / forum style, product reviews and code-ish text. Run the hunt on it with
+  `GH_CORPUS=<frozen copy of corpus_round3.tsv>`.
+- The round-3 board lines are `../board_round3.tsv` (25 lines, 2.2x, `GH_RATE=2.2
+  GH_GAP_MS=0`); `make_glitch_board.py --r3-before/--r3-after` adds the section.
+- The round-trip scorer's reference (`speechnorm.py`) does not know the round-3
+  expansions (ftw, bpm, kg/m2, the paragraph sign, C sharp), so many round-3
+  "glitches" are Whisper hearing the right words; read `roundtrip.csv` before fixing.
+
 ## Licences
 
 - **Corpus:** Wikipedia text is CC BY-SA and Wikinews is CC BY 2.5. Neither is ever

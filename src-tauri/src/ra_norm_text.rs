@@ -52,6 +52,7 @@ static ABBREVS: &[(&str, &str, Rule)] = &[
     ("Bros.", "brothers", Rule::Always),
     ("Capt.", "captain", Rule::Title),
     ("Cat.", "category", Rule::Number),
+    ("Cf.", "compare", Rule::Always),
     ("Ch.", "chapter", Rule::Number),
     ("Cmdr.", "commander", Rule::Title),
     ("Co.", "company", Rule::Always),
@@ -187,6 +188,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("V", "volt", "volts", true),
     ("W", "watt", "watts", true),
     ("bp", "basis point", "basis points", true),
+    ("bpm", "beat per minute", "beats per minute", true),
     ("bps", "basis points", "basis points", true),
     ("cc", "cubic centimeter", "cubic centimeters", true),
     ("cm", "centimeter", "centimeters", true),
@@ -213,8 +215,10 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("lb", "pound", "pounds", true),
     ("lbs", "pounds", "pounds", true),
     ("m", "meter", "meters", false),
+    ("m2", "square meter", "square meters", true),
     ("mAh", "milliamp hour", "milliamp hours", true),
     ("mL", "milliliter", "milliliters", true),
+    ("mcg", "microgram", "micrograms", true),
     ("mg", "milligram", "milligrams", true),
     ("mi", "mile", "miles", true),
     ("min", "minute", "minutes", true),
@@ -230,11 +234,14 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("oz", "ounce", "ounces", true),
     ("psi", "P S I", "P S I", true),
     ("px", "pixel", "pixels", true),
+    ("qt", "quart", "quarts", true),
     ("rpm", "R P M", "R P M", true),
     ("sec", "second", "seconds", true),
     ("secs", "seconds", "seconds", true),
     ("tbsp", "tablespoon", "tablespoons", true),
     ("tsp", "teaspoon", "teaspoons", true),
+    ("wk", "week", "weeks", true),
+    ("wks", "weeks", "weeks", true),
     ("yd", "yard", "yards", true),
     ("yds", "yards", "yards", true),
     ("°", "degree", "degrees", true),
@@ -256,8 +263,10 @@ static PER: &[(&str, &str)] = &[
     ("kg", "kilogram"),
     ("l", "liter"),
     ("lb", "pound"),
+    ("m2", "square meter"),
     ("min", "minute"),
     ("mo", "month"),
+    ("m²", "square meter"),
     ("oz", "ounce"),
     ("s", "second"),
     ("sec", "second"),
@@ -286,6 +295,8 @@ static SYMBOLS: &[(&str, &str)] = &[
     ("§§", "sections"),
     ("°", "degrees"),
     ("±", "plus or minus"),
+    ("¶", "paragraph"),
+    ("¶¶", "paragraphs"),
     ("¼", "one quarter"),
     ("½", "one half"),
     ("¾", "three quarters"),
@@ -351,24 +362,40 @@ static TLDS: &[(&str, &str)] = &[
 /// File extensions read after a file name (`Node.js`, `data.json`). Sorted.
 static FILE_EXTS: &[(&str, &str)] = &[
     // BEGIN SORTED
+    ("cfg", "C F G"),
+    ("cpp", "C P P"),
+    ("css", "C S S"),
     ("csv", "C S V"),
     ("db", "D B"),
     ("dll", "D L L"),
     ("exe", "E X E"),
+    ("gif", "gif"),
+    ("go", "go"),
     ("html", "H T M L"),
+    ("ini", "I N I"),
+    ("java", "java"),
     ("jpg", "J P G"),
     ("js", "J S"),
     ("json", "jason"),
+    ("jsx", "J S X"),
+    ("log", "log"),
     ("md", "M D"),
     ("pdf", "P D F"),
+    ("php", "P H P"),
     ("png", "P N G"),
     ("py", "P Y"),
+    ("rb", "R B"),
     ("rs", "R S"),
     ("sh", "S H"),
+    ("sql", "S Q L"),
+    ("svg", "S V G"),
+    ("toml", "tom L"),
     ("ts", "T S"),
+    ("tsx", "T S X"),
     ("txt", "T X T"),
     ("xml", "X M L"),
     ("yaml", "yammel"),
+    ("yml", "Y M L"),
     ("zip", "zip"),
     // END SORTED
 ];
@@ -566,6 +593,29 @@ static OVER: &[(&str, &str)] = &[
     // END SORTED
 ];
 
+/// Forum / chat shorthand, lowercase only (`BC Hydro`, `SMH` stay). Sorted.
+static SLANG: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("afaik", "as far as I know"),
+    ("bc", "because"),
+    ("brb", "be right back"),
+    ("ftw", "for the win"),
+    ("fwiw", "for what it's worth"),
+    ("hmu", "hit me up"),
+    ("idk", "I don't know"),
+    ("iirc", "if I recall correctly"),
+    ("imho", "in my humble opinion"),
+    ("imo", "in my opinion"),
+    ("ios", "I O S"),
+    ("ngl", "not gonna lie"),
+    ("nvm", "never mind"),
+    ("ppl", "people"),
+    ("smh", "shaking my head"),
+    ("tbh", "to be honest"),
+    ("tl;dr", "T L D R"),
+    // END SORTED
+];
+
 /// Stock exchanges before a ticker ("NASDAQ:AAPL", "NYSE: T"). Sorted.
 static EXCHANGES: &[(&str, &str)] = &[
     // BEGIN SORTED
@@ -651,6 +701,38 @@ fn near(w: &[&str], i: usize, span: usize, keys: &[&str]) -> bool {
         let c = split(w[k]).core.trim_end_matches('.').to_ascii_lowercase();
         keys.contains(&c.as_str())
     })
+}
+
+/// Words that make "mb" megabytes (only file / storage words; generic ones like "data"
+/// or "photos" appear in weather text too).
+const MB_STORAGE: &[&str] = &[
+    "attachment", "attachments", "cache", "disk", "download", "downloads", "drive", "file", "files", "install",
+    "installer", "memory", "pdf", "ram", "ssd", "storage", "upload", "uploads", "zip",
+];
+
+/// Words that make "mb" millibars.
+const MB_WEATHER: &[&str] = &[
+    "barometric", "cyclone", "depression", "hpa", "hurricane", "inhg", "isobar", "landfall", "millibar",
+    "millibars", "nhc", "noaa", "pressure", "storm", "storm's", "tropical", "typhoon",
+];
+
+/// "940 mb before landfall" (millibars) vs "a 500 mb file" (megabytes): the nearest
+/// context word within 4 words either side decides; "low" / "high" count only right
+/// after the unit ("a 990 mb low"). No context word: megabytes.
+fn mb_is_weather(w: &[&str], i: usize) -> bool {
+    let word = |k: usize| w.get(k).map(|x| split(x).core.trim_end_matches('.').to_ascii_lowercase());
+    for d in 1..=4 {
+        for k in [i.checked_sub(d), Some(i + d)].into_iter().flatten() {
+            let Some(c) = word(k) else { continue };
+            if MB_STORAGE.contains(&c.as_str()) {
+                return false;
+            }
+            if MB_WEATHER.contains(&c.as_str()) || (k == i + 1 && matches!(c.as_str(), "low" | "high")) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// A percent figure within `span` words of `i` ("18.4%").
@@ -1312,6 +1394,7 @@ fn slash_words(s: &str) -> Option<String> {
     match s {
         "w/" | "W/" => return Some("with".into()),
         "w/o" | "W/O" => return Some("without".into()),
+        "b/c" | "B/C" => return Some("because".into()),
         "c/o" => return Some("care of".into()),
         "n/a" | "N/A" => return Some("not applicable".into()),
         _ => {}
@@ -1319,6 +1402,10 @@ fn slash_words(s: &str) -> Option<String> {
     let (a, b) = s.split_once('/')?;
     if matches!(b, "c2" | "c²") && is_ascii_word(a) {
         return Some(format!("{a} per c squared"));
+    }
+    // `kg/m2` (a BMI): a unit per a square unit
+    if let (Some((_, many, _)), true, Some(per)) = (unit(a), matches!(b, "m2" | "m²"), find(PER, b)) {
+        return Some(format!("{many} per {per}"));
     }
     if !is_ascii_word(a) || !is_ascii_word(b) {
         return None;
@@ -1398,6 +1485,53 @@ fn ampersand_words(s: &str) -> Option<String> {
     Some(parts.join(" and "))
 }
 
+/// `/api/users` → "slash api slash users": a URL path on its own.
+pub(crate) fn path_words(s: &str) -> Option<String> {
+    let rest = s.strip_prefix('/')?;
+    let segs: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+    let ok = |g: &&str| {
+        !g.is_empty() && g.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    if !segs.iter().all(ok) || !rest.chars().any(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(segs.iter().map(|g| format!("slash {}", g.replace(['_', '-'], " "))).collect::<Vec<_>>().join(" "))
+}
+
+/// `http://localhost:8080` → "localhost colon 8080" (no TLD, so not a URL to `url_words`).
+fn local_url(v: &str) -> Option<String> {
+    let rest = v.strip_prefix("http://").or_else(|| v.strip_prefix("https://")).unwrap_or(v);
+    let rest = rest.trim_end_matches('/');
+    let (host, port) = rest.split_once(':').map_or((rest, None), |(h, p)| (h, Some(p)));
+    if host != "localhost" || port.is_some_and(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    Some(port.map_or("localhost".into(), |p| format!("localhost colon {p}")))
+}
+
+/// `user_id` → "user id", `NODE_ENV=production` → "NODE ENV equals production",
+/// `PORT=http://localhost:8080` → "PORT equals localhost colon 8080": identifiers and
+/// settings in code-ish text. Needs an `_` or an `=` after a letter word.
+pub(crate) fn ident_words(s: &str) -> Option<String> {
+    let ident = |x: &str| {
+        x.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let spaced = |x: &str| x.replace(['_', '-'], " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    match s.split_once('=') {
+        Some((k, v)) if ident(k) && !v.is_empty() && !v.contains('=') => {
+            let v = v.trim_start_matches('"').trim_end_matches('"');
+            let said = local_url(v).or_else(|| url_words(v)).unwrap_or_else(|| spaced(v));
+            if said.is_empty() || !v.chars().all(|c| c.is_ascii_graphic()) {
+                return None;
+            }
+            Some(format!("{} equals {said}", spaced(k)))
+        }
+        None if s.contains('_') && ident(s) && s.split('_').all(|p| !p.is_empty()) => Some(spaced(s)),
+        _ => None,
+    }
+}
+
 /// `approach...we` → "approach, we".
 fn ellipsis_words(s: &str) -> Option<String> {
     let (k, len) = match (s.find("..."), s.find('…')) {
@@ -1452,6 +1586,63 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         return one(said, strip_period(core).1 && sentence_end(w, i));
     }
 
+    // ---- round 3 ----
+    // A Greek letter on its own (statistics: "β = 0.32", "(κ = 0.87)"), and "R²".
+    {
+        let bare = strip_period(core).0;
+        let mut cs = bare.chars();
+        if let (Some(c), None) = (cs.next(), cs.next()) {
+            if let Some(name) = crate::ra_names::greek_name(c) {
+                return one(name.to_string(), strip_period(core).1 && sentence_end(w, i));
+            }
+        }
+        if matches!(bare, "R²" | "r²") {
+            return one("R squared".into(), strip_period(core).1 && sentence_end(w, i));
+        }
+    }
+    // Forum shorthand ("ngl", "tbh", "bc"): lowercase, or capitalised at a sentence
+    // start ("Imo the first season"); "44 bc" after a number is the era.
+    {
+        let (body, period) = strip_period(core);
+        if body == "bc" && prev_is_number(w, i) {
+            return one("B C".into(), period && sentence_end(w, i));
+        }
+        if let Some(said) = find(SLANG, body) {
+            return one((*said).to_string(), period && sentence_end(w, i));
+        }
+        let mut cs = body.chars();
+        let titled = cs.next().is_some_and(|c| c.is_ascii_uppercase()) && cs.all(|c| c.is_ascii_lowercase());
+        let starts = i == 0 || (w[i - 1].ends_with(['.', '!', '?']) && sentence_end(w, i - 1));
+        if titled && starts {
+            if let Some(said) = find(SLANG, &body.to_ascii_lowercase()) {
+                let mut cs = said.chars();
+                let cap: String = cs.next().map(|c| c.to_uppercase().chain(cs).collect()).unwrap_or_default();
+                return one(cap, period && sentence_end(w, i));
+            }
+        }
+    }
+    // ".NET" (a leading dot is not a sentence end or a domain)
+    if strip_period(core).0 == ".NET" {
+        return one("dot net".into(), strip_period(core).1 && sentence_end(w, i));
+    }
+    // Languages: "C#", "F#".
+    if let Some(l) = strip_period(core).0.strip_suffix('#').filter(|l| matches!(*l, "C" | "F" | "J")) {
+        return one(format!("{l} sharp"), strip_period(core).1 && sentence_end(w, i));
+    }
+    // URL paths, identifiers and settings: "/api/users", "user_id", "NODE_ENV=production".
+    if let Some(said) = path_words(strip_period(core).0).or_else(|| ident_words(strip_period(core).0)) {
+        return one(said, strip_period(core).1 && sentence_end(w, i));
+    }
+    // A court's state in a citation: "(D. Md. 2020)", "(S.D. Fla.)".
+    let court_before = i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| {
+        matches!(p.core, "D." | "N.D." | "S.D." | "E.D." | "W.D." | "C.D." | "M.D.") && p.trail.is_empty()
+    });
+    if court_before {
+        if let Some(st) = find(AP_STATES, core) {
+            return one((*st).to_string(), sentence_end(w, i));
+        }
+    }
+
     // ---- round 2 ----
     // Earnings shorthand: "Y/Y", "QoQ", "M/M".
     if let Some(said) = find(OVER, strip_period(core).0) {
@@ -1474,9 +1665,12 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
     if let Some(said) = party_tag(core) {
         return one(said, false);
     }
-    let person_before = i >= 2
-        && tok(w, i - 1).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core))
-        && tok(w, i - 2).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core));
+    let name_at = |j: usize| tok(w, j).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core));
+    // "Sen. Ted Cruz (R)", or a political title before a one-word name: "Rep. Smith (R)"
+    let titled = |j: usize| {
+        w.get(j).is_some_and(|x| matches!(x.trim_end_matches('.'), "Rep" | "Sen" | "Gov" | "Del") && x.ends_with('.'))
+    };
+    let person_before = i >= 2 && name_at(i - 1) && (name_at(i - 2) || titled(i - 2));
     if matches!(w[i].trim_end_matches([',', '.', ';']), "(D)" | "(R)") && person_before {
         return one((if core == "D" { "Democrat" } else { "Republican" }).to_string(), false);
     }
@@ -1689,9 +1883,11 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             let pct = near_percent(w, i, 4) || near(w, i, 4, &["point", "points", "rate", "rates", "spread", "spreads"]);
             return one((if pct { "percentage points" } else { "pages" }).to_string(), period);
         }
-        // "897 mb" millibars in weather; "500 mb file" megabytes
+        // "897 mb" millibars in weather; "500 mb file" megabytes. Round 3: the weather
+        // word must be within 3 words of the figure ("The pressure dropped to 897 mb"),
+        // and no file / storage word may be near ("500 mb file, high quality").
         if body == "mb" && prev_digits {
-            let weather = near(w, i, 6, &["pressure", "hpa", "low", "high", "storm", "hurricane", "barometric", "inhg", "cyclone", "typhoon"]);
+            let weather = mb_is_weather(w, i);
             let (o, m) = if weather { ("millibar", "millibars") } else { ("megabyte", "megabytes") };
             return one((if prev_is_one(w, i) { o } else { m }).to_string(), period);
         }
@@ -1769,6 +1965,9 @@ fn check_tables_sorted() {
     sorted("NUMBER_WORDS", NUMBER_WORDS.iter());
     sorted("STATES", STATES.iter().map(|e| e.0));
     sorted("OVER", OVER.iter().map(|e| e.0));
+    sorted("MB_STORAGE", MB_STORAGE.iter());
+    sorted("MB_WEATHER", MB_WEATHER.iter());
+    sorted("SLANG", SLANG.iter().map(|e| e.0));
     sorted("EXCHANGES", EXCHANGES.iter().map(|e| e.0));
     sorted("COMPASS", COMPASS.iter().map(|e| e.0));
     sorted("AP_STATES", AP_STATES.iter().map(|e| e.0));

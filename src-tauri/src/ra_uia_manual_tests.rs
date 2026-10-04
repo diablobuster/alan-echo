@@ -904,3 +904,349 @@ fn uia_chrome_breakdown() {
     println!("ocr_ok_at:                        {}", pct(&ok));
     println!("hover total:                      {}", pct(&all));
 }
+
+/// Round 3 manual: follow mode on a page that moves by itself
+/// (tools/read-aloud/follow-test/reflow.html: smooth scrolling, a 120 px block inserted
+/// mid-view every 5 s, a growing ad slot, lazy images, a sticky header with a live
+/// clock). Runs the real UIA worker and the real `ra_follow::Guard` for 20 s hands-off,
+/// reading at 12 words/s so Echo's own (smooth) scrolls happen too, and asserts follow
+/// stays on. Lead scrolling (fix round 1) keeps the word on screen; RA_LEAD=0 measures
+/// without it, RA_WPS sets the reading rate. Then a keyboard-like PageDown (the page's
+/// own button runs window.scrollBy; invoked through UIA, no input sent) must turn
+/// follow off.
+/// Edge on a throwaway profile (RA_BROWSER = chrome.exe's path for Chrome); never
+/// touches the user's windows; sends no input.
+/// Run: cargo test follow_reflow_manual -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+#[allow(clippy::zombie_processes)] // cleaned up by BrowserCleanup
+fn follow_reflow_manual() {
+    use crate::ra_follow::{anchor_of, Decision, Guard};
+    use crate::ra_hook::{MouseEv, WatchHook};
+    unsafe {
+        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    let exe = std::env::var("RA_BROWSER")
+        .unwrap_or_else(|_| r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".into());
+    let tag = format!("RaFollowReflow{}", std::process::id());
+    let dir = std::env::temp_dir();
+    let page = dir.join(format!("{tag}.html"));
+    let profile = dir.join(format!("{tag}-profile"));
+    let lab = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/read-aloud/follow-test/reflow.html");
+    let html = std::fs::read_to_string(lab).expect("lab page");
+    let html = html.replace("<title>Echo follow reflow test</title>", &format!("<title>{tag}</title>"));
+    std::fs::write(&page, html).unwrap();
+    let mut guard = BrowserCleanup { hwnd: None, profile: profile.clone(), page: page.clone() };
+    Command::new(&exe)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .args(["--no-first-run", "--no-default-browser-check", "--new-window", "--window-size=1100,900"])
+        .arg(format!(
+            "file:///{}{}",
+            page.display().to_string().replace('\\', "/"),
+            if std::env::var("RA_STATIC").is_ok() { "?static" } else { "" }
+        ))
+        .spawn()
+        .expect("launch browser");
+    let t0 = Instant::now();
+    let mut hwnd = loop {
+        if let Some(h) = find_window(&tag) {
+            break h;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20), "browser window not found");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    guard.hwnd = Some(hwnd);
+    raise(hwnd);
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Ground truth: an early paragraph on screen, via a separate UIA client.
+    let uia = new_uia();
+    let cond = text_pattern_condition(&uia).unwrap();
+    let mut target = None;
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(250));
+        if let Some(h) = find_window(&tag) {
+            hwnd = h;
+        }
+        let Ok(root) = (unsafe { uia.ElementFromHandle(hwnd) }) else { continue };
+        let Ok(all) = (unsafe { root.FindAll(TreeScope_Descendants, &cond) }) else { continue };
+        for i in 0..unsafe { all.Length() }.unwrap_or(0) {
+            let Ok(e) = (unsafe { all.GetElement(i) }) else { continue };
+            let Ok(tp) = (unsafe { e.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }) else {
+                continue;
+            };
+            let Ok(doc) = (unsafe { tp.DocumentRange() }) else { continue };
+            // the page shifts itself, so take the first of these that is on screen
+            for needle in ["Paragraph02", "Paragraph01", "Paragraph03", "Paragraph00"] {
+                if let Ok(r) = unsafe { doc.FindText(&windows::core::BSTR::from(needle), false, false) } {
+                    let rc = rects_of(&r).unwrap_or_default();
+                    if !rc.is_empty() {
+                        target = Some(rc[0].clone());
+                        break;
+                    }
+                }
+            }
+            if target.is_some() {
+                break;
+            }
+        }
+        if target.is_some() {
+            break;
+        }
+    }
+    if target.is_none() {
+        let mut buf = [0u16; 512];
+        let n = unsafe { GetWindowTextW(hwnd, &mut buf) }.max(0) as usize;
+        let root = unsafe { uia.ElementFromHandle(hwnd) }.ok();
+        let found = root.and_then(|r| unsafe { r.FindAll(TreeScope_Descendants, &cond) }.ok());
+        println!(
+            "setup: window {:?} title {:?}, {} TextPattern elements",
+            hwnd,
+            String::from_utf16_lossy(&buf[..n]),
+            found.as_ref().map_or(-1, |a| unsafe { a.Length() }.unwrap_or(-1))
+        );
+        if let Some(all) = found {
+            for i in 0..unsafe { all.Length() }.unwrap_or(0) {
+                let e = unsafe { all.GetElement(i) }.unwrap();
+                let tp = unsafe { e.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }.unwrap();
+                let doc = unsafe { tp.DocumentRange() }.unwrap();
+                let txt = unsafe { doc.GetText(300) }.map(|b| b.to_string()).unwrap_or_default();
+                let f = unsafe { doc.FindText(&windows::core::BSTR::from("Paragraph02"), false, false) };
+                println!(
+                    "  element {i}: {:?}... find={} rects={:?} wr={:?}",
+                    &txt.chars().take(80).collect::<String>(),
+                    f.is_ok(),
+                    f.ok().and_then(|r| rects_of(&r)),
+                    window_rect(hwnd)
+                );
+            }
+        }
+    }
+    let w = target.expect("an early paragraph on screen");
+    guard.hwnd = Some(hwnd);
+    let (cx, cy) = center(&w);
+    let ra = Uia::start(hwnd.0 as isize);
+    let mut raw = ra.pick(cx, cy).expect("pick in browser");
+    for _ in 0..3 {
+        match ra.more() {
+            Ok(m) if !m.is_empty() => raw.extend(m),
+            _ => break,
+        }
+    }
+    let words = crate::ra_text::normalize(&raw);
+    println!("picked {:?}; {} words", &raw[..3], words.len());
+
+    // Wheel evidence exactly as the controller gets it (observe-only hook): the run is
+    // hands-off, so a wheel over the test window would be a real (unexpected) user scroll.
+    let (htx, hrx) = mpsc::channel::<MouseEv>();
+    let hook = WatchHook::install(move |ev| {
+        let _ = htx.send(ev);
+    });
+    let root_at = |x: i32, y: i32| unsafe {
+        let w = WindowFromPoint(POINT { x, y });
+        if w.is_invalid() {
+            0
+        } else {
+            GetAncestor(w, GA_ROOT).0 as isize
+        }
+    };
+    let win_of = |h: HWND| {
+        let r = window_rect(h);
+        (r.x as i32, r.y as i32, r.w as i32, r.h as i32)
+    };
+    let (atx, arx) = mpsc::channel::<ScrollRan>();
+    let mut g = Guard::default();
+    let mut follow = true;
+    let mut offs: Vec<String> = Vec::new();
+    let mut look_ms: Vec<f64> = Vec::new();
+    // RA_LEAD=0: the round-3 behaviour (scroll only once the word is off screen, by
+    // scroll-into-view) for the before / after on-screen measurement
+    let lead_on = std::env::var("RA_LEAD").map_or(true, |v| v != "0");
+    // RA_WPS: words per second (6.6 = Echo at 2.2x, 8.5 = 3x; the gapless bench article)
+    let wps: f64 = std::env::var("RA_WPS").ok().and_then(|v| v.parse().ok()).unwrap_or(6.6);
+    // stats: looks, timeouts, visible, scroll known, single empties, own scrolls,
+    // reflows ignored, own-scroll moves ignored, lead scrolls
+    // The controller's update_word_rects, step for step (no Tauri here).
+    let t_start = Instant::now();
+    let step = |g: &mut Guard, follow: &mut bool, wi: usize, stats: &mut [u32; 9], offs: &mut Vec<String>, look_ms: &mut Vec<f64>| -> bool {
+        let prev_src = g.anchor_word().filter(|&p| p != wi).map(|p| words[p].src.clone());
+        let t = Instant::now();
+        let Some(look) = ra.look(words[wi].src.clone(), prev_src) else {
+            stats[1] += 1;
+            return false;
+        };
+        look_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        stats[0] += 1;
+        stats[2] += !look.rects.is_empty() as u32;
+        stats[3] += look.scroll.is_some() as u32;
+        let w = win_of(hwnd);
+        let obs = anchor_of(wi, &look.rects, w);
+        let prev_again = match (g.anchor_word(), &look.prev) {
+            (Some(p), Some(r)) if p != wi => Some(anchor_of(p, r, w)),
+            _ => None,
+        };
+        if std::env::var("RA_TRACE").is_ok() {
+            println!(
+                "  {:>6} ms w{wi} rect {:?} scroll {:?}",
+                t.duration_since(t_start).as_millis(),
+                look.rects.first().map(|r| (r.y as i32, r.h as i32)),
+                look.scroll.map(|s| (s.y as i32, s.top as i32, s.extent as i32))
+            );
+        }
+        let first = words[wi].src[0];
+        let ack = |atx: &mpsc::Sender<ScrollRan>| {
+            let tx = atx.clone();
+            move |r| {
+                let _ = tx.send(r);
+            }
+        };
+        let mut retry = false;
+        match g.look(Instant::now(), *follow, obs, prev_again, look.scroll) {
+            Decision::Off(r) => {
+                println!("{r}");
+                offs.push(r.to_string());
+                *follow = false;
+            }
+            Decision::Ignored(i) => {
+                if std::env::var("RA_TRACE").is_ok() {
+                    println!("  {i}");
+                }
+                stats[if i.why == "reflow" { 6 } else { 7 }] += 1;
+            }
+            Decision::Wait => {
+                stats[4] += 1;
+                return true;
+            }
+            Decision::Scroll => {
+                stats[5] += 1;
+                let prev_y = look.prev.as_ref().and_then(|r| r.first()).map(|r| r.y);
+                let lead = look
+                    .scroll
+                    .filter(|_| lead_on)
+                    .and_then(|sp| g.lead(Instant::now(), *follow, None, prev_y, (sp.top, sp.extent)));
+                match lead {
+                    Some(dy) => ra.scroll_by_acked(first, dy, ack(&atx)),
+                    None => ra.scroll_to_acked(first, ack(&atx)),
+                }
+                g.own_queued(Instant::now());
+                retry = true;
+            }
+            Decision::Nothing => {}
+        }
+        if let (true, Some(r), Some(sp)) = (lead_on, look.rects.first(), look.scroll) {
+            if let Some(dy) = g.lead(Instant::now(), *follow, Some((r.y, r.h)), None, (sp.top, sp.extent)) {
+                stats[8] += 1;
+                if std::env::var("RA_TRACE").is_ok() {
+                    println!("  lead {dy:.0}");
+                }
+                ra.scroll_by_acked(first, dy, ack(&atx));
+                g.own_queued(Instant::now());
+                retry = true;
+            }
+        }
+        retry
+    };
+    let mut stats = [0u32; 9];
+    let mut wheels = 0;
+    let mut queued_ms: Vec<u64> = Vec::new();
+    let run = Duration::from_secs(20);
+    let t0 = Instant::now();
+    let (mut last_word, mut last_look, mut retry) = (usize::MAX, t0, false);
+    // The read goes on past the hands-off part; at 20 s the page's own "Page down" button
+    // (window.scrollBy, like the PageDown key; invoked through UIA in our own throwaway
+    // browser, no input sent) must turn follow off within 3 s.
+    let page_down = {
+        let cond = unsafe {
+            uia.CreatePropertyCondition(UIA_NamePropertyId, &VARIANT::from(windows::core::BSTR::from("Page down")))
+        }
+        .unwrap();
+        unsafe { uia.ElementFromHandle(hwnd).unwrap().FindFirst(TreeScope_Descendants, &cond) }
+            .ok()
+            .and_then(|e| unsafe { e.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }.ok())
+    };
+    let mut pressed: Option<(Instant, usize)> = None;
+    let mut press_y: Option<f64> = None;
+    let mut presses = 1u32;
+    let mut hands_off_offs = None;
+    let mut visible_hands_off = (0, 0);
+    while t0.elapsed() < run + Duration::from_secs(5) {
+        for ev in hrx.try_iter() {
+            if let MouseEv::Wheel { x, y } = ev {
+                if root_at(x, y) == hwnd.0 as isize {
+                    g.wheel(Instant::now());
+                    wheels += 1;
+                }
+            }
+        }
+        for r in arx.try_iter() {
+            queued_ms.push(r.queued_ms);
+            g.own_ran(Instant::now(), r.before, r.after, r.expected);
+        }
+        if t0.elapsed() >= run && pressed.is_none() {
+            hands_off_offs = Some(offs.clone());
+            visible_hands_off = (stats[2], stats[0]);
+            if let Some(p) = &page_down {
+                unsafe { p.Invoke() }.expect("press the page's Page down button");
+                println!("pressed Page down (window.scrollBy) with follow {}", if follow { "on" } else { "off" });
+            }
+            pressed = Some((Instant::now(), offs.len()));
+            press_y = ra.look(words[last_word].src.clone(), None).and_then(|l| l.rects.first().map(|r| r.y));
+        }
+        if pressed.is_some_and(|(_, n)| offs.len() > n) {
+            break;
+        }
+        // the page's own ad / anchoring can swallow a scrollBy (measured: the offset moved,
+        // the words did not): press again when the spoken word has not moved in 1 s
+        if let (Some((at, _)), Some(p), true) = (pressed, &page_down, presses < 3) {
+            if at.elapsed() >= Duration::from_secs(1) * presses {
+                let y = ra.look(words[last_word].src.clone(), None).and_then(|l| l.rects.first().map(|r| r.y));
+                let still = matches!((press_y, y), (Some(a), Some(b)) if (a - b).abs() < 100.0);
+                if still {
+                    unsafe { p.Invoke() }.expect("press Page down again");
+                    println!("Page down #{presses} did not move the words; pressed again");
+                }
+                presses += 1;
+            }
+        }
+        let wi = ((t0.elapsed().as_secs_f64() * wps) as usize).min(words.len() - 1);
+        if wi != last_word || retry || last_look.elapsed() >= Duration::from_millis(250) {
+            last_word = wi;
+            last_look = Instant::now();
+            retry = step(&mut g, &mut follow, wi, &mut stats, &mut offs, &mut look_ms);
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    let [_, timeouts, _, with_scroll, waits, scrolls, reflows, owns, leads] = stats;
+    let (visible, looks) = visible_hands_off;
+    let mut lm = look_ms.clone();
+    lm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p = |q: f64| lm.get(((lm.len() as f64 - 1.0) * q) as usize).copied().unwrap_or(0.0);
+    let hands_off_offs = hands_off_offs.unwrap_or_default();
+    println!(
+        "20 s hands-off at {wps} words/s, lead {}: word on screen {visible}/{looks} = {:.1}%; timeouts {timeouts}, \
+         scroll offset known {with_scroll}, single empties {waits}, off-screen scrolls {scrolls}, lead scrolls {leads}, \
+         reflows ignored {reflows}, own-scroll moves ignored {owns}, wheels over the window {wheels}, \
+         follow-offs {}; look p50 {:.1} ms p95 {:.1} ms; own scroll queue ms {queued_ms:?}",
+        if lead_on { "on" } else { "off" },
+        visible as f64 * 100.0 / looks.max(1) as f64,
+        hands_off_offs.len(),
+        p(0.5),
+        p(0.95)
+    );
+    drop(hook);
+    drop(ra);
+    assert!(hands_off_offs.is_empty(), "follow turned off with no user scroll: {hands_off_offs:?}");
+    assert!(with_scroll > 0, "the page's scroll offset was readable");
+    assert!(page_down.is_some(), "the page's Page down button");
+    if !lead_on {
+        return; // the round-3 behaviour, for the on-screen measurement only
+    }
+    let after = pressed.map_or(&offs[..0], |(_, n)| &offs[n..]);
+    println!("after Page down: {after:?}");
+    assert!(
+        after.iter().any(|o| ["scroll_offset", "beyond_own_scroll", "against_own_scroll"]
+            .iter()
+            .any(|e| o.contains(&format!("evidence={e} ")))),
+        "a PageDown (window.scrollBy) turns follow off: {after:?}"
+    );
+}

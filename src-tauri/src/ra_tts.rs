@@ -1554,6 +1554,40 @@ mod tests {
         assert!(chunk_word_times(&dur, vec![], 100, 1.0, 0).is_empty());
     }
 
+    /// A source word spoken as "" (junk block, footnote marker) goes through the real
+    /// pre-pass, g2p, id build and timing and still gets exactly one timing entry.
+    #[test]
+    fn empty_source_word_keeps_one_zero_length_timing_entry() {
+        let words = ["It", "works.[1]", "", "Advertisement", "", "", "Then", "this."];
+        let fed = ["It", "works.", "", "", "", "", "Then", "this."];
+        let p = prepare_chunk(test_g2p(), test_names(), &fed).expect("prepare");
+        assert_eq!(p.fed.len(), words.len(), "one fed string per word");
+        for w in [2, 3, 4, 5] {
+            assert!(word_ph(&p.ph, w).trim().is_empty(), "word {w} must be silent");
+        }
+        assert!(!word_ph(&p.ph, 1).trim().is_empty() && !word_ph(&p.ph, 6).trim().is_empty());
+        let vocab: HashMap<char, i64> = p.ph.iter().flat_map(|x| x.1.chars()).map(|c| (c, 5)).chain([(' ', 16)]).collect();
+        let (ids, spans, covered) = build_ids(&p.ph, &vocab, words.len());
+        assert!(!ids.is_empty());
+        assert_eq!(covered, words.len());
+        assert!(spans.iter().all(|sp| ![2, 3, 4, 5].contains(&sp.0)), "empty words own no ids");
+        let dur = vec![2.0f32; ids.len()];
+        let t = chunk_word_times(&dur, spans, ids.len() * 2 * 600, 1.0, covered);
+        assert_eq!(t.iter().map(|w| w.word).collect::<Vec<_>>(), (0..words.len()).collect::<Vec<_>>());
+        for w in [2usize, 3, 4, 5] {
+            assert_eq!(t[w].start, t[w].end, "word {w} zero length");
+            assert_eq!(t[w].start, t[1].end, "word {w} sits where the word before ends");
+        }
+        assert!(t.windows(2).all(|x| x[0].end <= x[1].start.max(x[0].end) && x[0].start <= x[1].start));
+        // leading and all-empty chunks also keep one entry per word
+        let p0 = prepare_chunk(test_g2p(), test_names(), &["", "", "Hi."]).expect("prepare");
+        let (ids0, sp0, cov0) = build_ids(&p0.ph, &vocab, 3);
+        let t0 = chunk_word_times(&vec![2.0; ids0.len()], sp0, ids0.len().max(1) * 1200, 1.0, cov0);
+        assert_eq!(t0.iter().map(|w| w.word).collect::<Vec<_>>(), vec![0, 1, 2]);
+        let pe = prepare_chunk(test_g2p(), test_names(), &["", ""]).expect("prepare");
+        assert!(pe.ph.is_empty());
+    }
+
     #[test]
     fn homographs_never_replace_override_phonemes() {
         let (_, mut toks) = test_g2p().g2p("I have read it").unwrap();

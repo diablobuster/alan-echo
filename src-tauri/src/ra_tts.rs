@@ -208,6 +208,57 @@ fn effective_rate(rate: f32) -> f32 {
     }
 }
 
+/// Round 2 gapless: the reading speed split into the model's own speed and the
+/// WSOLA stretch, `(model, stretch)` with `model * stretch == rate`. Up to 2.2x the
+/// model speaks at 1.0 and WSOLA does it all (as before). Faster than that, the model
+/// speaks faster too (up to 1.6x) so WSOLA never stretches past 2.2x: the CPU model
+/// then makes the same audio seconds per second of work as at 2.2x (a 3.5x read on
+/// CPU otherwise needs more synth time than it plays), and WSOLA stays in the range
+/// it sounds clean in.
+fn split_rate(rate: f32) -> (f32, f32) {
+    let rate = effective_rate(rate);
+    let model = (rate / WSOLA_MAX).clamp(1.0, MODEL_SPEED_MAX);
+    (model, rate / model)
+}
+const WSOLA_MAX: f32 = 2.2;
+
+/// Silence kept before a chunk's first sound and after its last, at 1x (scaled down
+/// by the reading speed): about 120 ms at a chunk boundary in all, as a short natural
+/// gap. The model's own lead-in and final pause are longer and WSOLA only shrinks them
+/// by the stretch factor, so at 2.2-3.5x a boundary sounded like a hold-up.
+const KEEP_LEAD_MS: f32 = 20.0;
+const KEEP_TRAIL_MS: f32 = 100.0;
+/// A 10 ms window whose peak is under this is silence (about -46 dBFS).
+const SILENCE_PEAK: f32 = 0.005;
+
+/// Trims a chunk's leading and trailing silence to `KEEP_LEAD_MS` / `KEEP_TRAIL_MS`
+/// (at 1x, divided by `rate`) and shifts the word times to match. Never trims inside
+/// the speech, never adds silence; an all-silent chunk is left as it is. Word times
+/// stay one per word, clamped to the new length.
+fn trim_silence(pcm: Vec<f32>, words: &mut [WordTime], rate: f32) -> Vec<f32> {
+    let sr = ra_timing::SR as f32;
+    let win = (sr * 0.010) as usize;
+    let n = pcm.len() / win;
+    let loud = |k: usize| pcm[k * win..(k + 1) * win].iter().any(|x| x.abs() > SILENCE_PEAK);
+    let Some(first) = (0..n).find(|&k| loud(k)) else { return pcm };
+    let last = (0..n).rev().find(|&k| loud(k)).unwrap_or(first);
+    let rate = rate.max(1.0);
+    let keep_lead = (KEEP_LEAD_MS / 1000.0 * sr / rate) as usize;
+    let keep_trail = (KEEP_TRAIL_MS / 1000.0 * sr / rate) as usize;
+    let start = (first * win).saturating_sub(keep_lead);
+    let end = ((last + 1) * win + keep_trail).min(pcm.len());
+    if start == 0 && end == pcm.len() {
+        return pcm;
+    }
+    let (s, len) = (start as u64, (end - start) as u64);
+    for w in words.iter_mut() {
+        w.start = w.start.saturating_sub(s).min(len);
+        w.end = w.end.saturating_sub(s).min(len).max(w.start);
+    }
+    pcm[start..end].to_vec()
+}
+const MODEL_SPEED_MAX: f32 = 1.6;
+
 fn load_vocab(path: &Path) -> Result<HashMap<char, i64>, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("tokenizer: {e}"))?;
     let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("tokenizer: {e}"))?;
@@ -533,7 +584,7 @@ impl Engine {
         }
     }
 
-    /// Synthesizes one chunk at 1.0x, then stretches to `rate`. Loads the engine
+    /// Synthesizes one chunk (the model at 1.0x, or faster above 2.2x: `split_rate`), then stretches to `rate`. Loads the engine
     /// if needed (blocking, up to 60 s). On a DirectML runtime error it switches
     /// to CPU and retries once; an `Err("dml: …")` only escapes if that fails too.
     pub fn synth(self: &Arc<Self>, words: &[&str], rate: f32) -> Result<ChunkAudio, String> {
@@ -560,7 +611,8 @@ impl Engine {
 
     fn synth_inner(l: &mut Loaded, words: &[&str], rate: f32, map_joined: bool) -> Result<ChunkAudio, String> {
         let device = l.device;
-        let rate = effective_rate(rate);
+        // the model's own speed above 2.2x, WSOLA for the rest (`split_rate`)
+        let (model_speed, rate) = split_rate(rate);
         let empty = || empty_audio(device, words.len());
         let p = prepare_chunk(&l.g2p, &l.names, words)?;
         let (ids, spans, covered) = build_ids_with(&p.ph, &l.vocab, words.len(), map_joined);
@@ -582,7 +634,7 @@ impl Engine {
         let tag = |e: String| if device == Device::Gpu { format!("dml: {e}") } else { e };
         let t_ids = Tensor::from_array(([1usize, n_in], input)).map_err(|e| e.to_string())?;
         let t_style = Tensor::from_array(([1usize, STYLE_DIM], style)).map_err(|e| e.to_string())?;
-        let t_speed = Tensor::from_array(([1usize], vec![1.0f32])).map_err(|e| e.to_string())?;
+        let t_speed = Tensor::from_array(([1usize], vec![model_speed])).map_err(|e| e.to_string())?;
         let (wav, dur) = {
             let out = l
                 .session
@@ -597,8 +649,9 @@ impl Engine {
         if dur.len() != n_in {
             return Err(format!("model output: {} durations for {} ids", dur.len(), n_in));
         }
-        let words_t = chunk_word_times(&dur, spans, wav.len(), rate, covered);
+        let mut words_t = chunk_word_times(&dur, spans, wav.len(), rate, covered);
         let pcm = ra_wsola::stretch(&wav, rate, ra_timing::SR);
+        let pcm = trim_silence(pcm, &mut words_t, model_speed * rate);
         Ok(ChunkAudio { pcm, words: words_t, device, covered })
     }
 }
@@ -2284,6 +2337,53 @@ mod tests {
         assert!(!should_unload(t0, t0 + Duration::from_secs(119), false));
         assert!(should_unload(t0, t0 + Duration::from_secs(121), false));
         assert!(!should_unload(t0, t0 + Duration::from_secs(600), true));
+    }
+
+    /// Round 2 gapless: a chunk's lead-in and final pause are trimmed to a short gap
+    /// scaled by speed; word times shift with it, one per word.
+    #[test]
+    fn chunk_silence_is_trimmed_to_a_short_gap() {
+        let sr = ra_timing::SR as usize;
+        let tone = |n: usize| (0..n).map(|i| if i % 2 == 0 { 0.2 } else { -0.2 }).collect::<Vec<f32>>();
+        let mut pcm = vec![0.0f32; sr / 2]; // 500 ms lead-in
+        pcm.extend(tone(sr)); // 1 s of sound
+        pcm.extend(vec![0.0f32; sr / 2]); // 500 ms final pause
+        let mut words = vec![
+            WordTime { word: 0, start: 0, end: (sr as u64) },
+            WordTime { word: 1, start: sr as u64, end: (2 * sr) as u64 },
+        ];
+        let out = trim_silence(pcm.clone(), &mut words, 2.0);
+        let lead = (KEEP_LEAD_MS / 1000.0 * sr as f32 / 2.0) as usize;
+        let trail = (KEEP_TRAIL_MS / 1000.0 * sr as f32 / 2.0) as usize;
+        assert_eq!(out.len(), lead + sr + trail);
+        assert!(out[..lead].iter().all(|x| *x == 0.0) && out[lead] != 0.0, "sound is never cut");
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].start, 0);
+        assert_eq!(words[1].start, (sr / 2 + lead) as u64, "shifted by the trimmed lead-in");
+        assert!(words.iter().all(|w| w.end <= out.len() as u64 && w.start <= w.end));
+        // faster speed keeps less
+        let mut w2 = Vec::new();
+        assert!(trim_silence(pcm.clone(), &mut w2, 3.5).len() < out.len());
+        // all silence, or no silence: unchanged
+        let mut w3 = Vec::new();
+        assert_eq!(trim_silence(vec![0.0; 4800], &mut w3, 2.2).len(), 4800);
+        assert_eq!(trim_silence(tone(4800), &mut w3, 2.2).len(), 4800);
+        assert!(trim_silence(Vec::new(), &mut w3, 2.2).is_empty());
+    }
+
+    #[test]
+    fn rates_above_2_2_use_the_model_speed_for_the_rest() {
+        let close = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4;
+        assert!(close(split_rate(1.0), (1.0, 1.0)));
+        assert!(close(split_rate(1.5), (1.0, 1.5)));
+        assert!(close(split_rate(2.2), (1.0, 2.2)), "Alex's usual speed is unchanged");
+        assert!(close(split_rate(3.5), (3.5 / 2.2, 2.2)));
+        assert!(close(split_rate(4.0), (1.6, 2.5)));
+        assert!(close(split_rate(f32::NAN), (1.0, 1.0)));
+        for r in [1.0f32, 1.7, 2.2, 2.8, 3.5, 4.0] {
+            let (m, w) = split_rate(r);
+            assert!((m * w - effective_rate(r)).abs() < 1e-4, "{r}");
+        }
     }
 
     #[test]

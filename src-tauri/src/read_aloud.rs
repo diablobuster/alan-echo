@@ -209,12 +209,20 @@ pub fn user_scrolled(prev: Option<Anchor>, now: Anchor, own_scroll_recent: bool)
 
 // ── Session pipeline ─────────────────────────────────────────────────
 
-/// Word limits per chunk (addendum ruling: first 12, then 30 so CPU synthesis per
-/// chunk stays short and the queue never starves at 2.2–3.5x).
+/// Word limits per chunk (addendum ruling: first 12, then up to 30 so CPU synthesis
+/// per chunk stays short). Round 2: the sizes in between ramp up
+/// (`ra_text::chunk_ramped`: 12 -> 14 -> 17 -> 21 -> 27 -> 30 at 2.2x) so each chunk is synthesized
+/// while the ones before it play, and the audio never runs dry at 2.2-3.5x.
 const FIRST_MAX: usize = 12;
 const CHUNK_MAX: usize = 30;
-/// Chunks synthesized ahead of the playhead (queued + in flight + pushed-unplayed).
+/// Chunks kept synthesized ahead of the playhead (queued + in flight +
+/// pushed-unplayed): at least `AHEAD` chunks, and more while they hold fewer than
+/// `AHEAD_WORDS` words (the small ramp chunks), never more than `AHEAD_MAX`. The
+/// worker so starts the next chunk the moment the last one is done. Memory: 90
+/// words is about 30 s of speech, about 1.3 MB of PCM at 2.2x; nothing at rest.
 const AHEAD: usize = 2;
+const AHEAD_WORDS: usize = 90;
+const AHEAD_MAX: usize = 8;
 /// Ask UIA for the next batch when fewer unsynthesized words than this remain.
 const REFILL_AT: usize = 150;
 /// Max samples per `Player::push` (bounds the audio-callback lock hold time).
@@ -251,6 +259,10 @@ pub struct Session {
     pushed: u64,
     /// Chunk index `chunk_ends[0]` belongs to (the chunk of the last seek).
     base: usize,
+    /// First chunk of the current size ramp (the chunk the read or the last seek started at).
+    ramp_from: usize,
+    /// Reading speed the chunks are cut for (`set_rate`; the ramp is slower above 2.2x).
+    rate: f32,
     /// The source window closed: no more text, and playback ends at this sample (the end
     /// of the chunk being spoken) even if later chunks were already pushed.
     closed: bool,
@@ -274,6 +286,8 @@ impl Session {
             chunk_ends: Vec::new(),
             pushed: 0,
             base: 0,
+            ramp_from: 0,
+            rate: 2.2,
             closed: false,
             stop_at: None,
             gen,
@@ -286,13 +300,18 @@ impl Session {
 
     /// New read from freshly picked words. The caller clears the player.
     pub fn start(&mut self, words: Vec<Word>, raw_len: usize, doc_ended: bool) {
-        self.chunks = ra_text::chunk(&words, FIRST_MAX, CHUNK_MAX);
+        self.chunks = ra_text::chunk_ramped(&words, &[], FIRST_MAX, CHUNK_MAX, self.rate);
         self.words = words;
         self.raw_len = raw_len;
         self.doc_ended = doc_ended;
         self.closed = false;
         self.read_id += 1;
         self.seek(0);
+    }
+
+    /// The reading speed for chunks cut from now on (`start`, `seek`, `append_more`).
+    pub fn set_rate(&mut self, rate: f32) {
+        self.rate = rate;
     }
 
     pub fn read_id(&self) -> u64 {
@@ -310,8 +329,17 @@ impl Session {
 
     /// Restart synthesis + playback bookkeeping at chunk `idx` under a new generation:
     /// queued jobs and late results of the old one are dropped. The caller clears the player.
+    /// The chunks from `idx` on are re-cut as a fresh ramp (a small first chunk), so
+    /// audio after a jump starts as soon as after a click.
     pub fn seek(&mut self, idx: usize) {
         self.gen.fetch_add(1, Ordering::SeqCst);
+        if let Some(from) = self.chunks.get(idx).map(|r| r.start) {
+            let end = self.chunks.last().map_or(from, |r| r.end);
+            self.chunks.truncate(idx);
+            let rest = ra_text::chunk_ramped(&self.words[from..end], &[], FIRST_MAX, CHUNK_MAX, self.rate);
+            self.chunks.extend(rest.into_iter().map(|r| r.start + from..r.end + from));
+        }
+        self.ramp_from = idx;
         self.next_chunk = idx;
         self.next_push = idx;
         self.inflight = 0;
@@ -371,10 +399,22 @@ impl Session {
         Some(Job { gen: self.gen(), idx, words, rate })
     }
 
-    /// Jobs to submit now so that at most `AHEAD` chunks are queued past the playhead.
+    /// Words in the chunks past the playhead (pushed-unplayed, pending, in flight).
+    fn words_ahead(&self, pos: u64) -> usize {
+        let first = self.next_push.saturating_sub(self.unplayed(pos));
+        (first..self.next_chunk).filter_map(|k| self.chunks.get(k)).map(|r| r.len()).sum()
+    }
+
+    /// Jobs to submit now: keep `AHEAD` chunks past the playhead, and more while they
+    /// hold under `AHEAD_WORDS` words (at most `AHEAD_MAX` chunks).
     pub fn jobs(&mut self, pos: u64, rate: f32) -> Vec<Job> {
         let mut out = Vec::new();
-        while self.next_chunk < self.chunks.len() && self.inflight + self.pending.len() + self.unplayed(pos) < AHEAD {
+        loop {
+            let ahead = self.inflight + self.pending.len() + self.unplayed(pos);
+            let want = ahead < AHEAD || (ahead < AHEAD_MAX && self.words_ahead(pos) < AHEAD_WORDS);
+            if self.next_chunk >= self.chunks.len() || !want {
+                break;
+            }
             let Some(j) = self.job(self.next_chunk, rate) else { break };
             out.push(j);
             self.next_chunk += 1;
@@ -417,7 +457,9 @@ impl Session {
         let tail = self.chunks.get(self.next_chunk).map_or(self.words.len(), |c| c.start);
         self.words.extend(more);
         self.chunks.truncate(self.next_chunk);
-        let rest = ra_text::chunk(&self.words[tail..], CHUNK_MAX, CHUNK_MAX);
+        // the not-yet-submitted tail continues the current ramp
+        let prior: Vec<usize> = self.chunks.get(self.ramp_from..).unwrap_or(&[]).iter().map(|r| r.len()).collect();
+        let rest = ra_text::chunk_ramped(&self.words[tail..], &prior, FIRST_MAX, CHUNK_MAX, self.rate);
         self.chunks.extend(rest.into_iter().map(|r| r.start + tail..r.end + tail));
     }
 
@@ -1360,6 +1402,7 @@ impl Controller {
         if let Some(p) = &self.player {
             p.clear();
         }
+        self.s.set_rate(self.speed);
         self.s.start(words, raw_len, false);
         self.cur_word = None;
         self.last_word = None;
@@ -1768,6 +1811,7 @@ impl Controller {
         if let Some(p) = &self.player {
             p.clear();
         }
+        self.s.set_rate(self.speed);
         match self.cur_word {
             Some(wi) => self.s.seek_word(wi),
             None => {
@@ -2333,34 +2377,52 @@ mod session_tests {
         }
     }
 
+    /// A started session. Short sentences (`every` < 6) keep chunks of their own
+    /// (the fixed chunker), so the queue tests see one chunk per sentence; the ramp
+    /// itself is `ra_text::chunk_ramped`'s and `chunks_use_first_12_then_ramp_to_30`'s.
     fn session(n: usize, every: usize) -> Session {
         let mut s = Session::new(Arc::new(AtomicU64::new(0)));
         s.start(words(n, every), n, true);
+        if every < 6 {
+            s.chunks = ra_text::chunk(&s.words, FIRST_MAX, CHUNK_MAX);
+        }
         s
     }
 
     #[test]
-    fn chunks_use_first_12_then_30() {
+    fn chunks_use_first_12_then_ramp_to_30() {
         let s = session(100, 100);
         assert_eq!(s.chunks[0], 0..12);
+        assert_eq!(s.chunks[1], 12..26);
         assert!(s.chunks[1..].iter().all(|r| r.len() <= 30));
         assert_eq!(s.chunks.last().map(|r| r.end), Some(100));
     }
 
+    /// Round 2 gapless: at least 2 chunks ahead, more while they hold under 90 words
+    /// (never more than 8), so the worker never waits on the playhead in the ramp.
     #[test]
-    fn keeps_two_chunks_ahead() {
+    fn keeps_enough_ahead() {
         let mut s = session(40, 5); // 8 sentences of 5
         let j = s.jobs(0, 2.2);
-        assert_eq!(j.iter().map(|j| j.idx).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(j.iter().map(|j| j.idx).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5, 6, 7], "capped at 8 chunks");
         assert_eq!(j[0].words.len(), 5);
-        assert!(s.jobs(0, 2.2).is_empty(), "2 in flight already");
+        assert!(s.jobs(0, 2.2).is_empty(), "8 ahead already");
         let g = s.gen();
         let (pcm, n) = s.on_chunk(g, 0, audio(5, 5));
         assert_eq!((pcm.len(), n), (1, 1));
-        // chunk 0 pushed but unplayed + chunk 1 in flight = 2: nothing new
+        // chunk 0 pushed but unplayed + 7 in flight = 8: nothing new
         assert!(s.jobs(0, 2.2).is_empty());
         // playhead passes chunk 0's end: one more
-        assert_eq!(s.jobs(5 * PER_WORD, 2.2).iter().map(|j| j.idx).collect::<Vec<_>>(), vec![2]);
+        assert!(s.jobs(5 * PER_WORD, 2.2).is_empty(), "all 8 chunks of the text are out");
+        // big chunks: stops once 90 words are ahead (12 + 14 + 17 + 21 + 27)
+        let mut s = session(200, 200);
+        let j = s.jobs(0, 2.2);
+        assert_eq!(j.iter().map(|j| j.words.len()).collect::<Vec<_>>(), vec![12, 14, 17, 21, 27]);
+        // two big chunks ahead are always kept, even past 60 words
+        let mut s = session(200, 200);
+        s.seek(3); // a fresh ramp from word 58
+        let n: Vec<usize> = s.jobs(0, 2.2).iter().map(|j| j.words.len()).collect();
+        assert_eq!(n, vec![12, 14, 17, 21, 27]);
     }
 
     #[test]
@@ -2397,16 +2459,16 @@ mod session_tests {
 
     #[test]
     fn partly_covered_chunk_requeues_its_tail_next() {
-        let mut s = session(40, 40); // chunks 0..12, 12..40
+        let mut s = session(40, 40); // chunks 0..12, 12..26, 26..40
         s.jobs(0, 2.2);
         let g = s.gen();
         let (_, n) = s.on_chunk(g, 0, audio(12, 7));
         assert_eq!(n, 1);
         assert_eq!(s.chunks[0], 0..7);
         assert_eq!(s.chunks[1], 7..12);
-        assert_eq!(s.chunks[2], 12..40);
+        assert_eq!(s.chunks[2], 12..26);
         assert_ne!(s.gen(), g, "jobs queued past the split are stale");
-        assert_eq!(s.on_chunk(g, 1, audio(28, 28)).1, 0, "old chunk-1 result is dropped");
+        assert_eq!(s.on_chunk(g, 1, audio(14, 14)).1, 0, "old chunk-1 result is dropped");
         let j = s.jobs(0, 2.2);
         assert_eq!(j[0].idx, 1);
         assert_eq!(j[0].words, vec!["w7", "w8", "w9", "w10", "w11"]);
@@ -2447,6 +2509,7 @@ mod session_tests {
     fn source_closed_finishes_the_current_chunk_then_ends() {
         let mut s = Session::new(Arc::new(AtomicU64::new(0)));
         s.start(words(40, 5), 40, false); // more text would follow
+        s.chunks = ra_text::chunk(&s.words, FIRST_MAX, CHUNK_MAX); // one chunk per sentence
         let g = s.gen();
         s.jobs(0, 2.2); // 0, 1
         s.on_chunk(g, 0, audio(5, 5));
@@ -2481,11 +2544,13 @@ mod session_tests {
     fn source_closed_while_warming_keeps_the_first_chunk() {
         let mut s = session(40, 5);
         let g = s.gen();
-        s.jobs(0, 2.2); // 0 and 1 in flight, nothing pushed
+        let n = s.jobs(0, 2.2).len(); // 0..n in flight, nothing pushed
         s.source_closed(None);
         assert_eq!(s.chunks.len(), 1);
         assert_eq!(s.gen(), g, "the first chunk's job is still wanted");
-        assert_eq!(s.on_chunk(g, 1, audio(5, 5)).1, 0, "dropped chunk's late result");
+        for k in 1..n {
+            assert_eq!(s.on_chunk(g, k, audio(5, 5)).1, 0, "dropped chunk's late result");
+        }
         assert_eq!(s.on_chunk(g, 0, audio(5, 5)).1, 1);
         assert!(s.finished(5 * PER_WORD), "in-flight count settles, so the read can end");
     }
@@ -2505,13 +2570,14 @@ mod session_tests {
 
     #[test]
     fn speed_change_requeues_from_the_current_word() {
-        let mut s = session(40, 40); // chunks 0..12, 12..40
+        let mut s = session(40, 40); // chunks 0..12, 12..26, 26..40
         let g = s.gen();
         s.jobs(0, 2.2);
         s.seek_word(16);
         assert_ne!(s.gen(), g);
         assert_eq!(s.chunks[1], 12..16);
-        assert_eq!(s.chunks[2], 16..40);
+        assert_eq!(s.chunks[2], 16..28, "a fresh ramp from the current word");
+        assert_eq!(s.chunks[3], 28..40);
         let j = s.jobs(0, 3.0);
         assert_eq!(j[0].idx, 2);
         assert_eq!(j[0].words[0], "w16");
@@ -2680,3 +2746,7 @@ mod session_tests {
         println!("60 s of ticks (excl. UIA + webview): {:.1} ms CPU", ms(thread_cpu() - c0));
     }
 }
+
+#[cfg(test)]
+#[path = "ra_gapless_bench.rs"]
+mod gapless_bench;

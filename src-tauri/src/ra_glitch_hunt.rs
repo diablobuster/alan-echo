@@ -81,7 +81,7 @@ fn glitch_static() {
     let mut nwords = 0usize;
     for (id, src, text) in &rows {
         let words = ra_text::normalize(&raw_tokens(text));
-        for (ci, r) in ra_text::chunk(&words, 12, 30).iter().enumerate() {
+        for (ci, r) in ra_text::chunk_ramped(&words, &[], 12, 30, 2.2).iter().enumerate() {
             let ws: Vec<&str> = words[r.clone()].iter().map(|w| w.text.as_str()).collect();
             nwords += ws.len();
             log.lock().clear();
@@ -163,7 +163,7 @@ fn glitch_synth() {
         let mut pcm: Vec<f32> = Vec::new();
         // word timings for the pause check (`pauses.py`): [word, start ms, end ms] in the WAV
         let mut times: Vec<String> = Vec::new();
-        for r in ra_text::chunk(&words, 12, 30) {
+        for r in ra_text::chunk_ramped(&words, &[], 12, 30, 2.2) {
             let ws: Vec<&str> = words[r].iter().map(|w| w.text.as_str()).collect();
             let mut a = 0;
             while a < ws.len() {
@@ -210,7 +210,7 @@ fn glitch_probe() {
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         println!("## {line}");
         let words = ra_text::normalize(&raw_tokens(line));
-        for r in ra_text::chunk(&words, 12, 30) {
+        for r in ra_text::chunk_ramped(&words, &[], 12, 30, 2.2) {
             let ws: Vec<&str> = words[r].iter().map(|w| w.text.as_str()).collect();
             match prepare_chunk(&g, &names, &ws) {
                 Ok(p) => {

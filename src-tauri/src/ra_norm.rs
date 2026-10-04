@@ -697,3 +697,143 @@ mod round2_tests {
     }
 }
 
+
+/// Round 3: legal, medical, academic, forum, review and code-ish text.
+#[cfg(test)]
+mod round3_tests {
+    use super::*;
+
+    fn render(text: &str) -> String {
+        let raw: Vec<&str> = text.split_whitespace().collect();
+        let prepared: Vec<Cow<str>> = raw.iter().map(|x| prepare(x)).collect();
+        let w: Vec<&str> = prepared.iter().map(|c| c.as_ref()).collect();
+        let sp = spans(&w);
+        let (mut out, mut i, mut k) = (Vec::new(), 0, 0);
+        while i < w.len() {
+            if k < sp.len() && sp[k].start == i {
+                out.push(sp[k].spoken.clone());
+                i = sp[k].end;
+                k += 1;
+            } else {
+                out.push(w[i].to_string());
+                i += 1;
+            }
+        }
+        out.join(" ")
+    }
+
+    fn check(cases: &[(&str, &str)]) {
+        let bad: Vec<String> = cases
+            .iter()
+            .filter_map(|(src, want)| {
+                let got = render(src);
+                (!got.contains(want)).then(|| format!("{src:?}
+   got  {got:?}
+   want ..{want:?}.."))
+            })
+            .collect();
+        assert!(bad.is_empty(), "{} wrong:
+{}", bad.len(), bad.join("
+"));
+    }
+
+    fn check_not(cases: &[(&str, &str)]) {
+        let bad: Vec<String> = cases
+            .iter()
+            .filter_map(|(src, not)| {
+                let got = render(src);
+                got.contains(not).then(|| format!("{src:?}
+   got  {got:?}
+   must not have {not:?}"))
+            })
+            .collect();
+        assert!(bad.is_empty(), "{} wrong:
+{}", bad.len(), bad.join("
+"));
+    }
+
+    #[test]
+    fn paragraph_signs_and_symbols_read() {
+        check(&[
+            ("The parties dispute ¶ 8 of the complaint.", "paragraph eight"),
+            ("the facts in ¶¶ 3-17 of the", "paragraphs three"),
+            ("force majeure clause (§ 14.2) excuses", "section fourteen point two"),
+            ("β = 0.62, SE = 0.08", "equals"),
+        ]);
+    }
+
+    #[test]
+    fn forum_shorthand_is_expanded() {
+        check(&[
+            ("ngl that ending made me cry", "not gonna lie that"),
+            ("the rest tbh", "to be honest"),
+            ("smh people really", "shaking my head"),
+            ("brb gotta feed the cat", "be right back"),
+            ("edit: nvm figured it out", "never mind"),
+            ("bc the update", "because the"),
+            ("idk why ppl are mad", "I don't know why people"),
+            ("imo the first season", "in my opinion"),
+            ("iirc the deadline", "if I recall correctly"),
+            ("afaik it's not legal", "as far as I know"),
+            ("fwiw i've had mine", "for what it's worth"),
+            ("Salt &amp; cheese ftw", "for the win"),
+            ("ios 18.1 here", "I O S"),
+        ]);
+        // capitalised or other words are left alone
+        check_not(&[("BC Hydro raised rates", "because"), ("The Smh river", "shaking")]);
+    }
+
+    #[test]
+    fn medical_and_review_units() {
+        check(&[
+            ("Heart rate was 141 bpm and", "one hundred forty one beats per minute"),
+            ("Patients took 420 mcg of metformin", "micrograms"),
+            ("been using it for 6 wks and", "six weeks"),
+            ("Holds 1.5 qt, which", "quarts"),
+            ("a BMI of 30 kg/m2 or higher", "kilograms per square meter"),
+        ]);
+    }
+
+    #[test]
+    fn code_names_read() {
+        check(&[
+            ("a C# front end", "C sharp front"),
+            ("the frontend uses F#.", "F sharp"),
+            ("Open setup.cfg and change", "setup dot C F G"),
+            ("loads main.js and styles.css.", "styles dot C S S"),
+            ("Open app.tsx and", "app dot T S X"),
+            ("Open server.go and", "server dot go"),
+            ("The v1 endpoint /api/users returns", "slash api slash users"),
+            ("has a user_id and an access_token field", "user id and an access token"),
+            ("Set NODE_ENV=production in .env.", "NODE ENV equals production"),
+        ]);
+    }
+
+    #[test]
+    fn statistics_letters_read() {
+        check(&[
+            ("β = 0.62, SE = 0.08", "beta equals"),
+            ("The scale was reliable (α = .81).", "alpha equals"),
+            ("high (κ = 0.87).", "kappa"),
+            ("84.9% (Δ = 13.6 pp).", "delta"),
+            ("of the variance (R² = 0.41).", "R squared equals"),
+        ]);
+    }
+
+    #[test]
+    fn paths_and_settings_with_digits_read() {
+        check(&[
+            ("The v3 endpoint /v1/orders returns", "slash v1 slash orders"),
+            ("Set PORT=http://localhost:8080 in .env.", "PORT equals localhost"),
+            ("Set DEBUG=1 in .env.", "DEBUG equals one"),
+        ]);
+    }
+
+    #[test]
+    fn legal_citations_read() {
+        check(&[
+            ("Apple Inc., No. 21-cv-6242 (D. Md. 2020).", "Maryland"),
+            ("Cf. Chevron U.S.A. Inc. v. NRDC", "compare"),
+        ]);
+    }
+}

@@ -1,0 +1,1502 @@
+# Self-written round-3 sentences (source<TAB>text). Ours; safe to commit.
+# Regenerate with gen_stress_round3.py.
+own:legal	See Brown v. Board of Education, 347 U.S. 483 (1954).
+own:legal	The Court relied on Marbury v. Madison, 5 U.S. 137, 177 (1803).
+own:legal	Plaintiff filed suit under 42 U.S.C. § 1983 in the U.S. District Court for the Southern District of New York.
+own:legal	Under Fed. R. Civ. P. 12(b)(6), the complaint must state a plausible claim.
+own:legal	The Ninth Circuit reversed. 912 F.3d 1201 (9th Cir. 2019).
+own:legal	We review de novo. Id. at 1205.
+own:legal	Defendants' motion for summary judgment is GRANTED in part and DENIED in part.
+own:legal	The statute, 18 U.S.C. §§ 1341-1343, covers mail and wire fraud.
+own:legal	Petitioner argues that the district court erred. Pet. Br. 14-16.
+own:legal	Cf. Chevron U.S.A. Inc. v. NRDC, 467 U.S. 837 (1984), overruled by Loper Bright Enters. v. Raimondo, 603 U.S. 369 (2024).
+own:legal	The jury returned a verdict of $4.2 million, plus pre-judgment interest at 9% per annum.
+own:legal	J. Thomas, concurring in the judgment.
+own:legal	Roberts, C.J., delivered the opinion of the Court, in which Alito, Gorsuch, and Kavanaugh, JJ., joined.
+own:legal	The case is remanded for further proceedings consistent with this opinion.
+own:legal	Section 2(a)(1) of the Act provides that no person shall be denied the right to vote.
+own:legal	Pursuant to 28 U.S.C. § 1291, we have jurisdiction over this appeal.
+own:legal	The parties stipulated to the facts in ¶¶ 3-17 of the Joint Statement.
+own:legal	Appellant's counsel, Esq., moved for a continuance on Jan. 5, 2024.
+own:legal	The Court of Appeals affirmed, 2d Cir. No. 22-1043, slip op. at 7.
+own:legal	The defendant pleaded nolo contendere to the misdemeanor count.
+own:legal	The order is stayed pending appeal, see Nken v. Holder, 556 U.S. 418, 434 (2009).
+own:legal	Plaintiffs seek treble damages under 15 U.S.C. § 15(a).
+own:legal	The Board's decision was arbitrary and capricious under 5 U.S.C. § 706(2)(A).
+own:legal	The contract's force majeure clause (§ 14.2) excuses performance.
+own:legal	Respondent v. Petitioner, No. 23-719, argued Feb. 8, 2024, decided Mar. 4, 2024.
+own:legal	The ALJ found the claimant not disabled at step five.
+own:legal	We decline to reach the First Amendment question.
+own:legal	The trial court abused its discretion. See id. at 412 n.3.
+own:legal	The settlement fund of $725 million will be distributed pro rata.
+own:legal	Under Cal. Civ. Code § 1542, a general release does not extend to unknown claims.
+own:medical	Patients received 500 mg of amoxicillin twice daily for 7 days.
+own:medical	The FDA approved the drug for adults with type 2 diabetes and a BMI of 30 kg/m2 or higher.
+own:medical	Blood pressure fell from 142/91 mmHg to 128/82 mmHg after 12 weeks.
+own:medical	The CDC recommends the updated COVID-19 vaccine for everyone 6 months and older.
+own:medical	LDL cholesterol dropped by 38 mg/dL on average.
+own:medical	HbA1c fell 1.4 percentage points, from 8.2% to 6.8%.
+own:medical	Take 1 tablet by mouth every 4-6 hours as needed; do not exceed 4 g/day.
+own:medical	The study enrolled 2,450 adults aged 50-75 at 31 sites in the U.S. and Canada.
+own:medical	Side effects included nausea (12%), headache (8%), and fatigue (5%).
+own:medical	The patient presented with a temperature of 101.3°F and an O2 sat of 91% on room air.
+own:medical	An MRI showed a 2.3 cm lesion in the left temporal lobe.
+own:medical	RSV hospitalizations rose 40% week over week, the NIH said.
+own:medical	The WHO declared mpox a public health emergency of international concern.
+own:medical	Ozempic (semaglutide) and Zepbound (tirzepatide) are GLP-1 drugs.
+own:medical	The dose was titrated from 0.25 mg to 1 mg weekly.
+own:medical	ICU admissions per 100,000 people fell to 2.1.
+own:medical	Dr. Patel, an MD/PhD at Johns Hopkins, led the trial.
+own:medical	Infants under 12 mo. should not be given honey.
+own:medical	The EKG showed atrial fibrillation with a rate of 132 bpm.
+own:medical	She was started on IV fluids at 125 mL/hr.
+own:medical	Vitamin D levels below 20 ng/mL are considered deficient.
+own:medical	The test has a sensitivity of 94.1% and a specificity of 98.7%.
+own:medical	About 1 in 8 women will develop breast cancer, per the ACS.
+own:medical	Ibuprofen 400-800 mg q6h PRN for pain.
+own:medical	The CBC was normal except for a WBC of 13.4 x 10^9/L.
+own:medical	Measles cases hit 1,274 in 2019, the most since 1992.
+own:medical	The patient's BMI was 27.4 and her eGFR was 58 mL/min/1.73 m2.
+own:medical	The vaccine was 87% effective against severe disease.
+own:medical	Symptoms typically appear 2-14 days after exposure.
+own:medical	Use SPF 30+ sunscreen and reapply every 2 hrs.
+own:academic	Prior work (Smith et al., 2021; Lee & Park, 2019) found similar effects.
+own:academic	As Jones et al. (2021) showed, the effect persists across cohorts [12].
+own:academic	The difference was significant (p < 0.05).
+own:academic	We recruited n = 1,204 participants (mean age 34.2, SD = 9.1).
+own:academic	The odds ratio was 2.1 (95% CI 1.2–3.4).
+own:academic	Results held after adjustment (β = 0.32, SE = 0.08, p = .001).
+own:academic	The model explained 41% of the variance (R² = 0.41).
+own:academic	Effect sizes were moderate (Cohen's d = 0.54).
+own:academic	See Table 2 and Fig. 3b for details.
+own:academic	Inter-rater reliability was high (κ = 0.87).
+own:academic	We used a mixed-effects model with random intercepts for site (Bates et al., 2015).
+own:academic	Data and code are available at https://osf.io/abc12/.
+own:academic	The hazard ratio was 0.76 (95% CI, 0.64 to 0.90; P = 0.002).
+own:academic	Participants (N = 312) completed the survey online via MTurk.
+own:academic	This replicates earlier findings [3, 7–9].
+own:academic	The correlation was weak (r = .18, p = .03).
+own:academic	A chi-square test showed no difference, χ²(2) = 1.84, p = .40.
+own:academic	doi:10.1038/s41586-021-03819-2
+own:academic	In a meta-analysis of 47 RCTs (k = 47), the pooled RR was 0.81.
+own:academic	The intervention reduced symptoms by 23% vs. placebo (Wang, 2020, p. 114).
+own:academic	Accuracy improved from 71.3% to 84.9% (Δ = 13.6 pp).
+own:academic	We follow the approach of Vaswani et al. (2017).
+own:academic	The sample was 52% female, 61% White, and 18% Hispanic or Latino.
+own:academic	Results are reported as mean ± SD.
+own:academic	The F-statistic was significant, F(3, 196) = 4.72, p = .003.
+own:academic	All analyses were run in R 4.3.1 and Python 3.11.
+own:academic	Funding: NSF grant DMS-2015392 and NIH R01-MH123456.
+own:academic	Abstract: Background. Obesity affects over 40% of U.S. adults.
+own:academic	Keywords: machine learning; NLP; large language models (LLMs).
+own:academic	The AUC was 0.91 (0.88–0.94) on the held-out test set.
+own:forum	lol this is exactly what happened to me last week
+own:forum	imo the first season is way better than the rest tbh
+own:forum	anyone else's app crashing after the update? ios 18.1 here
+own:forum	TIL you can just ask for a lower rate and they'll often say yes
+own:forum	w/ the new patch my fps went from 60 to like 144
+own:forum	b/c the landlord never fixed the heat we just moved out
+own:forum	Mac &amp; cheese is not a side dish, fight me
+own:forum	idk why ppl are mad, the u.s. version is fine
+own:forum	Edit: thanks for the gold, kind stranger!
+own:forum	ngl that ending made me cry
+own:forum	smh people really be parking like that
+own:forum	This. So much this.
+own:forum	IIRC the deadline is the 15th, but double-check.
+own:forum	OP, you're NTA. Your sister is TA here.
+own:forum	fwiw i've had mine for 3 yrs and zero issues
+own:forum	ELI5: why does the moon look bigger near the horizon?
+own:forum	AFAIK it's not legal in the EU yet
+own:forum	My 2c: just buy the cheaper one and save $$$
+own:forum	brb gotta feed the cat
+own:forum	update: it worked!!! thank u all sm
+own:forum	rip my inbox lmao
+own:forum	tl;dr don't buy from them
+own:forum	Source: am a nurse, 10+ yrs in the ER
+own:forum	/s obviously
+own:forum	r/personalfinance would tell you to max your 401k first
+own:forum	u/throwaway123 did you ever get a refund?
+own:forum	can confirm, works on win 11 too
+own:forum	honestly? 10/10 would recommend
+own:forum	this sub has gone downhill since 2020 ngl
+own:forum	hmu if u want the link
+own:reviews	5/5 stars. Would buy again!
+own:reviews	★★★★☆ Great sound, but the case feels cheap.
+own:reviews	Battery lasts about 9 hrs w/ ANC on, 12 hrs off.
+own:reviews	Pros: light, fast, quiet. Cons: only 2 USB-C ports.
+own:reviews	Returned it after 2 weeks. The left earbud kept disconnecting.
+own:reviews	For $49.99 you really can't beat it.
+own:reviews	UPDATE (3/12): Customer service replaced it, bumping to 4 stars.
+own:reviews	It's a solid 8/10 for the price.
+own:reviews	The 15.6" screen is bright enough outdoors (around 400 nits).
+own:reviews	Fits true to size; I'm 5'10" and 170 lbs and got a medium.
+own:reviews	Verified Purchase. Size: XL. Color: Navy.
+own:reviews	Charges from 0-100% in about 45 min.
+own:reviews	Weighs 2.8 lbs, so it's great for travel.
+own:reviews	Works with Alexa and Google Home, but not HomeKit.
+own:reviews	The 1TB SSD and 16GB RAM make it snappy.
+own:reviews	Don't waste your $$ on this.
+own:reviews	Arrived DOA. Zero stars if I could.
+own:reviews	Love it!!! My kids use it every day :)
+own:reviews	Holds 1.5 qt, which is perfect for two people.
+own:reviews	The 4K/60fps video is crisp, but low light is meh.
+own:reviews	Rated IPX7, so it survived a dunk in the pool.
+own:reviews	Bought on sale for $199 (reg. $279).
+own:reviews	Packaging was damaged but the item was fine.
+own:reviews	3 stars - does the job, nothing special.
+own:reviews	Wi-Fi 6E support is a nice touch.
+own:reviews	After 6 mos. of daily use, the hinge is still tight.
+own:reviews	The app (v2.3.1) is buggy on Android 14.
+own:reviews	Took 10 mins to set up. Easy peasy.
+own:reviews	Way louder than my old JBL.
+own:reviews	Bottom line: get the Pro if you can afford it.
+own:code	Run npm install and then npm run dev to start the server.
+own:code	Open file.txt in Notepad and save it as config.json.
+own:code	The app is written in C++ with a C# front end on .NET 8.
+own:code	Node.js 20 and Vue.js 3 are both supported.
+own:code	Most teams now deploy to k8s (Kubernetes) on AWS.
+own:code	Set the PATH variable to C:\Program Files\Git\bin.
+own:code	Edit ~/.bashrc and add export EDITOR=vim.
+own:code	Install it with pip install requests==2.31.0.
+own:code	The bug is in utils.py, line 42.
+own:code	Call git commit -m "fix typo" and push to main.
+own:code	Use Ctrl+C to copy and Ctrl+V to paste.
+own:code	The API returns a 404 when the user ID is invalid.
+own:code	Visit localhost:3000 in your browser.
+own:code	The README.md explains how to build from source.
+own:code	It needs Python 3.10+ and at least 8 GB of RAM.
+own:code	TypeScript 5.4 adds better type narrowing.
+own:code	The index.html file loads main.js and styles.css.
+own:code	Rust's cargo build compiles the project in release mode with --release.
+own:code	Docker Compose v2 replaced docker-compose.
+own:code	Next.js 14 and React 18 power the dashboard.
+own:code	Run sudo apt-get update && sudo apt-get upgrade.
+own:code	The function returns null if the array is empty.
+own:code	Version 1.2.3-beta.4 fixes the memory leak.
+own:code	PostgreSQL 16 and MySQL 8.0 are supported; SQLite is used for tests.
+own:code	The JSON payload has a user_id and an access_token field.
+own:code	Go 1.22 and Java 21 LTS both ship with new GC options.
+own:code	Open the .env file and set API_KEY=your-key-here.
+own:code	The repo uses ESLint, Prettier and Jest.
+own:code	GPT-4o and Claude 3.5 Sonnet were tested via the API.
+own:code	The iOS 17 SDK requires Xcode 15.
+own:legal	The parties dispute ¶ 8 of the complaint.
+own:forum	posted this in r/nba too but no answers yet
+own:legal	Under 12 U.S.C. § 8868(b), the agency must act within 65 days.
+own:medical	Patients took 679 mg of atorvastatin twice daily.
+own:reviews	UPDATE (9/14): still going strong.
+own:reviews	Battery lasts 7 hrs w/ the screen on.
+own:academic	We surveyed n = 3,473 respondents.
+own:academic	The scale was reliable (α = .81).
+own:reviews	The 14.4" display is washed out.
+own:reviews	AirPods Pro 2: 2/5. Love it!
+own:medical	The trial enrolled 2,518 patients aged 42-52.
+own:legal	Jackson, J., filed a dissenting opinion.
+own:code	React 14.5 drops a memory leak.
+own:code	Three.js 2.4 deprecates a memory leak.
+own:academic	t(222) = 4.92, p = .21, d = 0.50.
+own:medical	Blood pressure was 160/84 mmHg.
+own:medical	Give 20 mg/kg IV every 12 hrs.
+own:code	Set NODE_ENV=1 in .env.
+own:medical	Patients took 944 IU of sertraline TID.
+own:legal	Section 10(b)(2) does not apply here.
+own:legal	The parties dispute ¶ 13 of the complaint.
+own:academic	See Fig. 7 and Table 5.
+own:code	Open package.json and change line 51.
+own:code	Open index.js and change line 103.
+own:academic	The difference was significant (p = .21).
+own:medical	About 1 in 73 adults have the condition.
+own:reviews	★★★☆☆ Disappointing.
+own:code	Run npm run build in the project folder.
+own:reviews	UPDATE (1/9): it died.
+own:forum	WIBTA: i told my roommate no
+own:legal	Section 19(b)(4) does not apply here.
+own:medical	Patients took 136 mg of metformin BID.
+own:medical	The trial enrolled 4,994 patients aged 29-80.
+own:reviews	I'm 5'9" and 144 lbs; the S fits well.
+own:academic	See Fig. 6a and Table 3.
+own:legal	Barrett, J., filed a dissenting opinion.
+own:code	TensorFlow 13.9 drops async support.
+own:code	Open lib.rs and change line 218.
+own:medical	Her A1C was 6.6% and her LDL was 138 mg/dL.
+own:medical	Heart rate was 141 bpm and temp 101.8°F.
+own:reviews	The 15.1" display is bright.
+own:forum	edit: words
+own:reviews	The 16.6" display is dim.
+own:forum	tbh that is wild
+own:code	Next.js 7.5 deprecates a memory leak.
+own:code	The v1 endpoint /api/users returns HTTP 200.
+own:medical	The vaccine was 94% effective (95% CI 45-99%).
+own:forum	edit: formatting
+own:forum	lol that is wild
+own:medical	Cases rose 65% in the U.S., the CDC said.
+own:academic	The scale was reliable (α = .78).
+own:academic	OR = 2.9 (95% CI 2.6–4.3).
+own:reviews	Got it for $885.49 on sale.
+own:reviews	62GB RAM, 256GB SSD, BT 5.3.
+own:reviews	The 13.6" display is washed out.
+own:academic	Results are shown in refs. [16–37].
+own:academic	OR = 4.6 (95% CI 1.8–4.6).
+own:legal	The jury awarded $32.4 million in compensatory damages.
+own:legal	Section 22(b)(3) does not apply here.
+own:legal	Kagan, J., filed a dissenting opinion.
+own:academic	We surveyed n = 8,155 respondents.
+own:forum	posted this in r/AskReddit too but no answers yet
+own:academic	β = 0.62, SE = 0.08, p < 0.01.
+own:legal	The parties dispute ¶ 52 of the complaint.
+own:forum	fwiw the u.s. gets it first
+own:forum	honestly i had no idea
+own:medical	Her A1C was 5.7% and her LDL was 151 mg/dL.
+own:legal	The jury awarded $51.6 million in compensatory damages.
+own:reviews	I'm 5'7" and 148 lbs; the M fits well.
+own:code	It runs on k8s with 58 vCPUs and 190 GB RAM.
+own:forum	idk the fee is $5
+own:code	The v2 endpoint /api/users returns HTTP 500.
+own:academic	(Okafor & Smith, 1998; Rossi, 2009)
+own:code	Vue.js 21.6 fixes the old API.
+own:academic	β = -0.63, SE = 0.25, p = .03.
+own:academic	t(245) = 6.63, p = .03, d = 0.18.
+own:medical	The trial enrolled 4,358 patients aged 28-58.
+own:legal	The court granted the motion on Aug. 22, 2022.
+own:forum	Mac &amp; B forever
+own:academic	Mean age was 51.7 years (SD = 8.2).
+own:code	Press Ctrl+Shift+P to search.
+own:legal	The court granted the motion on Sept. 11, 2019.
+own:reviews	Instant Pot Duo 7-in-1: 1/5. Solid buy.
+own:code	k8s 9.2 deprecates Windows on ARM.
+own:reviews	UPDATE (9/11): support sent a new one.
+own:medical	Her A1C was 8.8% and her LDL was 96 mg/dL.
+own:forum	iirc the fee is $5
+own:reviews	59GB RAM, 2TB SSD, Wi-Fi 7.
+own:medical	About 6 in 11 adults have the condition.
+own:forum	LPT: the bus pass trick
+own:code	The backend uses Three.js and the frontend uses TensorFlow.
+own:medical	The trial enrolled 1,665 patients aged 47-82.
+own:academic	The difference was significant (p > .05).
+own:legal	The jury awarded $38.3 million in compensatory damages.
+own:legal	Id. at 29.
+own:legal	Miller, No. 20-cv-3998 (D. Mass. 2020).
+own:forum	been using it for 6 wks and no complaints
+own:academic	The scale was reliable (α = .73).
+own:legal	Id. at 423.
+own:medical	Give 10 mg/kg IV every 6 hrs.
+own:code	Run docker build . in the project folder.
+own:legal	Sotomayor, J., filed a dissenting opinion.
+own:forum	edit: typo
+own:academic	We surveyed n = 4,186 respondents.
+own:reviews	UPDATE (6/17): it died.
+own:forum	posted this in r/personalfinance too but no answers yet
+own:code	Run kubectl get pods in the project folder.
+own:medical	The trial enrolled 9,403 patients aged 19-60.
+own:code	Open package.json and change line 97.
+own:forum	Rock &amp; white forever
+own:code	The v3 endpoint /v1/orders returns HTTP 404.
+own:academic	Results are shown in refs. [13–27].
+own:forum	been using it for 11 wks and no complaints
+own:legal	The parties dispute ¶ 35 of the complaint.
+own:academic	Mean age was 57.7 years (SD = 9.1).
+own:reviews	UPDATE (8/18): support sent a new one.
+own:reviews	AirPods Pro 2: 2/5. Solid buy.
+own:code	Run yarn add lodash in the project folder.
+own:legal	The parties dispute ¶ 16 of the complaint.
+own:medical	About 4 in 60 adults have the condition.
+own:medical	About 4 in 26 adults have the condition.
+own:reviews	★★★☆☆ Great.
+own:academic	OR = 1.0 (95% CI 2.6–3.7).
+own:code	Open setup.cfg and change line 60.
+own:reviews	UPDATE (11/22): it died.
+own:academic	β = 0.87, SE = 0.10, p = .03.
+own:medical	Cases rose 77% in the U.S., the CDC said.
+own:code	Three.js 2.4 fixes the old API.
+own:academic	(Smith & Rossi, 2014; Patel, 1993)
+own:legal	See Miller v. Doe, 178 F. Supp. 3d 121, 458 (E.D. Va. 1995).
+own:legal	Id. at 86.
+own:medical	The ultrasound showed a 5.5 cm mass.
+own:legal	Miller, No. 19-cv-2804 (D. Colo. 2024).
+own:reviews	UPDATE (4/21): it died.
+own:code	C++ 2.9 deprecates the old API.
+own:reviews	The 14.1" display is washed out.
+own:medical	The vaccine was 86% effective (95% CI 49-98%).
+own:code	Press F5 to quit.
+own:legal	The court granted the motion on Nov. 11, 2023.
+own:academic	Results are shown in refs. [18–40].
+own:forum	AITA: check your tire pressure
+own:reviews	Pixel 8a: 3/5. Worth it.
+own:medical	The trial enrolled 1,988 patients aged 49-59.
+own:code	Objective-C 19.3 deprecates async support.
+own:academic	Results are shown in refs. [9–33].
+own:forum	edit: nvm figured it out
+own:code	The v1 endpoint /v1/orders returns HTTP 201.
+own:legal	Section 19(b)(3) does not apply here.
+own:reviews	Got it for $980.49 on sale.
+own:medical	Give 15 mg/kg IV every 5 hrs.
+own:academic	β = -0.86, SE = 0.25, p = .03.
+own:academic	β = -0.84, SE = 0.19, p < 0.05.
+own:code	D3.js 19.5 adds a memory leak.
+own:academic	β = -0.11, SE = 0.24, p > .05.
+own:forum	honestly same
+own:legal	The jury awarded $75.5 million in compensatory damages.
+own:medical	Heart rate was 104 bpm and temp 104.6°F.
+own:reviews	55GB RAM, 512GB SSD, Wi-Fi 6E.
+own:reviews	MacBook Air M3: 5/5. Worth it.
+own:medical	Heart rate was 61 bpm and temp 103.9°F.
+own:reviews	UPDATE (11/9): support sent a new one.
+own:medical	Blood pressure was 144/80 mmHg.
+own:forum	PSA: i told my roommate no
+own:reviews	★★★☆☆ Okay.
+own:legal	Miller, No. 24-cv-1701 (D. Minn. 2021).
+own:reviews	Got it for $676.49 on sale.
+own:academic	t(121) = 6.46, p = .21, d = 0.12.
+own:code	Press Cmd+K to open the palette.
+own:reviews	Got it for $591.49 on sale.
+own:reviews	★★★★☆ Disappointing.
+own:legal	The parties dispute ¶ 53 of the complaint.
+own:legal	The parties dispute ¶ 33 of the complaint.
+own:academic	OR = 2.4 (95% CI 2.1–4.5).
+own:legal	Fed. R. Evid. 748 bars the testimony.
+own:forum	lol i had no idea
+own:academic	See Fig. 3b and Table 1.
+own:medical	The trial enrolled 479 patients aged 42-81.
+own:medical	Cases rose 48% in NYC, the FDA said.
+own:medical	Cases rose 68% in NYC, the WHO said.
+own:academic	Mean age was 70.7 years (SD = 6.3).
+own:academic	OR = 3.4 (95% CI 2.8–3.4).
+own:academic	We surveyed n = 1,188 respondents.
+own:reviews	Got it for $229.00 on sale.
+own:reviews	UPDATE (1/15): support sent a new one.
+own:legal	Id. at 891.
+own:code	C++ 12.6 adds Windows on ARM.
+own:forum	posted this in r/cooking too but no answers yet
+own:reviews	UPDATE (6/5): still going strong.
+own:code	Set DEBUG=1 in .env.
+own:code	D3.js 1.6 fixes a memory leak.
+own:reviews	Battery lasts 15 hrs w/ the screen on.
+own:forum	b/c ads it's way better
+own:code	It runs on Lambda with 10 vCPUs and 250 GB RAM.
+own:medical	The ultrasound showed a 1.9 cm mass.
+own:reviews	★★★★★ Disappointing.
+own:reviews	40GB RAM, 512GB SSD, Wi-Fi 6E.
+own:medical	Heart rate was 73 bpm and temp 104.3°F.
+own:forum	Salt &amp; cheese forever
+own:forum	Salt &amp; cheese ftw
+own:forum	iirc the u.s. gets it first
+own:medical	Cases rose 79% in NYC, the CDC said.
+own:legal	Section 27(c)(1) does not apply here.
+own:reviews	UPDATE (12/20): support sent a new one.
+own:forum	been using it for 7 mos and its meh
+own:academic	Mean age was 54.2 years (SD = 3.6).
+own:forum	w/o my ex it's pointless
+own:reviews	Battery lasts 27 hrs w/ Wi-Fi on.
+own:forum	bc the update it's way better
+own:code	Open data.csv and change line 48.
+own:academic	Mean age was 27.7 years (SD = 5.9).
+own:forum	imo this is so true
+own:code	Press F5 to search.
+own:code	It runs on Azure with 56 vCPUs and 179 GB RAM.
+own:academic	The scale was reliable (α = .92).
+own:reviews	AirPods Pro 2: 1/5. Overpriced.
+own:reviews	30GB RAM, 1TB SSD, Wi-Fi 6E.
+own:forum	b/c the update it's worse
+own:code	Set PORT=production in .env.
+own:legal	Apple Inc., No. 21-cv-6242 (D. Md. 2020).
+own:academic	OR = 1.6 (95% CI 1.9–5.6).
+own:forum	idk it ships in may
+own:code	Next.js 20.9 adds the old API.
+own:reviews	The 16.6" display is bright.
+own:code	It runs on GKE with 4 vCPUs and 41 GB RAM.
+own:academic	See Fig. 8b and Table 3.
+own:medical	Heart rate was 76 bpm and temp 99.0°F.
+own:academic	Results are shown in refs. [9–35].
+own:reviews	Instant Pot Duo 7-in-1: 1/5. Love it!
+own:legal	The parties dispute ¶ 40 of the complaint.
+own:code	.NET 4.3 adds async support.
+own:academic	See Fig. 8 and Table 2.
+own:medical	About 1 in 65 adults have the condition.
+own:code	It runs on k8s with 42 vCPUs and 11 GB RAM.
+own:medical	Patients took 420 mcg of metformin TID.
+own:medical	Her A1C was 7.2% and her LDL was 114 mg/dL.
+own:academic	See Fig. 6c and Table 5.
+own:academic	Mean age was 42.1 years (SD = 12.7).
+own:forum	lol this is so true
+own:academic	t(377) = 4.71, p = .21, d = 0.42.
+own:medical	Patients took 362 mg/kg of metformin twice daily.
+own:academic	Results are shown in refs. [12–27].
+own:medical	Heart rate was 51 bpm and temp 101.7°F.
+own:forum	TIFU: how do vaccines work
+own:legal	See Roe v. Jones, 169 U.S. 962, 479 (D.C. Cir. 1996).
+own:medical	The vaccine was 77% effective (95% CI 39-98%).
+own:medical	Her A1C was 11.7% and her LDL was 165 mg/dL.
+own:reviews	The 15.6" display is dim.
+own:legal	The court granted the motion on Nov. 2, 2021.
+own:reviews	Got it for $223.49 on sale.
+own:reviews	Got it for $220.99 on sale.
+own:legal	The court granted the motion on Apr. 11, 2017.
+own:legal	Under 36 U.S.C. § 7158(a), the agency must act within 65 days.
+own:code	The backend uses Three.js and the frontend uses Express.js.
+own:legal	Under 17 U.S.C. § 5899(a), the agency must act within 34 days.
+own:legal	The parties dispute ¶ 43 of the complaint.
+own:academic	Results are shown in refs. [16–21].
+own:legal	Id. at 591.
+own:reviews	Kindle Paperwhite: 5/5. Overpriced.
+own:code	Run pip install -r requirements.txt in the project folder.
+own:code	The backend uses Express.js and the frontend uses Three.js.
+own:code	Express.js 11.5 deprecates Windows on ARM.
+own:medical	Heart rate was 138 bpm and temp 104.7°F.
+own:code	Press Cmd+K to run.
+own:medical	Her A1C was 8.5% and her LDL was 122 mg/dL.
+own:code	Run make clean in the project folder.
+own:reviews	Battery lasts 27 hrs w/ the screen on.
+own:academic	(Nguyen & Okafor, 2017; O'Brien, 2011)
+own:academic	Results are shown in refs. [6–28].
+own:forum	TIFU: i told my roommate no
+own:code	Open setup.cfg and change line 88.
+own:academic	The difference was significant (p = .03).
+own:reviews	Got it for $217.00 on sale.
+own:legal	The parties dispute ¶ 41 of the complaint.
+own:forum	imo same
+own:legal	The parties dispute ¶ 46 of the complaint.
+own:forum	been using it for 6 mos and no complaints
+own:reviews	Battery lasts 24 hrs w/ the screen on.
+own:medical	Blood pressure was 122/97 mmHg.
+own:academic	As Kim et al. (2019) found, the effect replicates [35].
+own:medical	About 8 in 13 adults have the condition.
+own:legal	See Smith v. Jones, 458 L. Ed. 2d 164, 655 (D. Del. 1995).
+own:forum	been using it for 3 wks and no complaints
+own:academic	OR = 3.2 (95% CI 2.5–6.1).
+own:medical	Her A1C was 5.1% and her LDL was 192 mg/dL.
+own:code	Press Alt+F4 to quit.
+own:medical	Heart rate was 77 bpm and temp 97.3°F.
+own:reviews	Got it for $651.99 on sale.
+own:code	Press Ctrl+S to open the palette.
+own:medical	Give 1 mg/kg IV every 9 hrs.
+own:academic	See Fig. 7a and Table 3.
+own:academic	The scale was reliable (α = .90).
+own:academic	Mean age was 20.8 years (SD = 3.4).
+own:academic	See Fig. 3 and Table 2.
+own:forum	been using it for 5 wks and zero regrets
+own:medical	The vaccine was 90% effective (95% CI 44-98%).
+own:reviews	I'm 5'4" and 165 lbs; the S fits well.
+own:legal	Apple Inc., No. 24-cv-9218 (D. Mass. 2022).
+own:legal	Under 35 U.S.C. § 9456(c), the agency must act within 85 days.
+own:code	TensorFlow 21.5 deprecates a memory leak.
+own:code	The v3 endpoint /api/users returns HTTP 401.
+own:forum	afaik it ships in may
+own:reviews	★★★★☆ Okay.
+own:reviews	UPDATE (8/18): still going strong.
+own:academic	β = 0.57, SE = 0.11, p < 0.01.
+own:forum	been using it for 2 mos and no complaints
+own:academic	The scale was reliable (α = .84).
+own:academic	The scale was reliable (α = .82).
+own:legal	The court granted the motion on Nov. 27, 2015.
+own:medical	About 6 in 46 adults have the condition.
+own:legal	See Garcia v. Smith, 484 U.S. 230, 72 (2d Cir. 2014).
+own:reviews	Pixel 8a: 3/5. Meh.
+own:code	Set DEBUG=production in .env.
+own:medical	The vaccine was 68% effective (95% CI 33-99%).
+own:medical	The trial enrolled 9,696 patients aged 39-73.
+own:reviews	36GB RAM, 2TB SSD, Wi-Fi 7.
+own:forum	iirc u can cancel anytime
+own:code	The v3 endpoint /v1/orders returns HTTP 201.
+own:medical	About 4 in 19 adults have the condition.
+own:academic	We surveyed n = 9,342 respondents.
+own:forum	ELI5: the bus pass trick
+own:academic	Mean age was 66.4 years (SD = 11.0).
+own:academic	See Fig. 9a and Table 5.
+own:forum	imo big mood
+own:academic	As Rossi et al. (2020) found, the effect replicates [57].
+own:medical	Patients took 113 mg/kg of albuterol q12h.
+own:forum	posted this in r/legaladvice too but no answers yet
+own:medical	Give 5 mg/kg IV every 4 hrs.
+own:reviews	I'm 5'5" and 189 lbs; the M fits well.
+own:legal	Id. at 631.
+own:academic	As Patel et al. (2002) found, the effect replicates [9].
+own:code	Open server.go and change line 240.
+own:academic	OR = 4.8 (95% CI 2.4–6.3).
+own:reviews	Battery lasts 17 hrs with Wi-Fi on.
+own:academic	As Kim et al. (2007) found, the effect replicates [17].
+own:code	The v3 endpoint /api/users returns HTTP 201.
+own:legal	The parties dispute ¶ 37 of the complaint.
+own:reviews	Battery lasts 4 hrs w/ GPS on.
+own:code	Vue.js 5.7 deprecates the old API.
+own:reviews	UPDATE (9/27): support sent a new one.
+own:forum	idk u can cancel anytime
+own:academic	We surveyed n = 7,072 respondents.
+own:reviews	30GB RAM, 256GB SSD, Wi-Fi 7.
+own:code	Open lib.rs and change line 95.
+own:code	k8s 7.8 fixes a memory leak.
+own:forum	bc ads it's fine
+own:medical	Blood pressure was 167/82 mmHg.
+own:medical	Blood pressure was 120/78 mmHg.
+own:forum	bc my ex it's fine
+own:legal	Id. at 362.
+own:medical	Give 11 mg/kg IV every 12 hrs.
+own:code	The v3 endpoint /auth/login returns HTTP 404.
+own:code	PyTorch 2.4 fixes a memory leak.
+own:forum	been using it for 5 yrs and love it
+own:medical	Patients took 622 mg/kg of sertraline BID.
+own:academic	Mean age was 56.1 years (SD = 8.9).
+own:reviews	I'm 6'10" and 170 lbs; the M fits well.
+own:academic	As Müller et al. (2018) found, the effect replicates [46].
+own:medical	Give 9 mg/kg IV every 12 hrs.
+own:legal	Id. at 698.
+own:medical	The MRI showed a 4.8 cm mass.
+own:medical	The CT scan showed a 1.4 cm mass.
+own:academic	The difference was significant (p < .001).
+own:forum	AITA: i told my roommate no
+own:code	The v2 endpoint /auth/login returns HTTP 401.
+own:academic	We surveyed n = 1,114 respondents.
+own:medical	Her A1C was 5.9% and her LDL was 74 mg/dL.
+own:academic	The scale was reliable (α = .94).
+own:medical	Give 12 mg/kg IV every 5 hrs.
+own:forum	tbh big mood
+own:medical	The trial enrolled 5,700 patients aged 41-55.
+own:academic	We surveyed n = 9,443 respondents.
+own:reviews	I'm 5'6" and 179 lbs; the S fits well.
+own:legal	Id. at 863.
+own:academic	t(329) = 2.65, p < .001, d = 0.18.
+own:reviews	I'm 6'11" and 148 lbs; the S fits well.
+own:legal	Id. at 232.
+own:code	It runs on Azure with 53 vCPUs and 36 GB RAM.
+own:legal	Under 11 U.S.C. § 8137(b), the agency must act within 64 days.
+own:medical	Blood pressure was 163/77 mmHg.
+own:legal	Under 47 U.S.C. § 7804(a), the agency must act within 131 days.
+own:academic	We surveyed n = 9,182 respondents.
+own:code	The v1 endpoint /auth/login returns HTTP 404.
+own:legal	The court granted the motion on Nov. 1, 2022.
+own:medical	About 4 in 85 adults have the condition.
+own:forum	b/c the u.s. version it's worse
+own:medical	About 5 in 20 adults have the condition.
+own:reviews	25GB RAM, 256GB SSD, Wi-Fi 7.
+own:academic	As O'Brien et al. (2023) found, the effect replicates [21].
+own:legal	Under 40 U.S.C. § 9516(c), the agency must act within 134 days.
+own:reviews	Got it for $362.49 on sale.
+own:academic	As Okafor et al. (2019) found, the effect replicates [15].
+own:forum	ELI5: check your tire pressure
+own:forum	TIFU: the bus pass trick
+own:medical	Cases rose 58% in NYC, the NIH said.
+own:academic	Mean age was 42.7 years (SD = 6.7).
+own:legal	Under 22 U.S.C. § 8081(e), the agency must act within 172 days.
+own:academic	See Fig. 3b and Table 2.
+own:forum	w/o a 401k it's fine
+own:academic	The scale was reliable (α = .79).
+own:code	Open server.go and change line 148.
+own:legal	See Microsoft Corp. v. Smith, 589 F.4th 736, 687 (E.D. Va. 2020).
+own:legal	Under 28 U.S.C. § 1496(a), the agency must act within 37 days.
+own:academic	As Rossi et al. (2011) found, the effect replicates [45].
+own:forum	w/o the u.s. version it's pointless
+own:reviews	Instant Pot Duo 7-in-1: 5/5. Overpriced.
+own:medical	Blood pressure was 148/97 mmHg.
+own:reviews	64GB RAM, 256GB SSD, Wi-Fi 6E.
+own:medical	Her A1C was 6.1% and her LDL was 140 mg/dL.
+own:legal	The jury awarded $18.2 million in compensatory damages.
+own:code	The v1 endpoint /auth/login returns HTTP 201.
+own:legal	Texas, No. 23-cv-9451 (D. Minn. 2024).
+own:forum	R &amp; white forever
+own:academic	t(245) = 5.49, p > .05, d = 0.52.
+own:reviews	★★★★☆ Great.
+own:medical	Her A1C was 7.2% and her LDL was 83 mg/dL.
+own:reviews	18GB RAM, 2TB SSD, Wi-Fi 6E.
+own:code	Vue.js 14.0 deprecates Windows on ARM.
+own:code	Next.js 20.1 deprecates a memory leak.
+own:legal	The court granted the motion on Aug. 9, 2016.
+own:forum	been using it for 10 yrs and love it
+own:academic	The scale was reliable (α = .75).
+own:legal	Id. at 742.
+own:legal	The parties dispute ¶ 49 of the complaint.
+own:reviews	Galaxy S24 Ultra: 2/5. Overpriced.
+own:reviews	I'm 6'5" and 160 lbs; the XL fits well.
+own:reviews	I'm 6'6" and 135 lbs; the S fits well.
+own:medical	Heart rate was 95 bpm and temp 104.7°F.
+own:code	The backend uses PyTorch and the frontend uses Vue.js.
+own:legal	Garcia, No. 21-cv-9051 (D. Minn. 2021).
+own:legal	Microsoft Corp., No. 24-cv-8533 (D. Colo. 2023).
+own:legal	The jury awarded $69.2 million in compensatory damages.
+own:legal	Doe, No. 23-cv-1964 (D. Colo. 2019).
+own:reviews	UPDATE (5/7): it died.
+own:forum	b/c a 401k it's way better
+own:legal	Section 8(b)(3) does not apply here.
+own:code	TensorFlow 13.9 deprecates the old API.
+own:legal	See Miller v. Microsoft Corp., 296 U.S. 433, 513 (2d Cir. 2010).
+own:academic	OR = 2.1 (95% CI 2.1–3.3).
+own:academic	The scale was reliable (α = .85).
+own:code	Open file.txt and change line 32.
+own:medical	Cases rose 66% in NYC, the NIH said.
+own:legal	The jury awarded $95.5 million in compensatory damages.
+own:reviews	Pixel 8a: 5/5. Love it!
+own:legal	The jury awarded $47.6 million in compensatory damages.
+own:academic	See Fig. 3 and Table 6.
+own:legal	The jury awarded $71.5 million in compensatory damages.
+own:reviews	Battery lasts 11 hrs with the screen on.
+own:reviews	46GB RAM, 512GB SSD, Wi-Fi 6E.
+own:medical	Patients took 316 mL of ibuprofen once daily.
+own:code	It runs on Azure with 63 vCPUs and 187 GB RAM.
+own:medical	About 6 in 31 adults have the condition.
+own:forum	posted this in r/buildapc too but no answers yet
+own:legal	The jury awarded $43.3 million in compensatory damages.
+own:reviews	UPDATE (5/1): still going strong.
+own:medical	Give 13 mg/kg IV every 7 hrs.
+own:academic	Mean age was 62.5 years (SD = 10.3).
+own:forum	WIBTA: check your tire pressure
+own:code	The v1 endpoint /v1/orders returns HTTP 401.
+own:reviews	Battery lasts 8 hrs w/ ANC on.
+own:legal	Section 15(a)(1) does not apply here.
+own:academic	We surveyed n = 5,633 respondents.
+own:medical	Her A1C was 8.3% and her LDL was 133 mg/dL.
+own:academic	Mean age was 51.5 years (SD = 13.7).
+own:medical	Blood pressure was 169/101 mmHg.
+own:forum	R &amp; pepper ftw
+own:legal	Id. at 216.
+own:reviews	I'm 5'5" and 129 lbs; the S fits well.
+own:medical	The ultrasound showed a 5.8 cm mass.
+own:academic	We surveyed n = 7,312 respondents.
+own:academic	We surveyed n = 2,493 respondents.
+own:medical	Give 8 mg/kg IV every 4 hrs.
+own:medical	Heart rate was 101 bpm and temp 99.9°F.
+own:reviews	I'm 6'5" and 179 lbs; the L fits well.
+own:academic	(Nguyen & Smith, 2003; Rossi, 2019)
+own:medical	The vaccine was 50% effective (95% CI 32-98%).
+own:medical	About 2 in 42 adults have the condition.
+own:academic	See Fig. 6 and Table 5.
+own:academic	t(100) = 2.23, p < 0.05, d = 0.45.
+own:code	C# 20.2 fixes the old API.
+own:forum	bc the u.s. version it's pointless
+own:academic	We surveyed n = 1,318 respondents.
+own:academic	t(359) = 3.93, p = .03, d = 0.26.
+own:academic	β = 0.82, SE = 0.15, p < 0.05.
+own:legal	Miller, No. 19-cv-5428 (D. Minn. 2024).
+own:reviews	The 13.1" display is dim.
+own:medical	About 4 in 68 adults have the condition.
+own:code	Set PORT=3000 in .env.
+own:legal	Under 24 U.S.C. § 2563(c), the agency must act within 73 days.
+own:reviews	55GB RAM, 1TB SSD, Wi-Fi 6E.
+own:academic	The scale was reliable (α = .89).
+own:academic	As Chen et al. (2008) found, the effect replicates [45].
+own:legal	Texas, No. 24-cv-1137 (D. Colo. 2021).
+own:academic	See Fig. 6b and Table 6.
+own:legal	See Doe v. Microsoft Corp., 225 N.E.3d 599, 696 (N.D. Cal. 2005).
+own:legal	Id. at 200.
+own:medical	Patients took 181 mcg of sertraline q12h.
+own:forum	w/o the u.s. version it's fine
+own:forum	Rock &amp; cheese forever
+own:medical	Heart rate was 65 bpm and temp 102.2°F.
+own:academic	OR = 2.1 (95% CI 2.5–6.6).
+own:forum	b/c a 401k it's worse
+own:academic	We surveyed n = 4,713 respondents.
+own:medical	Give 13 mg/kg IV every 9 hrs.
+own:legal	Id. at 626.
+own:code	The v2 endpoint /v1/orders returns HTTP 401.
+own:forum	been using it for 8 wks and its meh
+own:legal	Section 13(c)(4) does not apply here.
+own:reviews	★☆☆☆☆ Not bad.
+own:reviews	Got it for $404.00 on sale.
+own:medical	About 6 in 34 adults have the condition.
+own:legal	Section 9(b)(3) does not apply here.
+own:code	Press Alt+F4 to open the palette.
+own:code	Press Ctrl+Shift+P to save.
+own:forum	afaik the fee is $5
+own:legal	Section 10(a)(2) does not apply here.
+own:code	Run brew install node in the project folder.
+own:legal	Fed. R. Evid. 571 bars the testimony.
+own:code	Press Alt+F4 to search.
+own:reviews	The 13.5" display is bright.
+own:code	Open index.js and change line 270.
+own:legal	Section 27(b)(3) does not apply here.
+own:reviews	22GB RAM, 256GB SSD, Wi-Fi 7.
+own:legal	The parties dispute ¶ 1 of the complaint.
+own:legal	The parties dispute ¶ 38 of the complaint.
+own:medical	The CT scan showed a 1.7 cm mass.
+own:code	Set API_URL=production in .env.
+own:academic	Results are shown in refs. [17–24].
+own:academic	Results are shown in refs. [6–21].
+own:medical	Her A1C was 6.0% and her LDL was 203 mg/dL.
+own:medical	The trial enrolled 5,448 patients aged 34-51.
+own:reviews	I'm 6'1" and 165 lbs; the M fits well.
+own:medical	Give 6 mg/kg IV every 11 hrs.
+own:reviews	MacBook Air M3: 3/5. Love it!
+own:academic	See Fig. 7 and Table 3.
+own:legal	Jones, No. 22-cv-5741 (D. Minn. 2022).
+own:medical	Heart rate was 96 bpm and temp 102.1°F.
+own:legal	See Microsoft Corp. v. Garcia, 340 N.E.3d 23, 593 (9th Cir. 2009).
+own:legal	Id. at 330.
+own:forum	afaik u can cancel anytime
+own:medical	The trial enrolled 6,747 patients aged 42-81.
+own:medical	Her A1C was 6.1% and her LDL was 102 mg/dL.
+own:academic	We surveyed n = 4,857 respondents.
+own:reviews	UPDATE (11/9): it died.
+own:reviews	Battery lasts 25 hrs w/ the screen on.
+own:academic	See Fig. 8b and Table 2.
+own:academic	The scale was reliable (α = .76).
+own:medical	The CT scan showed a 5.5 cm mass.
+own:code	Press Ctrl+S to save.
+own:reviews	★☆☆☆☆ Disappointing.
+own:code	F# 11.4 adds async support.
+own:code	It runs on Azure with 35 vCPUs and 62 GB RAM.
+own:medical	The ultrasound showed a 8.0 cm mass.
+own:medical	The trial enrolled 7,859 patients aged 27-56.
+own:medical	Blood pressure was 122/72 mmHg.
+own:reviews	Got it for $23.00 on sale.
+own:legal	Roe, No. 19-cv-2659 (D. Mass. 2020).
+own:academic	Results are shown in refs. [15–22].
+own:medical	Give 16 mg/kg IV every 7 hrs.
+own:code	The v2 endpoint /v1/orders returns HTTP 404.
+own:reviews	UPDATE (12/16): support sent a new one.
+own:reviews	Instant Pot Duo 7-in-1: 4/5. Worth it.
+own:medical	The trial enrolled 7,385 patients aged 31-81.
+own:legal	The jury awarded $47.3 million in compensatory damages.
+own:reviews	★★★☆☆ Not bad.
+own:legal	See United States v. Apple Inc., 523 F.4th 892, 167 (2d Cir. 1995).
+own:forum	TIFU: check your tire pressure
+own:code	The backend uses k8s and the frontend uses C#.
+own:code	Run git pull in the project folder.
+own:reviews	I'm 5'3" and 149 lbs; the S fits well.
+own:medical	About 3 in 81 adults have the condition.
+own:legal	Under 23 U.S.C. § 6994(a), the agency must act within 132 days.
+own:academic	Results are shown in refs. [8–30].
+own:reviews	Battery lasts 30 hrs w/ ANC on.
+own:code	The backend uses F# and the frontend uses Objective-C.
+own:medical	The MRI showed a 9.9 cm mass.
+own:forum	ELI5: i told my roommate no
+own:code	The v2 endpoint /auth/login returns HTTP 201.
+own:academic	Results are shown in refs. [20–24].
+own:reviews	★★☆☆☆ Disappointing.
+own:academic	OR = 3.9 (95% CI 1.4–4.3).
+own:code	Press Ctrl+Shift+P to open the palette.
+own:medical	The vaccine was 51% effective (95% CI 33-98%).
+own:code	Run cargo test in the project folder.
+own:reviews	Got it for $127.99 on sale.
+own:reviews	Battery lasts 10 hrs with ANC on.
+own:forum	been using it for 6 mos and love it
+own:reviews	The 16.1" display is washed out.
+own:legal	The jury awarded $8.1 million in compensatory damages.
+own:reviews	I'm 5'1" and 151 lbs; the L fits well.
+own:code	Run npm install in the project folder.
+own:academic	β = -0.96, SE = 0.11, p = .03.
+own:legal	Section 17(a)(4) does not apply here.
+own:medical	Give 8 mg/kg IV every 8 hrs.
+own:code	The v2 endpoint /v1/orders returns HTTP 200.
+own:code	It runs on EC2 with 17 vCPUs and 147 GB RAM.
+own:code	ASP.NET 21.9 drops a memory leak.
+own:medical	Cases rose 34% in L.A. County, the WHO said.
+own:legal	Section 26(c)(3) does not apply here.
+own:reviews	I'm 6'4" and 168 lbs; the L fits well.
+own:reviews	Got it for $601.49 on sale.
+own:medical	The trial enrolled 7,929 patients aged 34-75.
+own:reviews	The 17.9" display is washed out.
+own:legal	United States, No. 22-cv-6196 (D. Mass. 2024).
+own:academic	t(121) = 1.42, p = 0.012, d = 0.32.
+own:medical	The vaccine was 82% effective (95% CI 40-98%).
+own:reviews	iPad mini 7: 1/5. Overpriced.
+own:legal	Section 8(c)(1) does not apply here.
+own:academic	Results are shown in refs. [14–32].
+own:legal	The parties dispute ¶ 56 of the complaint.
+own:academic	t(312) = 6.11, p = 0.012, d = 0.36.
+own:academic	OR = 3.3 (95% CI 2.7–5.1).
+own:legal	Id. at 498.
+own:legal	Id. at 589.
+own:medical	Give 2 mg/kg IV every 11 hrs.
+own:legal	Smith, No. 22-cv-6761 (D. Minn. 2023).
+own:legal	Under 45 U.S.C. § 3851(c), the agency must act within 134 days.
+own:reviews	The 16.4" display is sharp.
+own:medical	Cases rose 8% in NYC, the CDC said.
+own:forum	edit: thanks everyone!!
+own:code	The v1 endpoint /v1/orders returns HTTP 404.
+own:medical	Patients took 905 g of sertraline every 8 hours.
+own:code	It runs on GKE with 44 vCPUs and 58 GB RAM.
+own:academic	OR = 4.9 (95% CI 1.8–5.6).
+own:legal	The parties dispute ¶ 10 of the complaint.
+own:legal	Under 10 U.S.C. § 8000(a), the agency must act within 100 days.
+own:legal	The parties dispute ¶ 18 of the complaint.
+own:reviews	UPDATE (1/7): it died.
+own:reviews	Battery lasts 10 hrs with Wi-Fi on.
+own:academic	t(298) = 4.91, p < .001, d = 0.85.
+own:code	Open setup.cfg and change line 98.
+own:academic	OR = 1.9 (95% CI 1.6–6.4).
+own:forum	w/ ads it's fine
+own:academic	OR = 2.7 (95% CI 2.0–3.3).
+own:legal	The parties dispute ¶ 2 of the complaint.
+own:code	The backend uses TensorFlow and the frontend uses Three.js.
+own:medical	The ultrasound showed a 7.6 cm mass.
+own:reviews	49GB RAM, 1TB SSD, BT 5.3.
+own:forum	honestly this is so true
+own:reviews	Battery lasts 30 hrs w/ the screen on.
+own:code	Set NODE_ENV=3000 in .env.
+own:academic	OR = 2.7 (95% CI 2.5–5.7).
+own:forum	LPT: i told my roommate no
+own:code	Set NODE_ENV=http://localhost:8080 in .env.
+own:medical	Heart rate was 108 bpm and temp 97.7°F.
+own:forum	Mac &amp; roll is underrated
+own:code	It runs on Azure with 2 vCPUs and 83 GB RAM.
+own:code	It runs on k8s with 61 vCPUs and 13 GB RAM.
+own:reviews	UPDATE (6/1): it died.
+own:legal	Microsoft Corp., No. 23-cv-9432 (D. Mass. 2018).
+own:medical	The X-ray showed a 3.8 cm mass.
+own:reviews	The 16.7" display is sharp.
+own:medical	Patients took 261 IU of sertraline once daily.
+own:forum	Black &amp; roll ftw
+own:legal	Section 17(b)(1) does not apply here.
+own:forum	Salt &amp; B forever
+own:reviews	Got it for $393.99 on sale.
+own:code	Press F5 to open the palette.
+own:code	The v1 endpoint /api/users returns HTTP 401.
+own:academic	We surveyed n = 9,205 respondents.
+own:medical	Cases rose 64% in the U.K., the NIH said.
+own:code	k8s 12.2 fixes the old API.
+own:legal	See Microsoft Corp. v. Miller, 536 N.E.3d 192, 16 (S.D.N.Y. 2020).
+own:legal	The parties dispute ¶ 3 of the complaint.
+own:code	Set PORT=1 in .env.
+own:code	The backend uses F# and the frontend uses ASP.NET.
+own:medical	Blood pressure was 149/74 mmHg.
+own:legal	Fed. R. Evid. 465 bars the testimony.
+own:reviews	Battery lasts 27 hrs with ANC on.
+own:code	Next.js 13.1 deprecates the old API.
+own:code	ASP.NET 2.8 adds a memory leak.
+own:forum	been using it for 8 mos and zero regrets
+own:forum	been using it for 3 yrs and zero regrets
+own:legal	Fed. R. Evid. 531 bars the testimony.
+own:legal	See United States v. Doe, 371 S. Ct. 400, 73 (5th Cir. 2010).
+own:medical	About 8 in 92 adults have the condition.
+own:academic	We surveyed n = 4,121 respondents.
+own:forum	been using it for 4 mos and no complaints
+own:medical	Her A1C was 9.2% and her LDL was 179 mg/dL.
+own:code	The v3 endpoint /v1/orders returns HTTP 500.
+own:code	The v2 endpoint /api/users returns HTTP 401.
+own:academic	β = -0.38, SE = 0.26, p < 0.05.
+own:reviews	Battery lasts 30 hrs w/ Wi-Fi on.
+own:forum	been using it for 9 mos and love it
+own:reviews	The 16.7" display is washed out.
+own:medical	Heart rate was 142 bpm and temp 103.7°F.
+own:reviews	Dyson V15: 4/5. Love it!
+own:reviews	The 14.5" display is dim.
+own:code	C# 17.1 deprecates the old API.
+own:reviews	I'm 6'7" and 158 lbs; the XL fits well.
+own:reviews	I'm 5'1" and 187 lbs; the S fits well.
+own:academic	We surveyed n = 506 respondents.
+own:academic	See Fig. 5b and Table 1.
+own:code	Open Dockerfile and change line 272.
+own:reviews	Pixel 8a: 2/5. Love it!
+own:reviews	The 17.2" display is dim.
+own:reviews	UPDATE (4/17): still going strong.
+own:reviews	I'm 6'3" and 187 lbs; the XL fits well.
+own:forum	been using it for 9 yrs and its meh
+own:reviews	I'm 6'3" and 225 lbs; the L fits well.
+own:reviews	I'm 6'10" and 197 lbs; the M fits well.
+own:academic	OR = 1.9 (95% CI 2.5–3.6).
+own:legal	Section 2(a)(3) does not apply here.
+own:academic	t(136) = 6.21, p < 0.01, d = 0.27.
+own:code	It runs on Azure with 30 vCPUs and 6 GB RAM.
+own:forum	w/o the update it's way better
+own:legal	The parties dispute ¶ 15 of the complaint.
+own:legal	The parties dispute ¶ 39 of the complaint.
+own:legal	The court granted the motion on Mar. 16, 2020.
+own:medical	Blood pressure was 120/65 mmHg.
+own:academic	As Kim et al. (2007) found, the effect replicates [23].
+own:forum	w/o a 401k it's worse
+own:medical	Give 10 mg/kg IV every 12 hrs.
+own:academic	t(128) = 3.97, p = .21, d = 0.62.
+own:medical	Her A1C was 9.6% and her LDL was 185 mg/dL.
+own:academic	Mean age was 66.5 years (SD = 3.0).
+own:legal	Texas, No. 19-cv-1668 (D. Md. 2024).
+own:medical	Cases rose 18% in the U.K., the CDC said.
+own:medical	The CT scan showed a 7.8 cm mass.
+own:reviews	★★★★★ Great.
+own:academic	(Kim & Smith, 2011; Smith, 2015)
+own:legal	Under 49 U.S.C. § 5853(a), the agency must act within 121 days.
+own:legal	Section 7(b)(2) does not apply here.
+own:forum	b/c the update it's pointless
+own:legal	See Jones v. Garcia, 559 L. Ed. 2d 591, 575 (D.C. Cir. 1992).
+own:academic	β = -0.34, SE = 0.07, p = .03.
+own:academic	The scale was reliable (α = .71).
+own:medical	The trial enrolled 337 patients aged 35-53.
+own:reviews	iPad mini 7: 3/5. Overpriced.
+own:reviews	Got it for $791.00 on sale.
+own:code	Open index.js and change line 42.
+own:academic	(Müller & Nguyen, 2023; Müller, 1996)
+own:forum	been using it for 6 wks and zero regrets
+own:legal	Microsoft Corp., No. 22-cv-5542 (D. Minn. 2022).
+own:academic	β = 0.49, SE = 0.23, p > .05.
+own:academic	(Nguyen & Kim, 2020; Nguyen, 1990)
+own:code	The backend uses C# and the frontend uses F#.
+own:code	The backend uses C++ and the frontend uses Express.js.
+own:academic	Results are shown in refs. [11–21].
+own:reviews	★★☆☆☆ Okay.
+own:code	It runs on Azure with 55 vCPUs and 256 GB RAM.
+own:legal	Texas, No. 23-cv-7724 (D. Minn. 2018).
+own:reviews	Battery lasts 6 hrs with GPS on.
+own:code	Open Dockerfile and change line 233.
+own:code	C# 19.9 drops the old API.
+own:code	It runs on k8s with 61 vCPUs and 51 GB RAM.
+own:forum	Black &amp; white is underrated
+own:code	It runs on Azure with 14 vCPUs and 61 GB RAM.
+own:legal	The court granted the motion on Jan. 6, 2024.
+own:code	Press Ctrl+Shift+P to quit.
+own:legal	The jury awarded $4.8 million in compensatory damages.
+own:medical	The MRI showed a 5.7 cm mass.
+own:medical	About 5 in 84 adults have the condition.
+own:medical	Patients took 872 g of lisinopril once daily.
+own:medical	Blood pressure was 113/105 mmHg.
+own:code	The backend uses Express.js and the frontend uses Node.js.
+own:code	It runs on Azure with 24 vCPUs and 37 GB RAM.
+own:academic	OR = 3.7 (95% CI 2.5–5.4).
+own:code	It runs on Lambda with 42 vCPUs and 79 GB RAM.
+own:code	The v1 endpoint /auth/login returns HTTP 200.
+own:code	It runs on Azure with 3 vCPUs and 18 GB RAM.
+own:academic	Results are shown in refs. [4–21].
+own:reviews	Got it for $639.99 on sale.
+own:medical	The MRI showed a 7.4 cm mass.
+own:medical	Give 11 mg/kg IV every 7 hrs.
+own:academic	The scale was reliable (α = .88).
+own:legal	Under 27 U.S.C. § 9305(c), the agency must act within 111 days.
+own:medical	Patients took 988 IU of semaglutide twice daily.
+own:reviews	41GB RAM, 256GB SSD, BT 5.3.
+own:reviews	Got it for $594.00 on sale.
+own:legal	Section 5(c)(3) does not apply here.
+own:forum	fwiw u can cancel anytime
+own:forum	been using it for 10 mos and love it
+own:academic	Mean age was 41.3 years (SD = 15.8).
+own:forum	been using it for 3 mos and its meh
+own:code	Set NODE_ENV=production in .env.
+own:reviews	Got it for $257.00 on sale.
+own:code	Press Ctrl+Shift+P to run.
+own:academic	(Müller & Müller, 2022; Müller, 2022)
+own:legal	Section 6(a)(4) does not apply here.
+own:code	It runs on k8s with 8 vCPUs and 150 GB RAM.
+own:code	.NET 2.4 drops async support.
+own:forum	w/ my ex it's pointless
+own:forum	fwiw it ships in may
+own:medical	Cases rose 88% in NYC, the NIH said.
+own:academic	β = -0.30, SE = 0.09, p = 0.012.
+own:academic	Results are shown in refs. [13–30].
+own:medical	The vaccine was 70% effective (95% CI 33-99%).
+own:medical	The vaccine was 76% effective (95% CI 42-98%).
+own:reviews	I'm 5'9" and 155 lbs; the M fits well.
+own:reviews	Roku Ultra: 1/5. Meh.
+own:reviews	I'm 5'8" and 221 lbs; the S fits well.
+own:reviews	Got it for $356.00 on sale.
+own:code	Set DEBUG=http://localhost:8080 in .env.
+own:code	Open Dockerfile and change line 289.
+own:legal	Id. at 722.
+own:legal	The parties dispute ¶ 50 of the complaint.
+own:reviews	The 17.1" display is washed out.
+own:forum	b/c the u.s. version it's fine
+own:reviews	Got it for $649.00 on sale.
+own:code	Three.js 12.4 drops the old API.
+own:code	Open Dockerfile and change line 61.
+own:reviews	Roku Ultra: 5/5. Worth it.
+own:medical	The MRI showed a 7.3 cm mass.
+own:legal	Under 46 U.S.C. § 6811(d), the agency must act within 179 days.
+own:medical	Give 1 mg/kg IV every 7 hrs.
+own:academic	β = 0.12, SE = 0.22, p > .05.
+own:forum	been using it for 10 yrs and zero regrets
+own:legal	The court granted the motion on Aug. 21, 2020.
+own:legal	Fed. R. Evid. 420 bars the testimony.
+own:reviews	Got it for $506.49 on sale.
+own:code	Next.js 18.8 deprecates Windows on ARM.
+own:academic	β = 0.79, SE = 0.14, p > .05.
+own:code	TensorFlow 3.1 drops async support.
+own:reviews	Battery lasts 27 hrs with GPS on.
+own:code	It runs on GKE with 4 vCPUs and 82 GB RAM.
+own:code	Open setup.cfg and change line 295.
+own:medical	Patients took 72 mg of atorvastatin every 8 hours.
+own:reviews	Battery lasts 16 hrs w/ Wi-Fi on.
+own:medical	The trial enrolled 4,342 patients aged 49-77.
+own:forum	w/ the update it's fine
+own:reviews	Battery lasts 14 hrs with Wi-Fi on.
+own:academic	We surveyed n = 9,231 respondents.
+own:code	Open README.md and change line 3.
+own:forum	R &amp; B is underrated
+own:legal	The jury awarded $25.5 million in compensatory damages.
+own:medical	Patients took 145 IU of sertraline every 8 hours.
+own:forum	Black &amp; B is underrated
+own:code	The backend uses Vue.js and the frontend uses Vue.js.
+own:reviews	46GB RAM, 512GB SSD, BT 5.3.
+own:reviews	I'm 6'5" and 189 lbs; the L fits well.
+own:medical	Her A1C was 10.9% and her LDL was 102 mg/dL.
+own:medical	The X-ray showed a 9.8 cm mass.
+own:reviews	20GB RAM, 256GB SSD, Wi-Fi 7.
+own:forum	LPT: how do vaccines work
+own:reviews	Instant Pot Duo 7-in-1: 2/5. Love it!
+own:academic	t(202) = 6.23, p < 0.05, d = 0.84.
+own:medical	About 5 in 42 adults have the condition.
+own:academic	Results are shown in refs. [14–38].
+own:code	The backend uses C++ and the frontend uses k8s.
+own:code	Open Dockerfile and change line 66.
+own:legal	Section 28(c)(4) does not apply here.
+own:reviews	Galaxy S24 Ultra: 5/5. Love it!
+own:medical	The vaccine was 59% effective (95% CI 33-98%).
+own:medical	Blood pressure was 113/90 mmHg.
+own:reviews	Battery lasts 20 hrs w/ Wi-Fi on.
+own:academic	t(24) = 1.67, p = .03, d = 0.44.
+own:academic	t(161) = 2.70, p > .05, d = 0.93.
+own:forum	LPT: check your tire pressure
+own:reviews	I'm 5'5" and 184 lbs; the L fits well.
+own:medical	About 2 in 69 adults have the condition.
+own:academic	β = 0.40, SE = 0.10, p = .21.
+own:academic	See Fig. 6 and Table 2.
+own:code	Set API_URL=1 in .env.
+own:reviews	UPDATE (8/16): support sent a new one.
+own:reviews	Battery lasts 9 hrs w/ Wi-Fi on.
+own:medical	About 5 in 49 adults have the condition.
+own:medical	Blood pressure was 117/96 mmHg.
+own:academic	(Garcia & Patel, 2000; Kim, 2013)
+own:legal	See Doe v. Doe, 233 L. Ed. 2d 160, 782 (2d Cir. 2005).
+own:reviews	53GB RAM, 2TB SSD, BT 5.3.
+own:medical	The vaccine was 58% effective (95% CI 49-98%).
+own:medical	Give 4 mg/kg IV every 7 hrs.
+own:academic	β = 0.53, SE = 0.27, p < .001.
+own:academic	As Patel et al. (2018) found, the effect replicates [29].
+own:medical	Her A1C was 6.0% and her LDL was 157 mg/dL.
+own:reviews	Got it for $164.49 on sale.
+own:academic	Mean age was 24.3 years (SD = 8.3).
+own:academic	(Müller & Kim, 2017; Rossi, 2009)
+own:medical	Her A1C was 6.2% and her LDL was 75 mg/dL.
+own:academic	t(24) = 3.78, p = 0.012, d = 0.47.
+own:code	The backend uses Objective-C and the frontend uses React.
+own:legal	The jury awarded $33.9 million in compensatory damages.
+own:reviews	Got it for $660.00 on sale.
+own:medical	About 9 in 16 adults have the condition.
+own:code	Open setup.cfg and change line 181.
+own:reviews	59GB RAM, 256GB SSD, BT 5.3.
+own:reviews	The 13.5" display is washed out.
+own:legal	Under 12 U.S.C. § 6588(e), the agency must act within 32 days.
+own:medical	About 4 in 96 adults have the condition.
+own:reviews	UPDATE (2/9): still going strong.
+own:legal	Fed. R. Evid. 643 bars the testimony.
+own:reviews	UPDATE (1/10): still going strong.
+own:code	The backend uses PyTorch and the frontend uses Node.js.
+own:academic	Mean age was 38.7 years (SD = 9.1).
+own:medical	The trial enrolled 6,649 patients aged 42-84.
+own:reviews	49GB RAM, 2TB SSD, Wi-Fi 6E.
+own:reviews	I'm 5'8" and 133 lbs; the M fits well.
+own:reviews	Battery lasts 10 hrs w/ ANC on.
+own:forum	Black &amp; cheese forever
+own:forum	Salt &amp; white ftw
+own:medical	The trial enrolled 8,388 patients aged 45-79.
+own:academic	OR = 3.5 (95% CI 2.4–6.4).
+own:reviews	The 17.5" display is washed out.
+own:academic	Mean age was 36.9 years (SD = 15.9).
+own:reviews	I'm 6'8" and 196 lbs; the S fits well.
+own:forum	iirc it ships in may
+own:reviews	Got it for $759.00 on sale.
+own:academic	We surveyed n = 3,109 respondents.
+own:academic	OR = 2.3 (95% CI 2.7–5.1).
+own:legal	The court granted the motion on Nov. 5, 2022.
+own:forum	been using it for 11 wks and love it
+own:medical	Her A1C was 6.2% and her LDL was 187 mg/dL.
+own:legal	See United States v. Microsoft Corp., 576 F.3d 959, 669 (Fed. Cir. 1993).
+own:code	Objective-C 21.0 deprecates the old API.
+own:medical	Patients took 559 g of semaglutide every 8 hours.
+own:academic	We surveyed n = 7,509 respondents.
+own:legal	Section 4(c)(4) does not apply here.
+own:code	The backend uses C++ and the frontend uses Vue.js.
+own:academic	As Kim et al. (2004) found, the effect replicates [37].
+own:legal	Id. at 364.
+own:academic	See Fig. 3a and Table 5.
+own:code	D3.js 10.7 fixes the old API.
+own:reviews	The 15.2" display is dim.
+own:academic	As Smith et al. (2012) found, the effect replicates [3].
+own:academic	(Nguyen & Smith, 2006; Nguyen, 2013)
+own:medical	Her A1C was 10.2% and her LDL was 126 mg/dL.
+own:forum	been using it for 5 mos and its meh
+own:medical	The trial enrolled 3,183 patients aged 41-85.
+own:reviews	Battery lasts 20 hrs w/ the screen on.
+own:legal	Fed. R. Evid. 567 bars the testimony.
+own:forum	w/ the u.s. version it's fine
+own:medical	Give 6 mg/kg IV every 10 hrs.
+own:legal	Fed. R. Evid. 438 bars the testimony.
+own:reviews	UPDATE (11/20): support sent a new one.
+own:code	C# 15.0 fixes a memory leak.
+own:legal	Fed. R. Evid. 598 bars the testimony.
+own:academic	β = -0.90, SE = 0.22, p < 0.05.
+own:reviews	UPDATE (7/22): still going strong.
+own:reviews	I'm 5'5" and 194 lbs; the M fits well.
+own:medical	Blood pressure was 110/67 mmHg.
+own:forum	been using it for 9 wks and its meh
+own:reviews	MacBook Air M3: 2/5. Worth it.
+own:code	Open Dockerfile and change line 40.
+own:code	The backend uses Three.js and the frontend uses ASP.NET.
+own:academic	β = -0.94, SE = 0.15, p > .05.
+own:academic	See Fig. 4a and Table 4.
+own:academic	As Chen et al. (2016) found, the effect replicates [16].
+own:reviews	UPDATE (9/24): still going strong.
+own:medical	Give 10 mg/kg IV every 9 hrs.
+own:forum	w/ my ex it's worse
+own:academic	See Fig. 7c and Table 6.
+own:code	It runs on k8s with 52 vCPUs and 203 GB RAM.
+own:forum	PSA: check your tire pressure
+own:medical	The vaccine was 51% effective (95% CI 30-98%).
+own:medical	The vaccine was 69% effective (95% CI 39-98%).
+own:legal	The parties dispute ¶ 51 of the complaint.
+own:legal	The parties dispute ¶ 34 of the complaint.
+own:forum	ngl that is wild
+own:code	ASP.NET 19.0 drops Windows on ARM.
+own:medical	Give 4 mg/kg IV every 5 hrs.
+own:reviews	The 13.9" display is dim.
+own:forum	b/c a 401k it's pointless
+own:academic	(Müller & Müller, 1997; Müller, 2024)
+own:legal	Fed. R. Evid. 713 bars the testimony.
+own:code	The v1 endpoint /api/users returns HTTP 404.
+own:legal	The court granted the motion on Jan. 12, 2019.
+own:forum	Black &amp; roll is underrated
+own:academic	As Rossi et al. (2001) found, the effect replicates [45].
+own:medical	About 4 in 57 adults have the condition.
+own:medical	Cases rose 27% in L.A. County, the NIH said.
+own:code	The v3 endpoint /auth/login returns HTTP 500.
+own:legal	The court granted the motion on Mar. 23, 2024.
+own:legal	Fed. R. Evid. 464 bars the testimony.
+own:forum	Mac &amp; white forever
+own:reviews	Got it for $198.49 on sale.
+own:medical	Patients took 586 mcg of semaglutide BID.
+own:code	The v3 endpoint /v1/orders returns HTTP 401.
+own:academic	The difference was significant (p < 0.01).
+own:academic	We surveyed n = 7,192 respondents.
+own:medical	The MRI showed a 6.1 cm mass.
+own:academic	t(320) = 3.58, p > .05, d = 0.44.
+own:reviews	UPDATE (4/10): still going strong.
+own:legal	Fed. R. Evid. 759 bars the testimony.
+own:legal	Fed. R. Evid. 460 bars the testimony.
+own:legal	Fed. R. Evid. 561 bars the testimony.
+own:academic	The scale was reliable (α = .77).
+own:reviews	★☆☆☆☆ Okay.
+own:medical	Give 1 mg/kg IV every 10 hrs.
+own:forum	Mac &amp; pepper ftw
+own:medical	Heart rate was 100 bpm and temp 98.3°F.
+own:legal	See Jones v. Garcia, 503 S. Ct. 991, 983 (9th Cir. 2017).
+own:reviews	Got it for $71.49 on sale.
+own:medical	Blood pressure was 124/98 mmHg.
+own:academic	t(385) = 2.40, p = .03, d = 0.70.
+own:forum	Salt &amp; pepper forever
+own:academic	As Okafor et al. (1998) found, the effect replicates [32].
+own:academic	t(43) = 3.34, p > .05, d = 0.92.
+own:academic	Results are shown in refs. [12–24].
+own:reviews	I'm 6'9" and 187 lbs; the L fits well.
+own:code	Open package.json and change line 14.
+own:legal	Section 29(a)(2) does not apply here.
+own:academic	(Kim & Müller, 2021; Patel, 2015)
+own:reviews	Battery lasts 18 hrs w/ the screen on.
+own:legal	See Jones v. Doe, 509 N.E.3d 746, 402 (D. Del. 2006).
+own:reviews	Got it for $562.99 on sale.
+own:academic	OR = 2.6 (95% CI 1.6–5.5).
+own:medical	Patients took 338 g of semaglutide twice daily.
+own:forum	honestly that is wild
+own:academic	The scale was reliable (α = .70).
+own:academic	Mean age was 43.6 years (SD = 10.4).
+own:reviews	Got it for $826.49 on sale.
+own:medical	The vaccine was 56% effective (95% CI 36-98%).
+own:academic	As Chen et al. (1998) found, the effect replicates [38].
+own:medical	About 3 in 97 adults have the condition.
+own:medical	About 7 in 14 adults have the condition.
+own:forum	R &amp; roll forever
+own:legal	Under 14 U.S.C. § 6071(d), the agency must act within 41 days.
+own:medical	Blood pressure was 165/105 mmHg.
+own:reviews	Galaxy S24 Ultra: 2/5. Worth it.
+own:legal	The jury awarded $72.1 million in compensatory damages.
+own:academic	β = -0.87, SE = 0.14, p < 0.05.
+own:reviews	39GB RAM, 1TB SSD, Wi-Fi 7.
+own:academic	Mean age was 58.3 years (SD = 6.9).
+own:code	The backend uses PyTorch and the frontend uses Three.js.
+own:legal	Section 26(a)(1) does not apply here.
+own:legal	Fed. R. Evid. 803 bars the testimony.
+own:legal	Fed. R. Evid. 515 bars the testimony.
+own:reviews	Kindle Paperwhite: 2/5. Love it!
+own:forum	w/ a 401k it's fine
+own:legal	The jury awarded $31.7 million in compensatory damages.
+own:medical	The X-ray showed a 8.3 cm mass.
+own:forum	w/o the u.s. version it's way better
+own:medical	Cases rose 60% in L.A. County, the WHO said.
+own:legal	Section 29(b)(4) does not apply here.
+own:code	Press Cmd+K to quit.
+own:code	Three.js 18.4 adds a memory leak.
+own:legal	See United States v. Apple Inc., 537 F.3d 265, 665 (5th Cir. 2020).
+own:academic	t(172) = 1.57, p = 0.012, d = 0.24.
+own:reviews	UPDATE (2/1): support sent a new one.
+own:medical	The CT scan showed a 5.0 cm mass.
+own:legal	The parties dispute ¶ 27 of the complaint.
+own:legal	Miller, No. 24-cv-1600 (D. Colo. 2018).
+own:reviews	The 14.8" display is washed out.
+own:medical	The vaccine was 52% effective (95% CI 32-99%).
+own:academic	The difference was significant (p = 0.012).
+own:academic	Mean age was 20.1 years (SD = 12.7).
+own:code	It runs on EC2 with 18 vCPUs and 166 GB RAM.
+own:academic	Results are shown in refs. [20–25].
+own:legal	The jury awarded $49.3 million in compensatory damages.
+own:code	D3.js 6.9 fixes async support.
+own:academic	Results are shown in refs. [11–22].
+own:medical	Blood pressure was 141/71 mmHg.
+own:forum	been using it for 11 mos and love it
+own:medical	Cases rose 33% in the U.S., the FDA said.
+own:code	ASP.NET 6.2 fixes Windows on ARM.
+own:legal	United States, No. 19-cv-1593 (D. Minn. 2022).
+own:legal	Id. at 712.
+own:forum	been using it for 4 wks and no complaints
+own:medical	Cases rose 54% in the U.K., the CDC said.
+own:reviews	Battery lasts 6 hrs with Wi-Fi on.
+own:reviews	UPDATE (8/15): still going strong.
+own:forum	bc my ex it's pointless
+own:legal	See Texas v. United States, 111 S. Ct. 895, 195 (S.D.N.Y. 2009).
+own:reviews	I'm 6'2" and 205 lbs; the S fits well.
+own:forum	Rock &amp; B ftw
+own:legal	The court granted the motion on Jan. 26, 2023.
+own:medical	The ultrasound showed a 7.1 cm mass.
+own:medical	The MRI showed a 7.1 cm mass.
+own:code	Vue.js 21.4 deprecates the old API.
+own:code	Vue.js 21.9 drops a memory leak.
+own:reviews	Got it for $758.99 on sale.
+own:academic	β = 0.17, SE = 0.24, p < .001.
+own:forum	R &amp; B forever
+own:legal	Section 26(c)(2) does not apply here.
+own:academic	As Chen et al. (2010) found, the effect replicates [22].
+own:medical	About 3 in 70 adults have the condition.
+own:forum	bc ads it's worse
+own:reviews	23GB RAM, 256GB SSD, Wi-Fi 6E.
+own:academic	The scale was reliable (α = .86).
+own:code	Open setup.cfg and change line 218.
+own:legal	Id. at 274.
+own:medical	Her A1C was 9.8% and her LDL was 194 mg/dL.
+own:reviews	Got it for $144.99 on sale.
+own:forum	lmao this is so true
+own:academic	β = -0.25, SE = 0.25, p = 0.012.
+own:medical	Blood pressure was 156/66 mmHg.
+own:medical	Her A1C was 7.6% and her LDL was 211 mg/dL.
+own:reviews	Battery lasts 16 hrs with GPS on.
+own:reviews	53GB RAM, 1TB SSD, BT 5.3.
+own:legal	Under 45 U.S.C. § 5364(e), the agency must act within 126 days.
+own:code	.NET 19.0 deprecates a memory leak.
+own:code	Open main.py and change line 227.
+own:legal	Under 45 U.S.C. § 875(d), the agency must act within 170 days.
+own:medical	The vaccine was 52% effective (95% CI 31-99%).
+own:reviews	35GB RAM, 256GB SSD, BT 5.3.
+own:medical	The vaccine was 80% effective (95% CI 44-99%).
+own:legal	See United States v. Doe, 343 S. Ct. 910, 95 (S.D.N.Y. 2003).
+own:code	It runs on GKE with 39 vCPUs and 140 GB RAM.
+own:academic	(Kim & Garcia, 1999; O'Brien, 2011)
+own:code	F# 13.3 fixes the old API.
+own:medical	Her A1C was 5.7% and her LDL was 84 mg/dL.
+own:academic	As Smith et al. (2020) found, the effect replicates [24].
+own:reviews	Got it for $199.99 on sale.
+own:legal	The jury awarded $4.6 million in compensatory damages.
+own:academic	See Fig. 6c and Table 4.
+own:reviews	Battery lasts 11 hrs w/ the screen on.
+own:academic	(Smith & Smith, 2017; Smith, 1991)
+own:legal	Section 14(c)(4) does not apply here.
+own:code	The v2 endpoint /api/users returns HTTP 201.
+own:reviews	The 14.1" display is bright.
+own:academic	See Fig. 1b and Table 2.
+own:medical	Patients took 166 mg/kg of lisinopril twice daily.
+own:legal	Under 19 U.S.C. § 2350(e), the agency must act within 149 days.
+own:legal	Roe, No. 22-cv-6101 (D. Mass. 2024).
+own:academic	We surveyed n = 7,352 respondents.
+own:academic	See Fig. 7c and Table 3.
+own:medical	The trial enrolled 3,329 patients aged 43-61.
+own:reviews	I'm 6'11" and 139 lbs; the L fits well.
+own:code	The backend uses D3.js and the frontend uses Objective-C.
+own:academic	t(278) = 2.29, p = 0.012, d = 0.19.
+own:forum	ngl big mood
+own:reviews	★★★★★ Okay.
+own:code	Open data.csv and change line 259.
+own:legal	The court granted the motion on Mar. 13, 2021.
+own:medical	The vaccine was 68% effective (95% CI 49-99%).
+own:forum	been using it for 7 mos and zero regrets
+own:academic	We surveyed n = 2,378 respondents.
+own:academic	(Nguyen & Okafor, 1995; Smith, 1993)
+own:reviews	I'm 6'2" and 195 lbs; the XL fits well.
+own:code	Open server.go and change line 223.
+own:code	Press Alt+F4 to run.
+own:reviews	I'm 5'4" and 221 lbs; the L fits well.
+own:legal	The court granted the motion on Oct. 6, 2022.
+own:code	The backend uses C# and the frontend uses .NET.
+own:legal	The jury awarded $9.5 million in compensatory damages.
+own:academic	β = 0.17, SE = 0.05, p < 0.05.
+own:reviews	★★☆☆☆ Great.
+own:legal	See Doe v. Apple Inc., 120 A.3d 665, 86 (5th Cir. 1991).
+own:academic	Mean age was 37.7 years (SD = 4.0).
+own:code	Open app.tsx and change line 81.
+own:medical	Cases rose 89% in the U.K., the WHO said.
+own:forum	been using it for 6 yrs and no complaints
+own:academic	As Garcia et al. (2006) found, the effect replicates [9].
+own:code	The backend uses Next.js and the frontend uses .NET.
+own:academic	As Patel et al. (2008) found, the effect replicates [15].
+own:academic	We surveyed n = 7,739 respondents.
+own:medical	Her A1C was 10.1% and her LDL was 217 mg/dL.
+own:code	It runs on EC2 with 8 vCPUs and 86 GB RAM.
+own:code	Set DEBUG=3000 in .env.
+own:academic	Mean age was 36.5 years (SD = 7.7).
+own:legal	Id. at 726.
+own:code	Node.js 13.5 fixes the old API.
+own:forum	Rock &amp; roll is underrated
+own:legal	Under 33 U.S.C. § 9641(c), the agency must act within 70 days.
+own:legal	Under 15 U.S.C. § 1315(a), the agency must act within 64 days.
+own:reviews	The 17.7" display is washed out.
+own:academic	(Smith & Müller, 1997; Müller, 2007)
+own:code	Open config.yaml and change line 136.
+own:medical	The trial enrolled 5,093 patients aged 20-61.
+own:reviews	I'm 5'9" and 178 lbs; the S fits well.
+own:academic	As Garcia et al. (2015) found, the effect replicates [59].
+own:reviews	I'm 6'8" and 186 lbs; the XL fits well.
+own:legal	Miller, No. 23-cv-3844 (D. Minn. 2018).
+own:forum	tbh this is so true
+own:code	Three.js 2.6 fixes Windows on ARM.
+own:legal	See United States v. Texas, 519 U.S. 765, 979 (D.C. Cir. 2010).
+own:medical	Give 18 mg/kg IV every 4 hrs.
+own:forum	been using it for 9 wks and no complaints
+own:medical	Cases rose 29% in the U.S., the CDC said.
+own:reviews	31GB RAM, 2TB SSD, Wi-Fi 6E.
+own:academic	Results are shown in refs. [1–34].
+own:code	It runs on GKE with 41 vCPUs and 154 GB RAM.
+own:code	The backend uses k8s and the frontend uses Vue.js.
+own:legal	The jury awarded $33.8 million in compensatory damages.
+own:reviews	49GB RAM, 2TB SSD, BT 5.3.
+own:code	Set PORT=http://localhost:8080 in .env.
+own:medical	The vaccine was 82% effective (95% CI 32-99%).
+own:legal	Under 23 U.S.C. § 1925(b), the agency must act within 141 days.
+own:reviews	Battery lasts 11 hrs with ANC on.
+own:academic	As Chen et al. (2000) found, the effect replicates [47].
+own:forum	ngl this is so true
+own:reviews	The 13.1" display is sharp.
+own:legal	The parties dispute ¶ 36 of the complaint.
+own:academic	OR = 3.4 (95% CI 1.0–6.4).
+own:legal	Id. at 725.
+own:medical	The ultrasound showed a 4.1 cm mass.
+own:academic	Results are shown in refs. [2–28].
+own:medical	Blood pressure was 151/101 mmHg.
+own:academic	OR = 4.0 (95% CI 1.0–4.0).
+own:reviews	52GB RAM, 256GB SSD, BT 5.3.
+own:academic	(Nguyen & Rossi, 2015; Patel, 2008)
+own:reviews	Got it for $642.00 on sale.
+own:academic	We surveyed n = 7,785 respondents.
+own:code	Press Ctrl+S to search.
+own:reviews	★★★★★ Not bad.
+own:forum	bc ads it's way better
+own:medical	The vaccine was 70% effective (95% CI 47-98%).
+own:forum	w/ the update it's worse
+own:academic	We surveyed n = 4,540 respondents.
+own:medical	The vaccine was 56% effective (95% CI 48-98%).
+own:legal	Fed. R. Evid. 707 bars the testimony.
+own:academic	The scale was reliable (α = .72).
+own:legal	Microsoft Corp., No. 19-cv-3948 (D. Colo. 2022).
+own:academic	We surveyed n = 4,113 respondents.
+own:academic	As Rossi et al. (2014) found, the effect replicates [10].
+own:forum	Mac &amp; roll ftw
+own:academic	We surveyed n = 5,228 respondents.
+own:forum	bc my ex it's way better
+own:legal	Section 30(a)(4) does not apply here.
+own:medical	Patients took 991 mL of atorvastatin twice daily.
+own:forum	idk the u.s. gets it first
+own:legal	The court granted the motion on Oct. 7, 2017.
+own:legal	The jury awarded $93.1 million in compensatory damages.
+own:reviews	The 15.8" display is washed out.
+own:legal	Fed. R. Evid. 564 bars the testimony.
+own:legal	Id. at 579.
+own:legal	The jury awarded $55.3 million in compensatory damages.
+own:medical	Give 13 mg/kg IV every 8 hrs.
+own:legal	Id. at 321.
+own:forum	honestly big mood
+own:legal	The parties dispute ¶ 11 of the complaint.
+own:medical	Cases rose 74% in the U.K., the WHO said.
+own:medical	Cases rose 78% in the U.K., the WHO said.
+own:forum	lmao i had no idea
+own:medical	Patients took 177 mg/kg of lisinopril once daily.
+own:reviews	Got it for $143.99 on sale.
+own:forum	been using it for 4 mos and zero regrets
+own:reviews	I'm 6'2" and 123 lbs; the L fits well.
+own:reviews	UPDATE (5/20): still going strong.
+own:code	Open file.txt and change line 221.
+own:code	It runs on Lambda with 37 vCPUs and 163 GB RAM.
+own:academic	We surveyed n = 8,256 respondents.
+own:medical	The vaccine was 93% effective (95% CI 41-99%).
+own:medical	Cases rose 67% in the U.S., the CDC said.
+own:legal	Section 12(c)(2) does not apply here.
+own:medical	Give 14 mg/kg IV every 11 hrs.
+own:medical	Cases rose 39% in the U.S., the WHO said.
+own:medical	Cases rose 56% in the U.S., the WHO said.
+own:forum	PSA: how do vaccines work
+own:academic	Results are shown in refs. [18–29].
+own:medical	The ultrasound showed a 3.4 cm mass.
+own:reviews	Battery lasts 16 hrs with the screen on.
+own:legal	The parties dispute ¶ 59 of the complaint.
+own:code	Open file.txt and change line 279.
+own:legal	The parties dispute ¶ 32 of the complaint.
+own:medical	Patients took 242 mcg of ibuprofen every 8 hours.
+own:medical	Heart rate was 131 bpm and temp 98.3°F.
+own:legal	See United States v. Jones, 131 A.3d 343, 972 (N.D. Cal. 2014).
+own:medical	The CT scan showed a 3.2 cm mass.
+own:medical	Blood pressure was 169/103 mmHg.
+own:code	The backend uses Objective-C and the frontend uses D3.js.
+own:reviews	The 15.7" display is washed out.
+own:medical	Give 14 mg/kg IV every 12 hrs.
+own:legal	Id. at 140.
+own:legal	Under 40 U.S.C. § 5374(b), the agency must act within 146 days.
+own:academic	Results are shown in refs. [8–21].
+own:academic	The scale was reliable (α = .80).
+own:code	The backend uses C# and the frontend uses Next.js.
+own:medical	Blood pressure was 114/76 mmHg.
+own:code	The v3 endpoint /api/users returns HTTP 200.
+own:legal	Under 17 U.S.C. § 9716(b), the agency must act within 125 days.
+own:code	Open main.py and change line 196.
+own:reviews	UPDATE (1/17): still going strong.
+own:academic	We surveyed n = 7,754 respondents.
+own:reviews	Roku Ultra: 4/5. Solid buy.
+own:legal	Under 10 U.S.C. § 6730(d), the agency must act within 55 days.
+own:academic	See Fig. 7a and Table 1.
+own:reviews	UPDATE (9/21): it died.
+own:legal	The jury awarded $6.2 million in compensatory damages.
+own:academic	t(320) = 5.70, p = .21, d = 0.77.
+own:medical	The CT scan showed a 8.0 cm mass.
+own:medical	Heart rate was 141 bpm and temp 101.3°F.
+own:reviews	The 16.4" display is washed out.
+own:medical	Give 11 mg/kg IV every 10 hrs.
+own:legal	The jury awarded $43.2 million in compensatory damages.
+own:medical	The vaccine was 69% effective (95% CI 46-99%).
+own:forum	b/c the u.s. version it's pointless
+own:academic	(Okafor & Müller, 2007; Smith, 1994)
+own:academic	Results are shown in refs. [19–35].
+own:reviews	16GB RAM, 512GB SSD, BT 5.3.
+own:code	It runs on Azure with 43 vCPUs and 42 GB RAM.
+own:reviews	UPDATE (1/22): it died.
+own:code	Set API_URL=3000 in .env.
+own:academic	See Fig. 7c and Table 4.
+own:reviews	UPDATE (6/19): it died.
+own:medical	Her A1C was 8.6% and her LDL was 216 mg/dL.
+own:code	The backend uses C# and the frontend uses React.
+own:reviews	Battery lasts 24 hrs w/ ANC on.
+own:legal	The jury awarded $7.6 million in compensatory damages.
+own:code	React 13.3 fixes async support.
+own:academic	OR = 4.5 (95% CI 2.6–3.4).
+own:legal	Section 25(b)(3) does not apply here.
+own:medical	Her A1C was 6.6% and her LDL was 126 mg/dL.
+own:reviews	Battery lasts 10 hrs w/ the screen on.
+own:academic	(O'Brien & Chen, 2002; Müller, 2004)
+own:legal	Fed. R. Evid. 730 bars the testimony.
+own:code	Vue.js 13.4 adds async support.
+own:code	It runs on Lambda with 4 vCPUs and 75 GB RAM.
+own:medical	Blood pressure was 134/82 mmHg.
+own:code	It runs on EC2 with 26 vCPUs and 49 GB RAM.
+own:legal	Id. at 505.
+own:legal	Roe, No. 21-cv-9152 (D. Md. 2022).
+own:legal	Section 12(a)(2) does not apply here.
+own:legal	See Miller v. Garcia, 483 S. Ct. 789, 406 (D.C. Cir. 1993).
+own:reviews	I'm 6'3" and 129 lbs; the L fits well.
+own:medical	The ultrasound showed a 5.2 cm mass.
+own:code	.NET 15.5 adds a memory leak.
+own:code	F# 7.4 fixes the old API.
+own:academic	OR = 3.9 (95% CI 2.9–4.2).
+own:medical	Blood pressure was 130/78 mmHg.
+own:legal	Fed. R. Evid. 801 bars the testimony.
+own:reviews	★★★★☆ Not bad.
+own:reviews	Sony WH-1000XM5: 4/5. Overpriced.
+own:legal	Miller, No. 23-cv-8292 (D. Minn. 2018).
+own:legal	Microsoft Corp., No. 23-cv-8716 (D. Mass. 2023).
+own:medical	Give 17 mg/kg IV every 8 hrs.
+own:medical	Cases rose 67% in the U.S., the WHO said.
+own:reviews	UPDATE (1/11): still going strong.
+own:medical	The vaccine was 65% effective (95% CI 44-99%).
+own:reviews	I'm 6'3" and 177 lbs; the XL fits well.
+own:forum	imo that is wild
+own:medical	Heart rate was 78 bpm and temp 102.3°F.
+own:reviews	Got it for $922.99 on sale.
+own:reviews	Got it for $728.00 on sale.
+own:academic	Mean age was 67.7 years (SD = 5.7).
+own:medical	Her A1C was 6.6% and her LDL was 182 mg/dL.
+own:legal	Fed. R. Evid. 723 bars the testimony.
+own:medical	Her A1C was 7.7% and her LDL was 157 mg/dL.
+own:medical	Her A1C was 10.9% and her LDL was 91 mg/dL.
+own:forum	Rock &amp; white is underrated

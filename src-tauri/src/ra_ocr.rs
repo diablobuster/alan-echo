@@ -594,23 +594,90 @@ fn para_gap(a: &Rect, b: &Rect) -> bool {
     b.y < a.y || b.y - (a.y + a.h) > 0.9 * a.h.max(b.h)
 }
 
+/// A line is a heading when its median word height is at least this many times the
+/// page's median word height.
+const HEADING_RATIO: f64 = 1.3;
+/// A heading line has at most this many words.
+const HEADING_MAX_WORDS: usize = 12;
+
+/// Median of `v` (0.0 when empty or when a value is not finite).
+fn median(mut v: Vec<f64>) -> f64 {
+    if v.is_empty() || v.iter().any(|x| !x.is_finite()) {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    v.get(v.len() / 2).copied().unwrap_or(0.0)
+}
+
+/// Which lines are headings: tall (>= 1.3x the page's median word height, taken over
+/// lines of 3+ words) and short (<= 12 words).
+fn heading_lines(words: &[OcrWord], runs: &[(std::ops::Range<usize>, Rect)]) -> Vec<bool> {
+    let hs = |r: &std::ops::Range<usize>| -> Vec<f64> {
+        words.get(r.clone()).unwrap_or(&[]).iter().map(|w| w.rect.h).collect()
+    };
+    let body: Vec<f64> = runs.iter().filter(|(r, _)| r.len() >= 3).flat_map(|(r, _)| hs(r)).collect();
+    let page = median(body);
+    runs.iter()
+        .map(|(r, _)| page > 0.0 && r.len() <= HEADING_MAX_WORDS && median(hs(r)) >= HEADING_RATIO * page)
+        .collect()
+}
+
+/// True for a word that opens a list item: a bullet glyph (alone or glued to the
+/// text) or an item number like `1.` `12)` `a)` `iv.`.
+fn is_item_start(w: &str) -> bool {
+    let w = w.trim();
+    let mut cs = w.chars();
+    let Some(first) = cs.next() else { return false };
+    if matches!(first, '\u{2022}' | '\u{25E6}' | '\u{25AA}' | '\u{2023}' | '\u{25CF}' | '\u{25CB}' | '\u{25A0}' | '\u{25AB}' | '\u{B7}') {
+        return true;
+    }
+    if matches!(first, '\u{2013}' | '-' | '*') {
+        return cs.next().is_none();
+    }
+    let Some(body) = w.strip_suffix('.').or_else(|| w.strip_suffix(')')) else { return false };
+    let n = body.chars().count();
+    ((1..=3).contains(&n) && body.chars().all(|c| c.is_ascii_digit()))
+        || (n == 1 && body.chars().all(|c| c.is_ascii_lowercase()))
+        || ((2..=4).contains(&n) && body.chars().all(|c| matches!(c, 'i' | 'v' | 'x' | 'l' | 'c')))
+}
+
 /// Raw tokens shaped like UIA's for `ra_text::normalize`, one per word: `"word "`;
 /// a paragraph's last word ends in `"\n"`; a soft line wrap stays `"word "`, except a
 /// line-end `"hyphen-"` keeps no space so normalize joins it with the next word.
+/// A heading line (tall text) starts with a heading marker and ends in `"\n"`, the
+/// line after it starts with an after-heading marker, and a list item's line (bullet
+/// or number first) always follows a `"\n"`.
 pub(crate) fn tokens(words: &[OcrWord]) -> Vec<String> {
+    use crate::ra_struct::{mark, Brk};
     let mut out = Vec::with_capacity(words.len());
     let runs = line_runs(words);
+    let heads = heading_lines(words, &runs);
+    let is_head = |k: usize| heads.get(k).copied().unwrap_or(false);
+    let item_at = |k: usize| {
+        runs.get(k).and_then(|(r, _)| words.get(r.start)).is_some_and(|w| is_item_start(&w.text))
+    };
     for (k, (range, b)) in runs.iter().enumerate() {
         for i in range.clone() {
             let t = words[i].text.trim();
             let tok = if i + 1 < range.end {
                 format!("{t} ")
-            } else if runs.get(k + 1).map_or(true, |(_, nb)| para_gap(b, nb)) {
+            } else if runs.get(k + 1).map_or(true, |(_, nb)| para_gap(b, nb))
+                || is_head(k)
+                || is_head(k + 1)
+                || item_at(k + 1)
+            {
                 format!("{t}\n")
             } else if t.len() > 1 && t.ends_with('-') {
                 t.to_string()
             } else {
                 format!("{t} ")
+            };
+            let tok = if i == range.start && is_head(k) {
+                format!("{}{tok}", mark(Brk::Heading(0)))
+            } else if i == range.start && k > 0 && is_head(k - 1) {
+                format!("{}{tok}", mark(Brk::AfterHeading))
+            } else {
+                tok
             };
             out.push(tok);
         }
@@ -1162,6 +1229,72 @@ mod tests {
         assert!(!rd.at_end(), "an undelivered end is not the end");
         assert_eq!(rd.more(), Ok(vec![]));
         assert!(rd.at_end());
+    }
+
+    #[test]
+    fn tall_short_lines_are_headings() {
+        use crate::ra_struct::{mark, Brk};
+        let mut words = vec![
+            wd("Chapter", 0, r(10.0, 10.0, 90.0, 30.0)),
+            wd("One", 0, r(110.0, 10.0, 60.0, 30.0)),
+        ];
+        // body lines (3 words, height 20), no vertical gap after the heading
+        for (l, y) in [(1usize, 42.0), (2, 66.0)] {
+            for (j, t) in ["The", "cat", "sat"].iter().enumerate() {
+                words.push(wd(t, l, r(10.0 + 40.0 * j as f64, y, 30.0, 20.0)));
+            }
+        }
+        let t = tokens(&words);
+        assert_eq!(t[0], format!("{}Chapter ", mark(Brk::Heading(0))));
+        assert_eq!(t[1], "One\n");
+        assert_eq!(t[2], format!("{}The ", mark(Brk::AfterHeading)));
+        assert_eq!(t[4], "sat ", "soft wrap in the body stays soft");
+        assert_eq!(t.len(), words.len());
+        assert!(!t[5].starts_with(crate::ra_struct::MARK));
+    }
+
+    #[test]
+    fn long_or_uniform_lines_are_not_headings() {
+        assert!(tokens(&sample()).iter().all(|t| !t.starts_with(crate::ra_struct::MARK)));
+        // tall but 13 words: big body text, not a heading
+        let mut words = Vec::new();
+        for j in 0..13 {
+            words.push(wd("w", 0, r(10.0 * j as f64, 10.0, 8.0, 40.0)));
+        }
+        for j in 0..3 {
+            words.push(wd("x", 1, r(10.0 * j as f64, 52.0, 8.0, 20.0)));
+        }
+        assert!(tokens(&words).iter().all(|t| !t.starts_with(crate::ra_struct::MARK)));
+    }
+
+    #[test]
+    fn list_items_break_without_a_gap() {
+        let lines = [
+            vec!["Shopping", "list", "today"],
+            vec!["\u{2022}", "milk", "now"],
+            vec!["2.", "eggs", "now"],
+            vec!["and", "more", "text"],
+        ];
+        let mut words = Vec::new();
+        for (l, ws) in lines.iter().enumerate() {
+            for (j, t) in ws.iter().enumerate() {
+                words.push(wd(t, l, r(10.0 + 40.0 * j as f64, 10.0 + 22.0 * l as f64, 30.0, 20.0)));
+            }
+        }
+        let t = tokens(&words);
+        assert_eq!(t[2], "today\n");
+        assert_eq!(t[5], "now\n");
+        assert_eq!(t[8], "now ", "a plain line after a list item is a soft wrap");
+    }
+
+    #[test]
+    fn item_start_shapes() {
+        for w in ["\u{2022}", "\u{25E6}", "\u{25AA}", "\u{2023}", "\u{25CF}", "\u{25CB}", "\u{25A0}", "\u{25AB}", "\u{2013}", "-", "*", "\u{B7}", "1.", "12)", "a)", "iv."] {
+            assert!(is_item_start(w), "{w}");
+        }
+        for w in ["", "a", "1", "The", "end.", "Mr.", "-ish", "1234.", "A."] {
+            assert!(!is_item_start(w), "{w}");
+        }
     }
 
     #[test]

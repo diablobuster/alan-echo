@@ -471,6 +471,8 @@ struct UiaRead {
     /// When the scroller was last (re)resolved: a failed query re-resolves it at most
     /// once a second (Chrome rebuilds its tree on single-page apps).
     scroller_at: Option<Instant>,
+    /// Page structure reads at block starts (natural-reading spec §5).
+    structure: structure::Reader,
 }
 
 impl UiaRead {
@@ -901,7 +903,7 @@ fn hover(st: &mut State, x: i32, y: i32) -> Vec<Rect> {
         };
     }
     match word_at(st, x, y) {
-        Ok((_, r)) => r,
+        Ok((_, r, _)) => r,
         // Chromium: no OCR (see `choose_source`), so no OCR hover box either
         Err(e) if e == NO_TEXT && !st.target.chromium && ocr_ok_at(st, x, y) => {
             ra_ocr::hover_cached(&mut st.ocr_hover, root, x, y).unwrap_or_default()
@@ -1081,7 +1083,11 @@ fn in_document(walker: &IUIAutomationTreeWalker, el: &IUIAutomationElement) -> b
 }
 
 /// The validated word range under the point and its rects.
-fn word_at(st: &mut State, x: i32, y: i32) -> Result<(IUIAutomationTextRange, Vec<Rect>), String> {
+fn word_at(
+    st: &mut State,
+    x: i32,
+    y: i32,
+) -> Result<(IUIAutomationTextRange, Vec<Rect>, IUIAutomationTextPattern), String> {
     let (tp, elem) = text_pattern_at(st, x, y)?;
     // Rule 3: ignore points outside the text element (browser chrome).
     if !contains(std::slice::from_ref(&elem), x as f64, y as f64) {
@@ -1094,7 +1100,7 @@ fn word_at(st: &mut State, x: i32, y: i32) -> Result<(IUIAutomationTextRange, Ve
     if !contains(&rects, x as f64, y as f64) {
         return Err("click is not on a word".into());
     }
-    Ok((r, rects))
+    Ok((r, rects, tp))
 }
 
 /// Starts a new read in `st.read` (the caller saved and cleared the old one), from the
@@ -1147,7 +1153,7 @@ fn pick(st: &mut State, x: i32, y: i32, retry: bool) -> Result<Vec<String>, Stri
 fn pick_uia(st: &mut State, x: i32, y: i32, retry: bool) -> Result<(Read, Vec<String>), String> {
     // Rule 1: Chromium's first query can come back empty — retry once, but only for
     // "nothing there"; rule 2/3 rejections are final.
-    let (r, _) = match word_at(st, x, y) {
+    let (r, _, tp) = match word_at(st, x, y) {
         Ok(v) => v,
         Err(e) if e == NO_TEXT && retry => {
             std::thread::sleep(Duration::from_millis(150));
@@ -1163,13 +1169,15 @@ fn pick_uia(st: &mut State, x: i32, y: i32, retry: bool) -> Result<(Read, Vec<St
         hwnd: st.target.hwnd,
         chromium: st.target.chromium,
         ranges: vec![r.clone()],
-        cursor: Some(r),
+        cursor: Some(r.clone()),
+        structure: structure::Reader::new(&st.uia, st.target.chromium, Some(tp)),
         ..Default::default()
     };
+    let mut batch = structure::Batch::new(FIRST_BATCH, None);
     let mut out = Vec::with_capacity(FIRST_BATCH);
-    out.push(first);
+    out.push(batch.token(&mut read.structure, &r, first));
     // a failed forward read keeps the clicked word; more() continues from the cursor
-    out.extend(read_forward(&mut read, FIRST_BATCH - 1).unwrap_or_default());
+    out.extend(read_forward_in(&mut read, FIRST_BATCH - 1, &mut batch).unwrap_or_default());
     Ok((Read::Uia(read), out))
 }
 
@@ -1177,6 +1185,23 @@ fn pick_uia(st: &mut State, x: i32, y: i32, retry: bool) -> Result<(Read, Vec<St
 /// `Ok(empty)` only at the true end of the text. A UIA error before any token is read
 /// is `Err` (retryable); after some tokens it ends the batch early (`Ok(partial)`).
 fn read_forward(read: &mut UiaRead, n: usize) -> Result<Vec<String>, String> {
+    // the token before this batch decides whether its first token starts a block
+    let t = Instant::now();
+    let prev = match (read.structure.mode, read.cursor.as_ref()) {
+        (structure::Mode::Off, _) | (_, None) => None,
+        (_, Some(c)) => unsafe { c.GetText(-1) }.ok().map(|b| b.to_string()),
+    };
+    let mut batch = structure::Batch::new(n, prev);
+    if read.structure.mode != structure::Mode::Off {
+        batch.charge(t.elapsed());
+    }
+    read_forward_in(read, n, &mut batch)
+}
+
+/// `read_forward` with the batch's structure state (the pick shares one with its
+/// first token). Block-start tokens get a structure marker (spec §5); the marker
+/// changes no token count or source index.
+fn read_forward_in(read: &mut UiaRead, n: usize, batch: &mut structure::Batch) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let Some(cur) = read.cursor.as_ref() else {
         return Err("no current read".into());
@@ -1201,9 +1226,19 @@ fn read_forward(read: &mut UiaRead, n: usize) -> Result<Vec<String>, String> {
         let text = unsafe { keep.GetText(-1) }
             .map(|b| b.to_string())
             .unwrap_or_default();
+        let text = batch.token(&mut read.structure, &keep, text);
         read.ranges.push(keep.clone());
         read.cursor = Some(keep);
         out.push(text);
+    }
+    if batch.checked > 0 {
+        log::debug!(
+            "read-aloud: structure: {} of {} block starts marked in {} ms{}",
+            batch.marked,
+            batch.checked,
+            batch.spent().as_millis(),
+            if batch.over { " (budget reached)" } else { "" }
+        );
     }
     Ok(out)
 }
@@ -1639,6 +1674,9 @@ mod tests {
         assert!(read.at_end_of_screen());
     }
 }
+
+#[path = "ra_uia_struct.rs"]
+mod structure;
 
 #[cfg(test)]
 #[path = "ra_uia_manual_tests.rs"]

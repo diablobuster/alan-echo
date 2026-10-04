@@ -1,0 +1,21 @@
+# Annual Energy Use Report
+
+## Summary
+The building used eleven percent less electricity this year than last year. Most of the savings came from new lighting and a change to the heating schedule. Gas use stayed about the same.
+
+## Monthly Electricity Use
+Electricity use peaked in July during the long heat wave and was lowest in April. The new lights were installed in March, and every month after that came in below the same month of the year before.
+
+Caption: Figure two. Monthly electricity use in kilowatt hours, this year compared with last year.
+
+The heating change moved the start time from five in the morning to six thirty. Staff did not report any drop in comfort, and the boiler ran for about four hundred fewer hours across the winter.
+
+## Recommendations
+1. Add motion sensors to the meeting rooms on the second floor
+2. Replace the two oldest rooftop fans before next summer
+3. Review the cooling schedule for weekends
+
+> Small changes to schedules saved almost as much as the new equipment.
+
+## Next Steps
+The facilities team will price the motion sensors this quarter and report back in the autumn.

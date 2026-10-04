@@ -2780,3 +2780,7 @@ mod session_tests {
 #[cfg(test)]
 #[path = "ra_gapless_bench.rs"]
 mod gapless_bench;
+
+#[cfg(test)]
+#[path = "ra_natural_bench.rs"]
+mod natural_bench;

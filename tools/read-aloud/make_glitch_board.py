@@ -1,6 +1,8 @@
 """Listening board for the Read Aloud glitch hunt (phase 3 spec §6).
 
 Builds one HTML page Alex can open and listen through:
+  R3. Round 3: 25 legal / medical / academic / forum / review / code lines at 2.2x,
+     before round 3 (0af0970) vs after, plus the follow-mode fix summary;
   R2. Round 2: 25 finance / tech / politics / sports / weather / recipe lines at 2.2x,
      before round 2 (748873a) vs after, chunks back to back as the player plays them;
   0. Round 1: 20 acronym / emphasis / unit lines, before vs after round 1;
@@ -97,6 +99,10 @@ def main():
     ap.add_argument("--r2-before", default=os.path.join(TEMP, "r2-before"),
                     help="round 2 WAVs at 2.2x from the code before round 2 (ids from board_round2.tsv)")
     ap.add_argument("--r2-after", default=os.path.join(TEMP, "r2-after"), help="round 2 WAVs at 2.2x from this branch")
+    ap.add_argument("--r3-before", default=os.path.join(TEMP, "r3-before"),
+                    help="round 3 WAVs at 2.2x from the code before round 3 (ids from board_round3.tsv)")
+    ap.add_argument("--r3-after", default=os.path.join(TEMP, "r3-after"), help="round 3 WAVs at 2.2x from this branch")
+    ap.add_argument("--r3-notes", default="", help="optional JSON list of [label, value] rows for the round 3 summary")
     a = ap.parse_args()
     random.seed(7)
 
@@ -110,6 +116,9 @@ def main():
     r2 = load_tsv(os.path.join(HERE, "board_round2.tsv"))
     r2b = heard_for(a.r2_before, list(r2), a.whisper_port)
     r2a = heard_for(a.r2_after, list(r2), a.whisper_port)
+    r3 = load_tsv(os.path.join(HERE, "board_round3.tsv"))
+    r3b = heard_for(a.r3_before, list(r3), a.whisper_port)
+    r3a = heard_for(a.r3_after, list(r3), a.whisper_port)
 
     sample = load_tsv(os.path.join(a.hunt, "sample.tsv"))
     trans = {}
@@ -139,16 +148,37 @@ def main():
         o = [f"<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
              f"<title>Read Aloud Listening Board</title><style>{CSS}</style></head><body><main>",
              "<h1>Read Aloud listening board</h1>",
-             f"<p class=lede>Glitch hunt, round 2 corpus (finance, tech, politics, government text). {len(glitch)} residual round-trip mismatches in {len(bad_ids)} sentences, "
+             f"<p class=lede>Glitch hunt, round 3 corpus (legal, medical, academic, forum, reviews, code-ish text). {len(glitch)} residual round-trip mismatches in {len(bad_ids)} sentences, "
              f"{len(pauses)} long pauses, 20 random clean sentences, and 15 before/after showcase lines. "
              "Voice: Kokoro af_heart on CPU at 1.0x. &ldquo;Heard&rdquo; is what Whisper large-v3 wrote down.</p>",
-             "<nav><a href='#round2'>Round 2</a><a href='#round1'>Round 1</a><a href='#show'>Before / after</a><a href='#glitch'>Residual glitches</a><a href='#pause'>Pauses</a><a href='#good'>Clean sentences</a></nav>"]
+             "<nav><a href='#round3'>Round 3</a><a href='#round2'>Round 2</a><a href='#round1'>Round 1</a><a href='#show'>Before / after</a><a href='#glitch'>Residual glitches</a><a href='#pause'>Pauses</a><a href='#good'>Clean sentences</a></nav>"]
         if a.gate and os.path.exists(a.gate):
             g = json.load(open(a.gate, encoding="utf-8"))
             o.append("<h2>Gate</h2><div class=scroll><table><tr><th>Measure</th><th>Baseline</th><th>After tasks 1-5</th><th>After fix rounds</th><th>Target</th></tr>")
             for r in g:
                 o.append("<tr>" + "".join(f"<td class=num>{html.escape(str(x))}</td>" for x in r) + "</tr>")
             o.append("</table></div>")
+        o.append("<h2 id=round3>Round 3: follow mode, legal, medical, academic, forum, reviews, code</h2>"
+                 "<p class=lede><b>Follow mode</b> no longer turns itself off in Chrome: the page moving under the word "
+                 "(ads, lazy images, Chrome's own scroll anchoring, Echo's own smooth scroll) only turns follow off when "
+                 "there is real scroll evidence (a wheel or drag over the page, or the page's scroll offset changing the "
+                 "way a scroll does). No audio for that; see round-3-report.md. Below: 25 text lines at <b>2.2x</b>, "
+                 "before round 3 (0af0970) vs after. Listen for: paragraph and section signs, Greek letters in "
+                 "statistics, forum shorthand (ngl, tbh, idk, imo), C sharp, file names, URL paths, settings, "
+                 "bpm / mcg / kg per square meter, party tags after Rep. / Sen., and megabytes vs millibars.</p>")
+        if a.r3_notes and os.path.exists(a.r3_notes):
+            o.append("<div class=scroll><table><tr><th>Measure</th><th>Value</th></tr>")
+            for k, v in json.load(open(a.r3_notes, encoding="utf-8")):
+                o.append(f"<tr><td>{html.escape(str(k))}</td><td class=num>{html.escape(str(v))}</td></tr>")
+            o.append("</table></div>")
+        o.append("<div class=scroll><table><tr><th>Line</th><th>Before (0af0970)</th><th>After (round 3)</th></tr>")
+        for i, t in r3.items():
+            sb, sa = seconds(a.r3_before, i), seconds(a.r3_after, i)
+            lb = f" <span class=muted>{sb:.1f} s</span>" if sb else ""
+            la = f" <span class=muted>{sa:.1f} s</span>" if sa else ""
+            o.append(f"<tr><td>{html.escape(t)}</td><td>{audio(link('r3-before', i))}{lb}<div class=muted>{html.escape(r3b.get(i, ''))}</div></td>"
+                     f"<td>{audio(link('r3-after', i))}{la}<div class=muted>{html.escape(r3a.get(i, ''))}</div></td></tr>")
+        o.append("</table></div>")
         tb = sum(x for x in (seconds(a.r2_before, i) for i in r2) if x)
         ta = sum(x for x in (seconds(a.r2_after, i) for i in r2) if x)
         o.append("<h2 id=round2>Round 2: finance, tech, politics, sports, weather, recipes</h2><p class=lede>25 lines at "
@@ -205,7 +235,8 @@ def main():
 
     def file_url(kind, i):
         d = {"before": a.before, "after": a.after, "rt": os.path.join(TEMP, "rt"),
-             "r1-before": a.r1_before, "r1-after": a.r1_after, "r2-before": a.r2_before, "r2-after": a.r2_after}[kind]
+             "r1-before": a.r1_before, "r1-after": a.r1_after, "r2-before": a.r2_before, "r2-after": a.r2_after,
+             "r3-before": a.r3_before, "r3-after": a.r3_after}[kind]
         return "file:///" + os.path.abspath(os.path.join(d, f"{i}.wav")).replace("\\", "/")
 
     abs_html = page(file_url)
@@ -216,7 +247,8 @@ def main():
     board = os.path.join(HERE, "board")
     for kind, d in (("before", a.before), ("after", a.after), ("rt", os.path.join(TEMP, "rt")),
                     ("r1-before", a.r1_before), ("r1-after", a.r1_after),
-                    ("r2-before", a.r2_before), ("r2-after", a.r2_after)):
+                    ("r2-before", a.r2_before), ("r2-after", a.r2_after),
+                    ("r3-before", a.r3_before), ("r3-after", a.r3_after)):
         if not os.path.isdir(d):
             continue
         os.makedirs(os.path.join(board, kind), exist_ok=True)

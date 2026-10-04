@@ -60,6 +60,10 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
     // per word: its `brk` came from a source marker (the fallback never overrides it)
     let mut marked: Vec<bool> = Vec::new();
     let mut pending_para = false;
+    // line breaks since the last word: two or more is a blank line (always a paragraph)
+    let mut nl: usize = 0;
+    // per word: a blank line before it
+    let mut blank: Vec<bool> = Vec::new();
     // true when the previous raw token ended without whitespace (glued to the next)
     let mut prev_glued = false;
     // a source marker waiting for the next word (a marked token never glues on)
@@ -77,6 +81,7 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
         let glued = !tok.is_empty() && !tok.ends_with(char::is_whitespace);
         if t.is_empty() {
             pending_para |= breaks;
+            nl += nl_count(tok);
             prev_glued = false;
             i += 1;
             continue;
@@ -90,6 +95,7 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
                 last.src.push(i + 1);
                 let next = &raw[i + 1];
                 pending_para |= next.contains('\r') || next.contains('\n');
+                nl += nl_count(next);
                 prev_glued = !next.ends_with(char::is_whitespace);
                 i += 2;
                 continue;
@@ -107,6 +113,7 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
                     last.src.extend(from..=i);
                     last.text.push_str(t);
                     pending_para |= breaks;
+                    nl += nl_count(tok);
                     prev_glued = glued;
                     i += 1;
                     continue;
@@ -115,8 +122,10 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
         }
         // a currency or number sign after a space starts its own word (`cost $` `3`)
         if !prev_glued && is_prefix_symbol(t) {
+            blank.push(pending_para && nl >= 2 && !out.is_empty());
             push_word(&mut out, &mut marked, t, i, pending_para, &mut pending_mark);
             pending_para = breaks;
+            nl = nl_count(tok);
             prev_glued = glued;
             i += 1;
             continue;
@@ -127,6 +136,7 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
                 last.text.push_str(t);
                 last.src.push(i);
                 pending_para |= breaks;
+                nl += nl_count(tok);
                 prev_glued = glued;
                 i += 1;
                 continue;
@@ -136,13 +146,16 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
             if !has_alnum(t) && !is_dash(t) && !pending_para && !(!prev_glued && is_spoken_symbol(t)) {
                 last.text.push_str(t);
                 pending_para |= breaks;
+                nl += nl_count(tok);
                 prev_glued = glued;
                 i += 1;
                 continue;
             }
         }
+        blank.push(pending_para && nl >= 2 && !out.is_empty());
         push_word(&mut out, &mut marked, t, i, pending_para, &mut pending_mark);
         pending_para = breaks;
+        nl = nl_count(tok);
         prev_glued = glued;
         i += 1;
     }
@@ -154,8 +167,16 @@ fn normalize_lead(raw_in: &[String], lead: Lead) -> Vec<Word> {
             w.para_break_before = w.brk.is_break();
         }
     }
-    classify_blocks(&mut out, &marked, lead == Lead::Read);
+    classify_blocks(&mut out, &marked, &blank, lead == Lead::Read);
     out
+}
+
+/// Line breaks in a token ("\r\n" counts once).
+fn nl_count(t: &str) -> usize {
+    if !t.contains(['\r', '\n']) {
+        return 0;
+    }
+    t.matches('\n').count() + t.matches('\r').count() - t.matches("\r\n").count()
 }
 
 /// A new word from raw token `i`. `Word::brk`: the source's marker, else `Paragraph`
@@ -279,8 +300,19 @@ fn ends_split_word(w: &str) -> bool {
 /// the upper-quartile line) and ends a
 /// sentence (`.!?:`) before a line starting with a capital or digit, or it or the next
 /// line is a heading: short, at most 12 words, no end punctuation, after a sentence
-/// end (or first), before a capital or digit. Pure; never panics.
+/// end (or first), before a capital or digit. Pure; never panics. (The app uses
+/// `line_breaks_brk`; this yes/no view is what the line tests check.)
+#[cfg(test)]
 pub(crate) fn line_breaks(text: &str) -> Vec<bool> {
+    line_breaks_brk(text).iter().map(Option::is_some).collect()
+}
+
+/// `line_breaks`, with the structure the next block starts: `Some(brk)` when a block
+/// ends after the line, `brk` being `Heading(0)` (the next non-empty line is a
+/// heading), `AfterHeading` (this line is one), `ListItem` (the next line opens an
+/// item) or `Paragraph`; `None` for a soft wrap. Sources that decide breaks with it
+/// mark the next token, so the raw-text fallback never second-guesses them.
+pub(crate) fn line_breaks_brk(text: &str) -> Vec<Option<Brk>> {
     let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r').trim()).collect();
     let mut lens: Vec<usize> = lines.iter().filter(|l| !l.is_empty()).map(|l| l.chars().count()).collect();
     lens.sort_unstable();
@@ -304,7 +336,8 @@ pub(crate) fn line_breaks(text: &str) -> Vec<bool> {
                 && next_capital(i)
         })
         .collect();
-    (0..lines.len())
+    let is_head = |i: usize| heading.get(i).copied().unwrap_or(false);
+    let ends: Vec<bool> = (0..lines.len())
         .map(|i| {
             let l = lines.get(i).copied().unwrap_or("");
             let Some(next) = lines.get(i + 1) else { return true };
@@ -318,8 +351,22 @@ pub(crate) fn line_breaks(text: &str) -> Vec<bool> {
                 || next.is_empty()
                 || item_next
                 || (short(l) && last(i).is_some_and(ends_stop) && next_capital(i))
-                || heading.get(i).copied().unwrap_or(false)
-                || heading.get(i + 1).copied().unwrap_or(false)
+                || is_head(i)
+                || is_head(i + 1)
+        })
+        .collect();
+    (0..lines.len())
+        .map(|i| {
+            if !ends.get(i).copied().unwrap_or(true) {
+                return None;
+            }
+            let j = (i + 1..lines.len()).find(|&j| lines.get(j).is_some_and(|l| !l.is_empty()));
+            Some(match j {
+                Some(j) if is_head(j) => Brk::Heading(0),
+                Some(j) if first(j).is_some_and(opens_item) => Brk::ListItem,
+                _ if is_head(i) => Brk::AfterHeading,
+                _ => Brk::Paragraph,
+            })
         })
         .collect()
 }
@@ -342,19 +389,24 @@ pub(crate) fn line_breaks(text: &str) -> Vec<bool> {
 /// that ends no sentence or clause (`.!?:;`), outside a list item or heading, is a soft
 /// wrap (`None`; such a multi-line block is never a heading). A break after a short
 /// block (at most 4 words, no `.!?:;` end, no heading or list item) is a `Line`
-/// (signature, address). Source markers are never changed, except a marked
+/// (signature, address). `blank[i]`: a blank line came before word `i`; such a break
+/// stays a paragraph (never a soft wrap or a `Line`). Source markers are never changed, except a marked
 /// `Paragraph` opened by a bullet glyph becomes `ListItem`. Linear; never panics.
-pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], read_start: bool) {
+pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], blank: &[bool], read_start: bool) {
     let mut out: Vec<Word> = Vec::with_capacity(words.len());
     let mut out_marked: Vec<bool> = Vec::with_capacity(words.len());
-    // a lone bullet glyph waiting for its item's first word, and whether it was marked
-    let mut glyph: Option<(Word, bool)> = None;
+    // a blank line before the word: a paragraph, never a soft wrap or a `Line`
+    let mut out_blank: Vec<bool> = Vec::with_capacity(words.len());
+    // a lone bullet glyph waiting for its item's first word, whether it was marked, and
+    // whether a blank line came before it
+    let mut glyph: Option<(Word, bool, bool)> = None;
     // the brk a list item takes: a marker other than `Paragraph` stays
     let item_brk = |b: Brk, m: bool| if m && b != Brk::Paragraph { b } else { Brk::ListItem };
     for (i, mut w) in std::mem::take(words).into_iter().enumerate() {
         let mut m = marked.get(i).copied().unwrap_or(false);
+        let mut bl = blank.get(i).copied().unwrap_or(false);
         let folded = glyph.is_some();
-        if let Some((g, gm)) = glyph.take() {
+        if let Some((g, gm, gb)) = glyph.take() {
             // the item's first word takes the glyph's place
             let mut src = g.src;
             src.append(&mut w.src);
@@ -362,10 +414,11 @@ pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], read_start: bool)
             w.brk = if m && w.brk.is_break() { item_brk(w.brk, m) } else { item_brk(g.brk, gm) };
             w.para_break_before = g.para_break_before;
             m |= gm;
+            bl = gb;
         }
         let start = folded || (i == 0 && read_start) || w.brk.is_break();
         if start && is_bullet(&w.text) {
-            glyph = Some((w, m));
+            glyph = Some((w, m, bl));
             continue;
         }
         if start {
@@ -378,12 +431,14 @@ pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], read_start: bool)
         }
         out.push(w);
         out_marked.push(m);
+        out_blank.push(bl);
     }
     // a glyph with no word after it in this batch stays a word: its item may come in
     // the next batch, and its `src` is never lost
-    if let Some((g, gm)) = glyph {
+    if let Some((g, gm, gb)) = glyph {
         out.push(g);
         out_marked.push(gm);
+        out_blank.push(gb);
     }
     // soft wraps: a line break before a lowercase word, after a word that ends no
     // sentence or clause, inside a block that is no list item or heading
@@ -396,6 +451,7 @@ pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], read_start: bool)
             continue;
         }
         let soft = !out_marked.get(i).copied().unwrap_or(true)
+            && !out_blank.get(i).copied().unwrap_or(true)
             && w.brk == Brk::Paragraph
             && starts_lower(&w.text)
             && !out.get(i - 1).is_some_and(|p| ends_terminal(&p.text))
@@ -467,7 +523,8 @@ pub fn classify_blocks(words: &mut Vec<Word>, marked: &[bool], read_start: bool)
             && e - s <= SHORT_LINE_WORDS
             && !wrapped.get(s + 1..e).is_some_and(|r| r.contains(&true))
             && !out.get(e - 1).is_some_and(|w| ends_terminal(&w.text))
-            && !out_marked.get(e).copied().unwrap_or(true);
+            && !out_marked.get(e).copied().unwrap_or(true)
+            && !out_blank.get(e).copied().unwrap_or(true);
         if let (true, Some(w)) = (line, out.get_mut(e)) {
             if w.brk == Brk::Paragraph {
                 w.brk = Brk::Line;
@@ -1674,6 +1731,44 @@ mod tests {
         // a marked break is never made a Line
         let w = normalize(&["Best,\n".into(), format!("{}Daniel", ra_struct::mark(Brk::Paragraph))]);
         assert_eq!(w[1].brk, Brk::Paragraph);
+    }
+
+    /// Task 11 fix round 1: a blank line is always a paragraph, never a `Line` or a
+    /// soft wrap.
+    #[test]
+    fn a_blank_line_is_always_a_paragraph() {
+        for gap in [&["everyone,\r\n\r\n"][..], &["everyone,\n\n"], &["everyone,\n", "\n"], &["everyone,\r", "\r"], &["everyone,\r\n", " \r\n"]] {
+            let mut v = raw(&["Hi "]);
+            v.extend(raw(gap));
+            v.extend(raw(&["Quick ", "update."]));
+            let w = normalize(&v);
+            assert_eq!((w[2].text.as_str(), w[2].brk), ("Quick", Brk::Paragraph), "{gap:?}");
+            let mut v = raw(&["We ", "met "]);
+            v.extend(raw(&gap.iter().map(|t| t.replace("everyone,", "the")).collect::<Vec<_>>().iter().map(String::as_str).collect::<Vec<_>>()));
+            v.extend(raw(&["rest ", "left."]));
+            let w = normalize(&v);
+            assert_eq!((w[3].text.as_str(), w[3].brk), ("rest", Brk::Paragraph), "soft wrap {gap:?}");
+        }
+        // one line break: still a `Line` / soft wrap
+        assert_eq!(normalize(&raw(&["Hi ", "everyone,\r\n", "Quick ", "update."]))[2].brk, Brk::Line);
+        assert_eq!(normalize(&raw(&["We ", "met ", "the\r\n", "rest ", "left."]))[3].brk, Brk::None);
+        // a blank line before a lone bullet carries to its item
+        let w = normalize(&raw(&["Hi ", "all,\n\n", "\u{2022} ", "go"]));
+        assert_eq!(w[2].brk, Brk::ListItem);
+        assert_eq!(super::nl_count("a\r\n\r\n"), 2);
+        assert_eq!(super::nl_count("a\n\r"), 2);
+        assert_eq!(super::nl_count("a "), 0);
+    }
+
+    #[test]
+    fn line_breaks_brk_names_the_next_block() {
+        let t = "Intro line that is long enough to be body text here.\nKey Takeaways\nThe body text continues for a while here now.\n- Bills rise\n- Seniors apply";
+        let b = super::line_breaks_brk(t);
+        assert_eq!(b, vec![Some(Brk::Heading(0)), Some(Brk::AfterHeading), Some(Brk::ListItem), Some(Brk::ListItem), Some(Brk::Paragraph)]);
+        assert!(b.iter().zip(super::line_breaks(t)).all(|(a, e)| a.is_some() == e));
+        // a soft-wrapped line: no break
+        let t = "A long line of body text that wraps onto the next one\nand ends here.";
+        assert_eq!(super::line_breaks_brk(t), vec![None, Some(Brk::Paragraph)]);
     }
 
     /// Task 11 ruling 3: a heading may be followed by a list.

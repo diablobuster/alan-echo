@@ -646,7 +646,8 @@ fn is_item_start(w: &str) -> bool {
 /// line-end `"hyphen-"` keeps no space so normalize joins it with the next word.
 /// A heading line (tall text) starts with a heading marker and ends in `"\n"`, the
 /// line after it starts with an after-heading marker, and a list item's line (bullet
-/// or number first) always follows a `"\n"`.
+/// or number first) always follows a `"\n"`. Any other line after a `"\n"` starts with
+/// a paragraph marker (a list item's with a list-item marker): OCR decided the break.
 pub(crate) fn tokens(words: &[OcrWord]) -> Vec<String> {
     use crate::ra_struct::{mark, Brk};
     let mut out = Vec::with_capacity(words.len());
@@ -672,10 +673,15 @@ pub(crate) fn tokens(words: &[OcrWord]) -> Vec<String> {
             } else {
                 format!("{t} ")
             };
+            // OCR decided every break itself: the line after one says so, so the raw-text
+            // fallback never makes it a soft wrap or a `Line`
+            let after_break = out.last().is_some_and(|p: &String| p.ends_with('\n'));
             let tok = if i == range.start && is_head(k) {
                 format!("{}{tok}", mark(Brk::Heading(0)))
             } else if i == range.start && k > 0 && is_head(k - 1) {
                 format!("{}{tok}", mark(Brk::AfterHeading))
+            } else if i == range.start && after_break {
+                format!("{}{tok}", mark(if item_at(k) { Brk::ListItem } else { Brk::Paragraph }))
             } else {
                 tok
             };
@@ -1084,7 +1090,8 @@ mod tests {
         words.push(wd("ated", 3, r(10.0, 125.0, 40.0, 20.0)));
         words.push(wd("end.", 3, r(60.0, 125.0, 40.0, 20.0)));
         let t = tokens(&words);
-        assert_eq!(t, vec!["The ", "cat ", "sat ", "on ", "mats\n", "Next ", "hyphen-", "ated ", "end.\n"]);
+        // the line after the gap says OCR decided that break (Task 11 fix round 1)
+        assert_eq!(t, vec!["The ", "cat ", "sat ", "on ", "mats\n", "\u{E0F0}pNext ", "hyphen-", "ated ", "end.\n"]);
         let n = crate::ra_text::normalize(&t);
         let texts: Vec<&str> = n.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(texts, vec!["The", "cat", "sat", "on", "mats", "Next", "hyphen-ated", "end."]);
@@ -1285,6 +1292,31 @@ mod tests {
         assert_eq!(t[2], "today\n");
         assert_eq!(t[5], "now\n");
         assert_eq!(t[8], "now ", "a plain line after a list item is a soft wrap");
+        // decided breaks are marked: list items as items (Task 11 fix round 1)
+        use crate::ra_struct::{mark, Brk};
+        assert_eq!(t[3], format!("{}\u{2022} ", mark(Brk::ListItem)));
+        assert_eq!(t[6], format!("{}2. ", mark(Brk::ListItem)));
+        assert_eq!(t.len(), words.len());
+        let n = crate::ra_text::normalize(&t);
+        let got: Vec<(&str, Brk)> = n.iter().map(|w| (w.text.as_str(), w.brk)).collect();
+        assert_eq!(&got[2..5], &[("today", Brk::None), ("milk", Brk::ListItem), ("now", Brk::None)]);
+        assert_eq!(&got[5..7], &[("2.", Brk::ListItem), ("eggs", Brk::None)]);
+    }
+
+    /// Task 11 fix round 1: an OCR paragraph break before a lowercase word, after a
+    /// short unpunctuated line, is never softened or made a `Line` by the fallback.
+    #[test]
+    fn decided_ocr_breaks_are_kept_by_the_fallback() {
+        use crate::ra_struct::Brk;
+        let mut words = vec![wd("Figure", 0, r(10.0, 10.0, 60.0, 20.0)), wd("two", 0, r(80.0, 10.0, 40.0, 20.0))];
+        // a paragraph gap, then a lowercase line
+        for (j, t) in ["and", "then", "more", "text."].iter().enumerate() {
+            words.push(wd(t, 1, r(10.0 + 50.0 * j as f64, 60.0, 40.0, 20.0)));
+        }
+        let t = tokens(&words);
+        assert_eq!(t[1], "two\n");
+        let n = crate::ra_text::normalize(&t);
+        assert_eq!((n[2].text.as_str(), n[2].brk, n[2].para_break_before), ("and", Brk::Paragraph, true));
     }
 
     #[test]

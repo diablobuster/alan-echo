@@ -260,10 +260,11 @@ pub(crate) fn whole_word_at(text: &str, w: &str, ahead: usize) -> Option<usize> 
     }
 }
 
-/// An untagged page's text and, per line, whether a block ends after it.
+/// An untagged page's text and, per line, the structure the next block starts when a
+/// block ends after it (`ra_text::line_breaks_brk`; `None`: a soft wrap).
 struct Lines {
     text: String,
-    ends: Vec<bool>,
+    ends: Vec<Option<Brk>>,
 }
 
 /// How far ahead (bytes) a word is looked for in the page text before the match is
@@ -280,6 +281,11 @@ pub(crate) struct Words<N: Node> {
     /// Stack levels from this index up held no word before the last word passed: that
     /// word starts them.
     starts_from: usize,
+    /// The last token ended a block ("\n"): the marker the next token gets when its
+    /// structure gives none, so the raw-text fallback never second-guesses the break.
+    after_break: Option<Brk>,
+    /// The marker of the block the last token is in (`Heading` -> `AfterHeading` next).
+    block_brk: Brk,
 }
 
 pub(crate) fn words<N: Node>(root: N, cap: usize) -> Words<N> {
@@ -289,6 +295,8 @@ pub(crate) fn words<N: Node>(root: N, cap: usize) -> Words<N> {
         cap,
         seen: 0,
         starts_from: 0,
+        after_break: None,
+        block_brk: Brk::None,
     }
 }
 
@@ -407,6 +415,9 @@ impl<N: Node> Words<N> {
     /// its text, prefixed with the marker of the structure it starts (heading, list
     /// item, table row or cell, caption, quote), and ending in "\n" instead of its
     /// trailing space when it is the last word of a block (natural-reading spec §5).
+    /// The word after a block end with no structure of its own gets the break's marker
+    /// (`Paragraph`, `AfterHeading` after a heading, or what `line_breaks_brk` says on an
+    /// untagged page): the break was decided here.
     pub(crate) fn token(&mut self, n: &N) -> String {
         let mut brk = Brk::None;
         for i in self.starts_from..self.stack.len() {
@@ -415,17 +426,28 @@ impl<N: Node> Words<N> {
                 brk = b;
             }
         }
+        let carried = self.after_break.take();
+        if !brk.is_break() {
+            brk = carried.unwrap_or(Brk::None);
+        }
+        if brk.is_break() {
+            self.block_brk = brk;
+        }
         let mut t = n.text();
         let line_end = self.ends_untagged_line(&t);
-        if line_end == Some(false) && !t.ends_with(char::is_whitespace) && !t.ends_with(['-', '\u{AD}']) {
+        if line_end == Some(None) && !t.ends_with(char::is_whitespace) && !t.ends_with(['-', '\u{AD}']) {
             // a soft wrap: Acrobat gives the line's last word no trailing space (a split
             // word "coun-" keeps none, so normalize still joins it to "cil")
             t.push(' ');
         }
-        if self.ends_block() || line_end == Some(true) {
+        let untagged_next = line_end.flatten();
+        if self.ends_block() || untagged_next.is_some() {
             let keep = t.trim_end().len();
             t.truncate(keep);
             t.push('\n');
+            let after_head = if self.block_brk.is_heading() { Brk::AfterHeading } else { Brk::Paragraph };
+            self.after_break = Some(untagged_next.unwrap_or(after_head));
+            self.block_brk = Brk::None;
         }
         if brk.is_break() {
             t.insert_str(0, &mark(brk));
@@ -433,12 +455,13 @@ impl<N: Node> Words<N> {
         t
     }
 
-    /// Untagged PDFs (task 5b): `Some(true)` when the word passed last, with text `word`,
-    /// ends a line of its page that `ra_text::line_breaks` ends a block after,
-    /// `Some(false)` when it ends a soft-wrapped line, `None` otherwise. Only for a Text
+    /// Untagged PDFs (task 5b): `Some(Some(brk))` when the word passed last, with text
+    /// `word`, ends a line of its page that `ra_text::line_breaks_brk` ends a block after
+    /// (`brk`: what the next block starts), `Some(None)` when it ends a soft-wrapped line,
+    /// `None` otherwise. Only for a Text
     /// node right under an untagged page group (named "StructTreeRoot"); its text is read
     /// once, and words are matched to it in order. A word not found close ahead: `None`.
-    fn ends_untagged_line(&mut self, word: &str) -> Option<bool> {
+    fn ends_untagged_line(&mut self, word: &str) -> Option<Option<Brk>> {
         let top = self.stack.len().checked_sub(1)?;
         let untagged_page = |s: &mut Self| {
             s.stack.get(top).is_some_and(|l| l.kind == TEXT_NODE)
@@ -450,7 +473,7 @@ impl<N: Node> Words<N> {
             None => {
                 let v = untagged_page(self).then(|| {
                     let text = self.stack.get(top).map(|l| l.node.content()).unwrap_or_default();
-                    let ends = crate::ra_text::line_breaks(&text);
+                    let ends = crate::ra_text::line_breaks_brk(&text);
                     Arc::new(Lines { text, ends })
                 });
                 if let Some(l) = self.stack.get_mut(top) {
@@ -477,7 +500,7 @@ impl<N: Node> Words<N> {
         let tail = lines.text.get(end..).unwrap_or("");
         let gap: &str = tail.get(..tail.len() - tail.trim_start().len()).unwrap_or("");
         let line_ends = gap.contains('\n') || tail.is_empty();
-        line_ends.then(|| lines.ends.get(l.line).copied().unwrap_or(false))
+        line_ends.then(|| lines.ends.get(l.line).copied().flatten())
     }
 
     /// The word passed last ends a block: every container from its parent out to the
@@ -1390,15 +1413,17 @@ mod tests {
         assert_eq!(rd.take(2, far()), ["a ", "b
 "]);
         let m = rd.mark();
-        assert_eq!(rd.take(10, far()), ["c
-", "d ", "e
+        // "c" follows the block end at "b": the decided break is marked
+        assert_eq!(rd.take(10, far()), ["\u{E0F0}pc
+", "\u{E0F0}pd ", "e
 "]);
         assert!(rd.ended);
         rd.rollback(m);
         assert!(!rd.ended, "the end was not delivered");
         assert_eq!(rd.nodes.len(), 2, "source indices are back where the caller is");
-        assert_eq!(rd.take(10, far()), ["c
-", "d ", "e
+        // "c" follows the block end at "b": the decided break is marked
+        assert_eq!(rd.take(10, far()), ["\u{E0F0}pc
+", "\u{E0F0}pd ", "e
 "]);
         assert_eq!(rd.nodes.len(), 5);
     }
@@ -1418,8 +1443,8 @@ mod tests {
         assert_eq!(rd.nodes.len(), 1);
         // a long slice: the rest (capped at MORE_BATCH)
         assert_eq!(rd.more_sliced(far(), far()), Ok(vec!["b
-".to_string(), "c
-".into(), "d ".into(), "e
+".to_string(), "\u{E0F0}pc
+".into(), "\u{E0F0}pd ".into(), "e
 ".into()]));
         assert_eq!(rd.more_sliced(past, far()), Ok(vec![]), "only empty is the end");
         assert!(rd.ended);
@@ -1580,7 +1605,7 @@ mod tests {
             F(TEXT, "P", None, vec![w("One ", None), w("two.", None)]),
             F(TEXT, "P", None, vec![w("Three ", None), w("four. ", None)]),
         ])]);
-        assert_eq!(read_all(doc), ["One ", "two.\n", "Three ", "four.\n"]);
+        assert_eq!(read_all(doc), ["One ", "two.\n", "\u{E0F0}pThree ", "four.\n"]);
     }
 
     #[test]
@@ -1592,7 +1617,8 @@ mod tests {
         ])]);
         assert_eq!(
             read_all(doc),
-            [m(Brk::Heading(1), "Big "), "Title\n".into(), "Body ".into(), "text.\n".into(), m(Brk::Heading(0), "Plain\n"), m(Brk::Heading(3), "Small\n")]
+            // the paragraph after a heading is marked AfterHeading (Task 11 fix round 1)
+            [m(Brk::Heading(1), "Big "), "Title\n".into(), m(Brk::AfterHeading, "Body "), "text.\n".into(), m(Brk::Heading(0), "Plain\n"), m(Brk::Heading(3), "Small\n")]
         );
     }
 
@@ -1601,10 +1627,11 @@ mod tests {
         // untagged, Acrobat makes one "P" Text node per page under a nameless group
         let page = |a: &'static str, b: &'static str| F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, "P", None, vec![w(a, None), w(b, None)])]);
         let doc = F(DOC, "StructTreeRoot", None, vec![page("a ", "b "), page("c ", "d")]);
-        assert_eq!(read_all(doc), ["a ", "b\n", "c ", "d\n"]);
+        // the next page's first word follows a decided break: marked
+        assert_eq!(read_all(doc), ["a ".to_string(), "b\n".into(), m(Brk::Paragraph, "c "), "d\n".into()]);
         // a node whose name could not be read is still a block
         let doc = F(DOC, "", None, vec![F(TEXT, "", None, vec![w("x ", None)]), F(TEXT, "", None, vec![w("y ", None)])]);
-        assert_eq!(read_all(doc), ["x\n", "y\n"]);
+        assert_eq!(read_all(doc), ["x\n".to_string(), m(Brk::Paragraph, "y\n")]);
     }
 
     #[test]
@@ -1631,8 +1658,9 @@ mod tests {
                 m(Brk::TableRow, "a\n"), m(Brk::TableCell, "b\n"), m(Brk::TableRow, "c\n"), m(Brk::TableCell, "d\n"),
                 m(Brk::Caption, "Fig "), "one\n".into(),
                 m(Brk::Quote, "Said\n"),
-                // Code is inline in most PDFs: no marker; here it still ends with its parent
-                "x=1 ".into(),
+                // Code is inline in most PDFs: no marker of its own; it follows a decided
+                // break, so it gets the paragraph marker
+                m(Brk::Paragraph, "x=1 "),
                 "end\n".into(),
             ]
         );
@@ -1648,7 +1676,7 @@ mod tests {
             ]),
             F(TEXT, "P", None, vec![w("Next", None)]),
         ]);
-        assert_eq!(read_all(doc), ["See ", "the ", "site ", "now.\n", "Next\n"]);
+        assert_eq!(read_all(doc), ["See ".to_string(), "the ".into(), "site ".into(), "now.\n".into(), m(Brk::Paragraph, "Next\n")]);
     }
 
     #[test]
@@ -1664,8 +1692,9 @@ mod tests {
             out.extend(Walk::new(ws, vec![first]).take(10, far()));
             out
         };
-        assert_eq!(pick(10.0, 10.0), [m(Brk::Heading(2), "Head "), "line\n".into(), "body ".into(), "end\n".into()]);
-        assert_eq!(pick(70.0, 10.0), ["line\n", "body ", "end\n"]);
+        assert_eq!(pick(10.0, 10.0), [m(Brk::Heading(2), "Head "), "line\n".into(), m(Brk::AfterHeading, "body "), "end\n".into()]);
+        // picked inside the heading: its marker is unknown, the break is still decided
+        assert_eq!(pick(70.0, 10.0), ["line\n".to_string(), m(Brk::Paragraph, "body "), "end\n".into()]);
         // the fallback (no word under the point) rewinds to the word's own state
         assert_eq!(pick(200.0, 35.0), ["body ", "end\n"]);
     }
@@ -1697,9 +1726,9 @@ mod tests {
         let mut rd = Walk::new(words(doc, 100), Vec::new());
         assert_eq!(rd.take(1, far()), [m(Brk::Heading(1), "A ")]);
         let mk = rd.mark();
-        assert_eq!(rd.take(10, far()), ["B\n", "c ", "d\n"]);
+        assert_eq!(rd.take(10, far()), ["B\n", "\u{E0F0}hc ", "d\n"]);
         rd.rollback(mk);
-        assert_eq!(rd.take(10, far()), ["B\n", "c ", "d\n"]);
+        assert_eq!(rd.take(10, far()), ["B\n", "\u{E0F0}hc ", "d\n"]);
         assert_eq!(rd.nodes.len(), 4, "one node per token");
     }
 
@@ -1717,7 +1746,8 @@ mod tests {
             [
                 ("Big", Brk::Heading(2), vec![0]),
                 ("news", Brk::None, vec![1]),
-                ("It", Brk::Paragraph, vec![2]),
+                // the paragraph after a heading: AfterHeading (Task 11 fix round 1)
+                ("It", Brk::AfterHeading, vec![2]),
                 ("rained.", Brk::None, vec![3]),
                 ("Milk", Brk::ListItem, vec![4]),
             ]
@@ -1799,6 +1829,27 @@ mod tests {
         assert_eq!(brk("Eggs"), Some(Brk::ListItem));
         let src: Vec<usize> = ws.iter().flat_map(|w| w.src.clone()).collect();
         assert_eq!(src, (0..src.len()).collect::<Vec<_>>(), "every token kept, in order");
+    }
+
+    /// Task 11 fix round 1: the token after each decided break carries the break's
+    /// marker, so the raw-text fallback never softens it or makes it a `Line`.
+    #[test]
+    fn untagged_decided_breaks_are_marked() {
+        let toks = read_all(untagged(&PAGE));
+        let marked: Vec<(Brk, &str)> = toks
+            .iter()
+            .filter_map(|t| match crate::ra_struct::strip_mark(t) {
+                (Some(b), rest) => Some((b, rest)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marked, [(Brk::AfterHeading, "The "), (Brk::ListItem, "\u{2022} "), (Brk::ListItem, "\u{2022} ")]);
+        assert_eq!(toks.len(), PAGE.iter().map(|l| l.split_whitespace().count()).sum::<usize>(), "one token per word");
+        // a short unpunctuated line, then a lowercase one after a decided break
+        let lines = ["Intro text that is long enough to be the body of this page here.", "Figure two", "", "and then more text follows."];
+        let ws = crate::ra_text::normalize(&read_all(untagged(&lines)));
+        let and = ws.iter().find(|w| w.text == "and").map(|w| (w.brk, w.para_break_before));
+        assert_eq!(and, Some((Brk::Paragraph, true)), "never softened nor a Line");
     }
 
     #[test]

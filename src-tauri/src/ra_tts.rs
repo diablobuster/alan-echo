@@ -829,10 +829,24 @@ impl Engine {
         }
         let mut words_t = chunk_word_times(&dur, spans, wav.len(), rate, covered);
         let pcm = ra_wsola::stretch(&wav, rate, ra_timing::SR);
-        let pcm = trim_silence(pcm, &mut words_t, model_speed * rate, tail_of(words.get(covered.saturating_sub(1)).copied()));
+        let mut pcm = trim_silence(pcm, &mut words_t, model_speed * rate, tail_of(words.get(covered.saturating_sub(1)).copied()));
+        level_chunk(&mut pcm);
         Ok(ChunkAudio { pcm, words: words_t, device, covered })
     }
 }
+
+/// Levels one chunk (`ra_level::level`); tests can switch it off to measure "before".
+fn level_chunk(pcm: &mut [f32]) {
+    #[cfg(test)]
+    if LEVEL_OFF.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    crate::ra_level::level(pcm);
+}
+
+/// Test-only switch: skip leveling (the loudness measurement's "before" run).
+#[cfg(test)]
+static LEVEL_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// misaki G2P whose unknown words go to the names fallback (hand list -> CMUdict
 /// -> g2p_en -> spelled letters), plus the names table the caps rule consults.
@@ -2863,6 +2877,80 @@ mod tests {
         println!("wav before: {}", write_wav_as(&before.pcm, "ra_ab_before.wav").display());
         println!("wav after:  {}", write_wav_as(&after.pcm, "ra_ab_after.wav").display());
         assert_eq!(after.words.len(), words.len());
+    }
+
+    /// Task 3 measurement: per-chunk speech RMS spread and the sample jump at joins,
+    /// without vs with `ra_level::level` (CPU, 2.2x, ~30 varied sentences).
+    /// cargo test --release ra_tts::tests::level_measure_real -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore]
+    fn level_measure_real() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let sentences = [
+            "The committee met on Tuesday to review the budget.",
+            "Why would anyone build a bridge there?",
+            "She whispered the answer, and nobody heard it.",
+            "In 1999, the company shipped four million units.",
+            "Stop! Put that down right now.",
+            "Rain fell on the old stone roofs all through the night.",
+            "He is a very quiet man who rarely speaks of the war.",
+            "Our results suggest a modest but consistent improvement.",
+            "Could you pass me the salt, please?",
+            "The train to Boston leaves at nine fifteen.",
+            "Nothing about the experiment went as planned.",
+            "Wow, that is the biggest dog I have ever seen!",
+            "Photosynthesis converts light into chemical energy.",
+            "They walked slowly along the river until sunset.",
+            "I never said she stole the money.",
+            "The new policy takes effect on the first of January.",
+            "Please remain seated until the aircraft has come to a complete stop.",
+            "It was cold, dark, and entirely too quiet.",
+            "How many of these do we actually need?",
+            "The museum opens at ten and closes at six.",
+            "Scientists discovered a new species of frog in the mountains.",
+            "Do not open the door for anyone.",
+            "We should leave early to beat the traffic.",
+            "Her voice cracked as she read the final line.",
+            "Interest rates rose again, surprising most analysts.",
+            "A small fire started in the kitchen but was quickly put out.",
+            "Is this really the best we can do?",
+            "The old library smelled of dust and cedar.",
+            "Tomorrow will be sunny with a light breeze from the west.",
+            "Thank you all for coming tonight.",
+        ];
+        let e = Engine::new(dirs::data_dir().unwrap().join("ALAN Echo"));
+        e.preload("af_heart", "cpu");
+        let run = |off: bool| -> (Vec<f32>, Vec<f32>) {
+            LEVEL_OFF.store(off, Relaxed);
+            let chunks: Vec<ChunkAudio> = sentences
+                .iter()
+                .map(|s| e.synth(&s.split(' ').collect::<Vec<_>>(), 2.2).unwrap())
+                .collect();
+            LEVEL_OFF.store(false, Relaxed);
+            let rms: Vec<f32> = chunks.iter().map(|c| 20.0 * crate::ra_level::speech_rms(&c.pcm).log10()).collect();
+            // join = last sample of a chunk to first sample of the next (what the player sees)
+            let jumps: Vec<f32> = chunks
+                .windows(2)
+                .map(|w| (w[1].pcm.first().copied().unwrap_or(0.0) - w[0].pcm.last().copied().unwrap_or(0.0)).abs())
+                .collect();
+            (rms, jumps)
+        };
+        let stats = |v: &[f32]| {
+            let mean = v.iter().sum::<f32>() / v.len() as f32;
+            let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / v.len() as f32).sqrt();
+            let mx = v.iter().cloned().fold(f32::MIN, f32::max);
+            let mn = v.iter().cloned().fold(f32::MAX, f32::min);
+            (mn, mx, mx - mn, sd)
+        };
+        for (name, off) in [("before", true), ("after", false)] {
+            let (rms, jumps) = run(off);
+            let (mn, mx, spread, sd) = stats(&rms);
+            let mut sorted: Vec<f32> = rms.iter().map(|d| 10f32.powf(d / 20.0)).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = sorted[sorted.len() / 2];
+            let maxj = jumps.iter().cloned().fold(0.0f32, f32::max);
+            println!("{name}: speech RMS dB min {mn:.2} max {mx:.2} spread {spread:.2} std {sd:.2}; median RMS {med:.4}; max join jump {maxj:.5}");
+        }
     }
 
     /// GPU load, then the DML-error recovery path: reset_to_cpu, next synth waits and runs on CPU.

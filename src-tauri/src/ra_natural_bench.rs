@@ -166,12 +166,18 @@ fn silent_windows(pcm: &[f32]) -> Vec<bool> {
 /// The longest run of silent windows that overlaps samples `from..=to`, in ms (the run
 /// may extend past the range). 0 when no silent window touches it.
 fn silence_at(silent: &[bool], from: u64, to: u64) -> u64 {
+    silence_run(silent, from, to).map_or(0, |r| r.1 as u64 * 10)
+}
+
+/// That longest run as (first window, windows); `None` when no silent window touches
+/// the range. Two gaps that find the same run measure the same silence.
+fn silence_run(silent: &[bool], from: u64, to: u64) -> Option<(usize, usize)> {
     let a = (from / WIN as u64) as usize;
     let b = ((to / WIN as u64) as usize).min(silent.len().saturating_sub(1));
     if silent.is_empty() || a > b {
-        return 0;
+        return None;
     }
-    let mut best = 0usize;
+    let mut best: Option<(usize, usize)> = None;
     let mut k = a;
     while k <= b {
         if silent.get(k) != Some(&true) {
@@ -180,10 +186,12 @@ fn silence_at(silent: &[bool], from: u64, to: u64) -> u64 {
         }
         let lo = silent.get(..k).map_or(0, |s| s.iter().rev().take_while(|&&x| x).count());
         let hi = silent.get(k..).map_or(0, |s| s.iter().take_while(|&&x| x).count());
-        best = best.max(lo + hi);
+        if best.is_none_or(|b| lo + hi > b.1) {
+            best = Some((k - lo, lo + hi));
+        }
         k += hi.max(1);
     }
-    best as u64 * 10
+    best
 }
 
 /// The words either side of the boundary at raw token `tok`: the last word starting
@@ -230,19 +238,52 @@ fn max_join_jump(chunks: &[Vec<f32>]) -> f32 {
     max
 }
 
-/// Spec §2 target pause at `rate`: base at 1x / rate^0.6, floored at 150 ms (0 for
-/// running text).
+/// The target pause at `rate`: the product's `ra_pause::pause_ms` (0 for running text).
 fn target_ms(b: Brk, rate: f32) -> f64 {
-    let base = match b {
-        Brk::None => return 0.0,
-        Brk::Line | Brk::TableCell => 250.0,
-        Brk::ListItem => 400.0,
-        Brk::TableRow | Brk::Caption | Brk::Quote | Brk::Code | Brk::Heading(_) => 450.0,
-        Brk::Paragraph => 550.0,
-        Brk::AfterHeading => 650.0,
-        Brk::Section => 900.0,
-    };
-    (base / f64::from(rate.max(0.1)).powf(0.6)).max(150.0)
+    f64::from(crate::ra_pause::pause_ms(b, rate))
+}
+
+/// The boundary kind a pooled `kind_name` stands for (heading levels share one target).
+fn kind_brk(name: &str) -> Brk {
+    match name {
+        "Line" => Brk::Line,
+        "ListItem" => Brk::ListItem,
+        "TableCell" => Brk::TableCell,
+        "TableRow" => Brk::TableRow,
+        "Paragraph" => Brk::Paragraph,
+        "Caption" => Brk::Caption,
+        "Quote" => Brk::Quote,
+        "Code" => Brk::Code,
+        "Heading" => Brk::Heading(0),
+        "AfterHeading" => Brk::AfterHeading,
+        "Section" => Brk::Section,
+        _ => Brk::None,
+    }
+}
+
+/// `NB_RATES` ("2.2,3.0"): every item must be a speed in 0.5..=5; none set = 2.2, 3.0.
+fn parse_rates(v: Option<&str>) -> Result<Vec<f32>, String> {
+    let Some(v) = v else { return Ok(vec![2.2, 3.0]) };
+    let rates: Vec<f32> = v
+        .split(',')
+        .map(|x| x.trim().parse::<f32>().ok().filter(|r| (0.5..=5.0).contains(r)).ok_or_else(|| format!("NB_RATES: bad rate {x:?}")))
+        .collect::<Result<_, _>>()?;
+    if rates.is_empty() {
+        return Err("NB_RATES: no rates".into());
+    }
+    Ok(rates)
+}
+
+/// Up to 3 words either side of the gap before word `n`, with "|" at the gap.
+fn context(words: &[Word], n: usize) -> String {
+    let t = |r: std::ops::Range<usize>| words.get(r).unwrap_or(&[]).iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    let n = n.min(words.len());
+    format!("{} | {}", t(n.saturating_sub(3)..n), t(n..(n + 3).min(words.len())))
+}
+
+/// A word that ends with no punctuation: a pause after it is inside a sentence.
+fn ends_bare(w: &str) -> bool {
+    w.trim_end_matches(['"', '\'', ')', ']', '\u{201D}', '\u{2019}']).chars().last().is_some_and(char::is_alphanumeric)
 }
 
 /// Short name of a boundary kind (heading levels pooled).
@@ -321,9 +362,11 @@ fn render(e: &Arc<Engine>, words: Vec<Word>, raw_len: usize, rate: f32) -> Resul
     let ctl = e.controller_gen();
     let mut r = Render::default();
     let mut times: HashMap<usize, Vec<crate::ra_timing::WordTime>> = HashMap::new();
+    let mut done = false;
     for _ in 0..10_000 {
         let pos = r.pcm.len() as u64;
         if s.finished(pos) {
+            done = true;
             break;
         }
         let jobs = s.jobs(pos, rate);
@@ -351,6 +394,9 @@ fn render(e: &Arc<Engine>, words: Vec<Word>, raw_len: usize, rate: f32) -> Resul
             }
         }
     }
+    if !done && !s.finished(r.pcm.len() as u64) {
+        return Err("render: iteration cap hit before the read finished".into());
+    }
     r.starts = s.timeline.iter().map(|&(t, w)| (w, t)).collect();
     Ok(r)
 }
@@ -365,85 +411,135 @@ fn write_wav(path: &std::path::Path, pcm: &[f32]) -> Result<(), String> {
     w.finalize().map_err(|e| e.to_string())
 }
 
-/// Silence (ms) heard at each structural boundary: the longest silent run touching
-/// the span from late in the previous word (its end - 50 ms, not before its start) to
-/// 100 ms into the next word's start.
-fn boundary_pauses(words: &[Word], bounds: &[(usize, Brk)], r: &Render) -> Vec<(Brk, usize, u64)> {
-    let silent = silent_windows(&r.pcm);
+/// Silence (ms) heard in the gap before word `n` (after word `p`): the longest silent
+/// run touching the span from late in word `p` (its end - 50 ms, not before its
+/// start) to 100 ms into word `n`'s start.
+fn gap_ms(silent: &[bool], r: &Render, p: usize, n: usize) -> Option<(u64, Option<(usize, usize)>)> {
+    let to = r.starts.get(&n)? + 2400;
+    let ps = r.starts.get(&p).copied().unwrap_or(0);
+    let from = r.ends.get(&p).map_or(ps, |&e| e.saturating_sub(1200).max(ps)).min(to);
+    let run = silence_run(silent, from, to);
+    Some((run.map_or(0, |x| x.1 as u64 * 10), run))
+}
+
+/// One measured gap: boundary kind (`None` off-boundary), the word after it, the
+/// silence (ms) and the silent run it found (first window, windows).
+type Gap = (Brk, usize, u64, Option<(usize, usize)>);
+
+/// Silence heard at each structural boundary.
+fn boundary_pauses(words: &[Word], bounds: &[(usize, Brk)], r: &Render, silent: &[bool]) -> Vec<Gap> {
     bounds
         .iter()
         .filter(|b| b.1.is_break())
         .filter_map(|&(tok, kind)| {
             let (p, n) = bound_words(words, tok)?;
-            let to = r.starts.get(&n)? + 2400;
-            let ps = r.starts.get(&p).copied().unwrap_or(0);
-            let from = r.ends.get(&p).map_or(ps, |&e| e.saturating_sub(1200).max(ps)).min(to);
-            Some((kind, n, silence_at(&silent, from, to)))
+            let (ms, run) = gap_ms(silent, r, p, n)?;
+            Some((kind, n, ms, run))
         })
         .collect()
 }
 
+/// Pauses of at least `FUSED_MS` where the markup has no boundary and the word before
+/// ends with no punctuation (inside a sentence). A silent run some boundary already
+/// measured is that boundary's pause, not a stray one.
+fn stray_pauses(words: &[Word], bounds: &[Gap], r: &Render, silent: &[bool]) -> Vec<Gap> {
+    (1..words.len())
+        .filter(|n| !bounds.iter().any(|b| b.1 == *n))
+        .filter(|&n| words.get(n).is_some_and(|w| w.text.chars().any(char::is_alphanumeric)) && words.get(n - 1).is_some_and(|w| ends_bare(&w.text)))
+        .filter_map(|n| {
+            let (ms, run) = gap_ms(silent, r, n - 1, n)?;
+            Some((Brk::None, n, ms, run))
+        })
+        .filter(|g| g.2 >= FUSED_MS && !bounds.iter().any(|b| b.3.is_some() && b.3 == g.3))
+        .collect()
+}
+
+/// A gap's evidence for the report: the silent run and the word starts, in ms.
+fn gap_json(words: &[Word], r: &Render, g: &Gap) -> serde_json::Value {
+    let ms = |s: Option<&u64>| s.map(|&s| s / 24);
+    serde_json::json!({
+        "word": g.1, "context": context(words, g.1), "silence_ms": g.2,
+        "run_ms": g.3.map(|(a, n)| [a * 10, n * 10]),
+        "prev_start_ms": ms(g.1.checked_sub(1).and_then(|p| r.starts.get(&p))), "next_start_ms": ms(r.starts.get(&g.1)),
+    })
+}
+
 #[test]
 #[ignore]
-fn natural_bench() {
+fn natural_bench() -> Result<(), String> {
     let out = PathBuf::from(std::env::var("NB_OUT").unwrap_or_else(|_| "C:/Users/arowm/alan-echo-nat-bench/run".into()));
     let mode = match std::env::var("NB_MODE").as_deref() {
         Ok("marked") => Mode::Marked,
-        _ => Mode::Plain,
+        Ok("plain") | Err(_) => Mode::Plain,
+        Ok(m) => return Err(format!("NB_MODE: {m:?} is not marked|plain")),
     };
-    let rates: Vec<f32> = std::env::var("NB_RATES")
-        .ok()
-        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
-        .unwrap_or_else(|| vec![2.2, 3.0]);
+    let rates = parse_rates(std::env::var("NB_RATES").ok().as_deref())?;
     let only = std::env::var("NB_ONLY").unwrap_or_default();
-    std::fs::create_dir_all(&out).expect("NB_OUT");
-    let e = Engine::new(dirs::data_dir().expect("data dir").join("ALAN Echo"));
+    std::fs::create_dir_all(&out).map_err(|e| format!("NB_OUT: {e}"))?;
+    let e = Engine::new(dirs::data_dir().ok_or("no data dir")?.join("ALAN Echo"));
     e.preload("af_heart", "cpu");
     let t0 = Instant::now();
     while !e.is_loaded() {
-        assert!(t0.elapsed() < Duration::from_secs(60), "load");
+        if t0.elapsed() > Duration::from_secs(60) {
+            return Err("engine load timed out".into());
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
-    e.synth(&["Warm", "up", "the", "engine."], 2.2).expect("warm up");
+    e.synth(&["Warm", "up", "the", "engine."], 2.2)?;
     println!("natural bench: mode {mode:?}, rates {rates:?}, out {}", out.display());
     let mut all = Vec::new();
     for (name, text) in fixtures().into_iter().filter(|f| f.0.contains(&only)) {
         let l = load(&text, mode);
         let words = ra_text::normalize(&l.tokens);
         for &rate in &rates {
-            let r = render(&e, words.clone(), l.tokens.len(), rate).expect("render");
-            write_wav(&out.join(format!("{name}-{rate}.wav")), &r.pcm).expect("wav");
-            let pauses = boundary_pauses(&words, &l.bounds, &r);
+            let r = render(&e, words.clone(), l.tokens.len(), rate)?;
+            write_wav(&out.join(format!("{name}-{rate}.wav")), &r.pcm)?;
+            let silent = silent_windows(&r.pcm);
+            let pauses = boundary_pauses(&words, &l.bounds, &r, &silent);
+            let bound_next: Vec<usize> = pauses.iter().map(|p| p.1).collect();
+            let stray = stray_pauses(&words, &pauses, &r, &silent);
+            // a structure break the pre-pass saw where the markup has none
+            let spurious: Vec<usize> = (1..words.len()).filter(|n| words.get(*n).is_some_and(|w| w.brk.is_break() && w.text.chars().any(char::is_alphanumeric)) && !bound_next.contains(n)).collect();
             let p2: Vec<(Brk, u64)> = pauses.iter().map(|p| (p.0, p.2)).collect();
             let (fused, by) = summarize(&p2);
             let spread = loudness_spread_db(&r.chunks);
             let jump = max_join_jump(&r.chunks);
             let untimed = (0..words.len()).filter(|w| !r.starts.contains_key(w)).count();
-            let kinds: Vec<String> = by.iter().map(|(k, v)| format!("{k} {:.0}/{:.0}ms n{} f{}", v.1, target_ms(pauses.iter().find(|p| kind_name(p.0) == *k).map_or(Brk::None, |p| p.0), rate), v.0, v.2)).collect();
+            let kinds: Vec<String> = by.iter().map(|(k, v)| format!("{k} {:.0}/{:.0}ms n{} f{}", v.1, target_ms(kind_brk(k), rate), v.0, v.2)).collect();
             println!(
-                "{name} @{rate}x: {} words, {} chunks, {:.1} s; fused {fused}/{}; loudness spread {spread:.1} dB; max join jump {jump:.3}; untimed {untimed}\n    {}",
+                "{name} @{rate}x: {} words, {} chunks, {:.1} s; fused {fused}/{}; loudness spread {spread:.1} dB; max join jump {jump:.3}; untimed {untimed}; stray {}; spurious brk {}\n    {}",
                 words.len(),
                 r.chunks.len(),
                 r.pcm.len() as f64 / 24000.0,
                 pauses.len(),
+                stray.len(),
+                spurious.len(),
                 kinds.join("; ")
             );
+            let brk_of = |n: usize| words.get(n).map(|w| format!("{:?}", w.brk));
             all.push(serde_json::json!({
                 "fixture": name, "rate": rate, "mode": format!("{mode:?}").to_lowercase(),
                 "words": words.len(), "chunks": r.chunks.len(), "audio_s": r.pcm.len() as f64 / 24000.0,
                 "fused": fused, "boundaries_n": pauses.len(),
                 "loudness_spread_db": spread, "max_join_jump": jump, "untimed_words": untimed,
                 "chunk_speech_db": r.chunks.iter().map(|c| speech_db(c)).collect::<Vec<_>>(),
-                "by_kind": by.iter().map(|(k, v)| (k.to_string(), serde_json::json!({"n": v.0, "mean_ms": v.1, "fused": v.2}))).collect::<serde_json::Map<_, _>>(),
-                "boundaries": pauses.iter().map(|p| serde_json::json!({
-                    "kind": format!("{:?}", p.0), "word": p.1, "text": words.get(p.1).map(|w| w.text.as_str()),
-                    "silence_ms": p.2, "target_ms": target_ms(p.0, rate),
-                })).collect::<Vec<_>>(),
+                "by_kind": by.iter().map(|(k, v)| (k.to_string(), serde_json::json!({"n": v.0, "mean_ms": v.1, "fused": v.2, "target_ms": target_ms(kind_brk(k), rate)}))).collect::<serde_json::Map<_, _>>(),
+                "boundaries": pauses.iter().map(|p| {
+                    let mut j = gap_json(&words, &r, p);
+                    if let Some(o) = j.as_object_mut() {
+                        o.insert("kind".into(), format!("{:?}", p.0).into());
+                        o.insert("detected".into(), brk_of(p.1).into());
+                        o.insert("target_ms".into(), target_ms(p.0, rate).into());
+                    }
+                    j
+                }).collect::<Vec<_>>(),
+                "stray_pauses": stray.iter().map(|g| gap_json(&words, &r, g)).collect::<Vec<_>>(),
+                "spurious_brk": spurious.iter().map(|&n| serde_json::json!({"word": n, "detected": brk_of(n), "context": context(&words, n)})).collect::<Vec<_>>(),
             }));
         }
     }
-    let json = serde_json::to_string_pretty(&serde_json::json!({ "mode": format!("{mode:?}").to_lowercase(), "runs": all })).expect("json");
-    std::fs::write(out.join("metrics.json"), json).expect("metrics.json");
+    let json = serde_json::to_string_pretty(&serde_json::json!({ "mode": format!("{mode:?}").to_lowercase(), "runs": all })).map_err(|e| e.to_string())?;
+    std::fs::write(out.join("metrics.json"), json).map_err(|e| format!("metrics.json: {e}"))
 }
 
 #[cfg(test)]
@@ -542,6 +638,9 @@ mod tests {
         assert_eq!(silence_at(&s, 7 * 240, 99_999), 10);
         assert_eq!(silence_at(&s, 99_999, 9), 0, "reversed / past the end");
         assert_eq!(silence_at(&[], 0, 100), 0);
+        assert_eq!(silence_run(&s, 240, 480), Some((2, 3)));
+        assert_eq!(silence_run(&s, 240, 7 * 240), Some((2, 3)));
+        assert_eq!(silence_run(&s, 0, 240), None);
     }
 
     #[test]
@@ -600,6 +699,35 @@ mod tests {
         let table = load(&fx[3].1, Mode::Plain);
         let count = |k: Brk| table.bounds.iter().filter(|b| b.1 == k).count();
         assert_eq!((count(Brk::TableRow), count(Brk::TableCell)), (4, 12), "header + 3 rows, 4 columns");
+    }
+
+    #[test]
+    fn rates_parse_or_fail_cleanly() {
+        assert_eq!(parse_rates(None), Ok(vec![2.2, 3.0]));
+        assert_eq!(parse_rates(Some("2.2, 3.5")), Ok(vec![2.2, 3.5]));
+        assert!(parse_rates(Some("2.2,fast")).is_err());
+        assert!(parse_rates(Some("")).is_err());
+        assert!(parse_rates(Some("0")).is_err());
+        assert!(parse_rates(Some("NaN")).is_err());
+    }
+
+    #[test]
+    fn pooled_kinds_map_back_to_their_target() {
+        for b in [Brk::Line, Brk::ListItem, Brk::TableCell, Brk::TableRow, Brk::Paragraph, Brk::Caption, Brk::Quote, Brk::Code, Brk::AfterHeading, Brk::Section] {
+            assert_eq!(kind_brk(kind_name(b)), b);
+        }
+        assert_eq!(target_ms(kind_brk(kind_name(Brk::Heading(3))), 2.2), target_ms(Brk::Heading(3), 2.2));
+        assert_eq!(kind_brk("junk"), Brk::None);
+    }
+
+    #[test]
+    fn context_and_bare_ends() {
+        let w = ra_text::normalize(&["a ".into(), "b ".into(), "c ".into(), "d ".into(), "e".into()]);
+        assert_eq!(context(&w, 3), "a b c | d e");
+        assert_eq!(context(&w, 0), " | a b c");
+        assert_eq!(context(&w, 99), "c d e | ");
+        assert!(ends_bare("word") && ends_bare("2024") && ends_bare("(x)"));
+        assert!(!ends_bare("word,") && !ends_bare("end.") && !ends_bare("say:\"") && !ends_bare(""));
     }
 
     #[test]

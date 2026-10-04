@@ -601,6 +601,7 @@ static SLANG: &[(&str, &str)] = &[
     ("brb", "be right back"),
     ("ftw", "for the win"),
     ("fwiw", "for what it's worth"),
+    ("hmu", "hit me up"),
     ("idk", "I don't know"),
     ("iirc", "if I recall correctly"),
     ("imho", "in my humble opinion"),
@@ -1576,6 +1577,10 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
     // Forum shorthand ("ngl", "tbh", "bc"), lowercase only.
     if let Some(said) = find(SLANG, strip_period(core).0) {
         return one((*said).to_string(), strip_period(core).1 && sentence_end(w, i));
+    }
+    // ".NET" (a leading dot is not a sentence end or a domain)
+    if strip_period(core).0 == ".NET" {
+        return one("dot net".into(), strip_period(core).1 && sentence_end(w, i));
     }
     // Languages: "C#", "F#".
     if let Some(l) = strip_period(core).0.strip_suffix('#').filter(|l| matches!(*l, "C" | "F" | "J")) {

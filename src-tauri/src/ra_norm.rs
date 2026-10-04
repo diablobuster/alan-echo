@@ -806,6 +806,9 @@ mod round3_tests {
             ("The v1 endpoint /api/users returns", "slash api slash users"),
             ("has a user_id and an access_token field", "user id and an access token"),
             ("Set NODE_ENV=production in .env.", "NODE ENV equals production"),
+            ("a C# front end on .NET 8.", "dot net"),
+            ("Both .NET. And more", "dot net."),
+            ("hmu if u want the link", "hit me up"),
         ]);
     }
 

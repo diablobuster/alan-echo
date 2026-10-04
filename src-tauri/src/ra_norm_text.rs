@@ -703,12 +703,37 @@ fn near(w: &[&str], i: usize, span: usize, keys: &[&str]) -> bool {
     })
 }
 
-/// Words that make "mb" megabytes even next to "high" / "low" / "storm".
+/// Words that make "mb" megabytes (only file / storage words; generic ones like "data"
+/// or "photos" appear in weather text too).
 const MB_STORAGE: &[&str] = &[
-    "file", "files", "download", "downloads", "upload", "uploads", "storage", "disk", "drive", "ram",
-    "memory", "cache", "attachment", "attachments", "photo", "photos", "image", "images", "video", "videos",
-    "data", "app", "apps", "update", "install", "installer", "size", "ssd", "zip", "pdf",
+    "attachment", "attachments", "cache", "disk", "download", "downloads", "drive", "file", "files", "install",
+    "installer", "memory", "pdf", "ram", "ssd", "storage", "upload", "uploads", "zip",
 ];
+
+/// Words that make "mb" millibars.
+const MB_WEATHER: &[&str] = &[
+    "barometric", "cyclone", "depression", "hpa", "hurricane", "inhg", "isobar", "landfall", "millibar",
+    "millibars", "nhc", "noaa", "pressure", "storm", "storm's", "tropical", "typhoon",
+];
+
+/// "940 mb before landfall" (millibars) vs "a 500 mb file" (megabytes): the nearest
+/// context word within 4 words either side decides; "low" / "high" count only right
+/// after the unit ("a 990 mb low"). No context word: megabytes.
+fn mb_is_weather(w: &[&str], i: usize) -> bool {
+    let word = |k: usize| w.get(k).map(|x| split(x).core.trim_end_matches('.').to_ascii_lowercase());
+    for d in 1..=4 {
+        for k in [i.checked_sub(d), Some(i + d)].into_iter().flatten() {
+            let Some(c) = word(k) else { continue };
+            if MB_STORAGE.contains(&c.as_str()) {
+                return false;
+            }
+            if MB_WEATHER.contains(&c.as_str()) || (k == i + 1 && matches!(c.as_str(), "low" | "high")) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// A percent figure within `span` words of `i` ("18.4%").
 fn near_percent(w: &[&str], i: usize, span: usize) -> bool {
@@ -1369,6 +1394,7 @@ fn slash_words(s: &str) -> Option<String> {
     match s {
         "w/" | "W/" => return Some("with".into()),
         "w/o" | "W/O" => return Some("without".into()),
+        "b/c" | "B/C" => return Some("because".into()),
         "c/o" => return Some("care of".into()),
         "n/a" | "N/A" => return Some("not applicable".into()),
         _ => {}
@@ -1574,9 +1600,26 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             return one("R squared".into(), strip_period(core).1 && sentence_end(w, i));
         }
     }
-    // Forum shorthand ("ngl", "tbh", "bc"), lowercase only.
-    if let Some(said) = find(SLANG, strip_period(core).0) {
-        return one((*said).to_string(), strip_period(core).1 && sentence_end(w, i));
+    // Forum shorthand ("ngl", "tbh", "bc"): lowercase, or capitalised at a sentence
+    // start ("Imo the first season"); "44 bc" after a number is the era.
+    {
+        let (body, period) = strip_period(core);
+        if body == "bc" && prev_is_number(w, i) {
+            return one("B C".into(), period && sentence_end(w, i));
+        }
+        if let Some(said) = find(SLANG, body) {
+            return one((*said).to_string(), period && sentence_end(w, i));
+        }
+        let mut cs = body.chars();
+        let titled = cs.next().is_some_and(|c| c.is_ascii_uppercase()) && cs.all(|c| c.is_ascii_lowercase());
+        let starts = i == 0 || (w[i - 1].ends_with(['.', '!', '?']) && sentence_end(w, i - 1));
+        if titled && starts {
+            if let Some(said) = find(SLANG, &body.to_ascii_lowercase()) {
+                let mut cs = said.chars();
+                let cap: String = cs.next().map(|c| c.to_uppercase().chain(cs).collect()).unwrap_or_default();
+                return one(cap, period && sentence_end(w, i));
+            }
+        }
     }
     // ".NET" (a leading dot is not a sentence end or a domain)
     if strip_period(core).0 == ".NET" {
@@ -1844,8 +1887,7 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         // word must be within 3 words of the figure ("The pressure dropped to 897 mb"),
         // and no file / storage word may be near ("500 mb file, high quality").
         if body == "mb" && prev_digits {
-            let weather = near(w, i, 4, &["pressure", "hpa", "low", "high", "storm", "storm's", "hurricane", "barometric", "inhg", "cyclone", "typhoon", "millibar", "millibars"])
-                && !near(w, i, 6, MB_STORAGE);
+            let weather = mb_is_weather(w, i);
             let (o, m) = if weather { ("millibar", "millibars") } else { ("megabyte", "megabytes") };
             return one((if prev_is_one(w, i) { o } else { m }).to_string(), period);
         }
@@ -1923,6 +1965,8 @@ fn check_tables_sorted() {
     sorted("NUMBER_WORDS", NUMBER_WORDS.iter());
     sorted("STATES", STATES.iter().map(|e| e.0));
     sorted("OVER", OVER.iter().map(|e| e.0));
+    sorted("MB_STORAGE", MB_STORAGE.iter());
+    sorted("MB_WEATHER", MB_WEATHER.iter());
     sorted("SLANG", SLANG.iter().map(|e| e.0));
     sorted("EXCHANGES", EXCHANGES.iter().map(|e| e.0));
     sorted("COMPASS", COMPASS.iter().map(|e| e.0));

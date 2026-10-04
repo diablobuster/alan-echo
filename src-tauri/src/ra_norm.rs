@@ -784,6 +784,30 @@ mod round3_tests {
     }
 
     #[test]
+    fn mb_nearest_context_word_decides() {
+        check(&[
+            ("940 mb before landfall, per data from the NHC", "millibars"),
+            ("a 500 mb file", "megabytes"),
+            ("The 990 mb low brought data outages", "millibars"),
+            ("high resolution photos take 12 mb each", "megabytes"),
+        ]);
+    }
+
+    #[test]
+    fn round3_minor_shorthand() {
+        check(&[
+            ("It was built in 44 bc by the Romans", "B C"),
+            ("b/c the landlord never fixed it", "because the"),
+            ("Imo the first season is better", "In my opinion"),
+            ("Tbh it was fine", "To be honest"),
+            ("Ngl that hurt", "Not gonna lie"),
+            ("Idk what happened", "I don't know"),
+            ("Ppl are mad. Smh honestly", "People are"),
+        ]);
+        check_not(&[("It was built in 44 bc by the Romans", "because"), ("Mr. Imo said", "opinion")]);
+    }
+
+    #[test]
     fn medical_and_review_units() {
         check(&[
             ("Heart rate was 141 bpm and", "one hundred forty one beats per minute"),

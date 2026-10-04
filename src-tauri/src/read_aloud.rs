@@ -1145,7 +1145,7 @@ impl Controller {
                     r.before,
                     r.after
                 );
-                self.guard.own_ran(Instant::now(), r.before, r.after);
+                self.guard.own_ran(Instant::now(), r.before, r.after, r.expected);
             }
             Msg::ClickPicked(id, r) => self.on_click_picked(id, r),
             Msg::Chunk(g, idx, r) => self.on_chunk(g, idx, r),
@@ -1587,11 +1587,26 @@ impl Controller {
                     return;
                 }
                 Decision::Scroll => {
+                    // off screen: place the last word seen on screen 30% from the top
+                    // through the page's scroller; else scroll the paragraph into view
+                    let prev_y = look.prev.as_ref().and_then(|r| r.first()).map(|r| r.y);
+                    let lead = look.scroll.and_then(|sp| {
+                        self.guard.lead(Instant::now(), self.follow, None, prev_y, (sp.top, sp.extent))
+                    });
                     if let Some(&first) = src.first() {
-                        self.scroll_own(first);
+                        match lead {
+                            Some(dy) => self.scroll_lead(first, dy),
+                            None => self.scroll_own(first),
+                        }
                     }
                 }
                 Decision::Nothing => {}
+            }
+            // keep the spoken word on screen: it entered the bottom of the viewport
+            if let (Some(r), Some(sp), Some(&first)) = (look.rects.first(), look.scroll, src.first()) {
+                if let Some(dy) = self.guard.lead(Instant::now(), self.follow, Some((r.y, r.h)), None, (sp.top, sp.extent)) {
+                    self.scroll_lead(first, dy);
+                }
             }
         }
         let rects = look.rects;
@@ -1635,6 +1650,19 @@ impl Controller {
             let _ = tx.send(Msg::OwnScrollRan(ran));
         });
         log::debug!("read-aloud: own scroll queued for token {first}");
+        self.guard.own_queued(Instant::now());
+        self.rects_retry = true;
+    }
+
+    /// Echo scrolls the page by `dy` px through its scroller (lead scrolling), with the
+    /// delta it asked for reported back for the own-scroll window.
+    fn scroll_lead(&mut self, first: usize, dy: f64) {
+        let Some(u) = &self.uia else { return };
+        let tx = self.tx.clone();
+        u.scroll_by_acked(first, dy, move |ran| {
+            let _ = tx.send(Msg::OwnScrollRan(ran));
+        });
+        log::debug!("read-aloud: lead scroll {dy:.0} px queued");
         self.guard.own_queued(Instant::now());
         self.rects_retry = true;
     }

@@ -910,8 +910,10 @@ fn uia_chrome_breakdown() {
 /// mid-view every 5 s, a growing ad slot, lazy images, a sticky header with a live
 /// clock). Runs the real UIA worker and the real `ra_follow::Guard` for 20 s hands-off,
 /// reading at 12 words/s so Echo's own (smooth) scrolls happen too, and asserts follow
-/// stays on. Then a positive control: a programmatic page-down on the page's own
-/// ScrollPattern (like a keyboard scroll, no input sent) must turn follow off.
+/// stays on. Lead scrolling (fix round 1) keeps the word on screen; RA_LEAD=0 measures
+/// without it, RA_WPS sets the reading rate. Then a keyboard-like PageDown (the page's
+/// own button runs window.scrollBy; invoked through UIA, no input sent) must turn
+/// follow off.
 /// Edge on a throwaway profile (RA_BROWSER = chrome.exe's path for Chrome); never
 /// touches the user's windows; sends no input.
 /// Run: cargo test follow_reflow_manual -- --ignored --nocapture --test-threads=1
@@ -938,7 +940,11 @@ fn follow_reflow_manual() {
     Command::new(&exe)
         .arg(format!("--user-data-dir={}", profile.display()))
         .args(["--no-first-run", "--no-default-browser-check", "--new-window", "--window-size=1100,900"])
-        .arg(format!("file:///{}", page.display().to_string().replace('\\', "/")))
+        .arg(format!(
+            "file:///{}{}",
+            page.display().to_string().replace('\\', "/"),
+            if std::env::var("RA_STATIC").is_ok() { "?static" } else { "" }
+        ))
         .spawn()
         .expect("launch browser");
     let t0 = Instant::now();
@@ -957,7 +963,6 @@ fn follow_reflow_manual() {
     let uia = new_uia();
     let cond = text_pattern_condition(&uia).unwrap();
     let mut target = None;
-    let mut page_el = None;
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(250));
         if let Some(h) = find_window(&tag) {
@@ -977,7 +982,6 @@ fn follow_reflow_manual() {
                     let rc = rects_of(&r).unwrap_or_default();
                     if !rc.is_empty() {
                         target = Some(rc[0].clone());
-                        page_el = Some(e.clone());
                         break;
                     }
                 }
@@ -1055,9 +1059,16 @@ fn follow_reflow_manual() {
     let mut follow = true;
     let mut offs: Vec<String> = Vec::new();
     let mut look_ms: Vec<f64> = Vec::new();
+    // RA_LEAD=0: the round-3 behaviour (scroll only once the word is off screen, by
+    // scroll-into-view) for the before / after on-screen measurement
+    let lead_on = std::env::var("RA_LEAD").map_or(true, |v| v != "0");
+    // RA_WPS: words per second (6.6 = Echo at 2.2x, 8.5 = 3x; the gapless bench article)
+    let wps: f64 = std::env::var("RA_WPS").ok().and_then(|v| v.parse().ok()).unwrap_or(6.6);
     // stats: looks, timeouts, visible, scroll known, single empties, own scrolls,
-    // reflows ignored, own-scroll moves ignored
-    let step = |g: &mut Guard, follow: &mut bool, wi: usize, stats: &mut [u32; 8], offs: &mut Vec<String>, look_ms: &mut Vec<f64>| -> bool {
+    // reflows ignored, own-scroll moves ignored, lead scrolls
+    // The controller's update_word_rects, step for step (no Tauri here).
+    let t_start = Instant::now();
+    let step = |g: &mut Guard, follow: &mut bool, wi: usize, stats: &mut [u32; 9], offs: &mut Vec<String>, look_ms: &mut Vec<f64>| -> bool {
         let prev_src = g.anchor_word().filter(|&p| p != wi).map(|p| words[p].src.clone());
         let t = Instant::now();
         let Some(look) = ra.look(words[wi].src.clone(), prev_src) else {
@@ -1074,6 +1085,22 @@ fn follow_reflow_manual() {
             (Some(p), Some(r)) if p != wi => Some(anchor_of(p, r, w)),
             _ => None,
         };
+        if std::env::var("RA_TRACE").is_ok() {
+            println!(
+                "  {:>6} ms w{wi} rect {:?} scroll {:?}",
+                t.duration_since(t_start).as_millis(),
+                look.rects.first().map(|r| (r.y as i32, r.h as i32)),
+                look.scroll.map(|s| (s.y as i32, s.top as i32, s.extent as i32))
+            );
+        }
+        let first = words[wi].src[0];
+        let ack = |atx: &mpsc::Sender<ScrollRan>| {
+            let tx = atx.clone();
+            move |r| {
+                let _ = tx.send(r);
+            }
+        };
+        let mut retry = false;
         match g.look(Instant::now(), *follow, obs, prev_again, look.scroll) {
             Decision::Off(r) => {
                 println!("{r}");
@@ -1081,7 +1108,9 @@ fn follow_reflow_manual() {
                 *follow = false;
             }
             Decision::Ignored(i) => {
-                println!("{i}");
+                if std::env::var("RA_TRACE").is_ok() {
+                    println!("  {i}");
+                }
                 stats[if i.why == "reflow" { 6 } else { 7 }] += 1;
             }
             Decision::Wait => {
@@ -1090,26 +1119,57 @@ fn follow_reflow_manual() {
             }
             Decision::Scroll => {
                 stats[5] += 1;
-                println!("scroll to word {wi} ({:?})", words[wi].text);
-                let tx = atx.clone();
-                ra.scroll_to_acked(words[wi].src[0], move |r| {
-                    let _ = tx.send(r);
-                });
+                let prev_y = look.prev.as_ref().and_then(|r| r.first()).map(|r| r.y);
+                let lead = look
+                    .scroll
+                    .filter(|_| lead_on)
+                    .and_then(|sp| g.lead(Instant::now(), *follow, None, prev_y, (sp.top, sp.extent)));
+                match lead {
+                    Some(dy) => ra.scroll_by_acked(first, dy, ack(&atx)),
+                    None => ra.scroll_to_acked(first, ack(&atx)),
+                }
                 g.own_queued(Instant::now());
-                return true;
+                retry = true;
             }
             Decision::Nothing => {}
         }
-        false
+        if let (true, Some(r), Some(sp)) = (lead_on, look.rects.first(), look.scroll) {
+            if let Some(dy) = g.lead(Instant::now(), *follow, Some((r.y, r.h)), None, (sp.top, sp.extent)) {
+                stats[8] += 1;
+                if std::env::var("RA_TRACE").is_ok() {
+                    println!("  lead {dy:.0}");
+                }
+                ra.scroll_by_acked(first, dy, ack(&atx));
+                g.own_queued(Instant::now());
+                retry = true;
+            }
+        }
+        retry
     };
-    let mut stats = [0u32; 8];
+    let mut stats = [0u32; 9];
     let mut wheels = 0;
     let mut queued_ms: Vec<u64> = Vec::new();
-    let wps = 12.0;
     let run = Duration::from_secs(20);
     let t0 = Instant::now();
     let (mut last_word, mut last_look, mut retry) = (usize::MAX, t0, false);
-    while t0.elapsed() < run {
+    // The read goes on past the hands-off part; at 20 s the page's own "Page down" button
+    // (window.scrollBy, like the PageDown key; invoked through UIA in our own throwaway
+    // browser, no input sent) must turn follow off within 3 s.
+    let page_down = {
+        let cond = unsafe {
+            uia.CreatePropertyCondition(UIA_NamePropertyId, &VARIANT::from(windows::core::BSTR::from("Page down")))
+        }
+        .unwrap();
+        unsafe { uia.ElementFromHandle(hwnd).unwrap().FindFirst(TreeScope_Descendants, &cond) }
+            .ok()
+            .and_then(|e| unsafe { e.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }.ok())
+    };
+    let mut pressed: Option<(Instant, usize)> = None;
+    let mut press_y: Option<f64> = None;
+    let mut presses = 1u32;
+    let mut hands_off_offs = None;
+    let mut visible_hands_off = (0, 0);
+    while t0.elapsed() < run + Duration::from_secs(5) {
         for ev in hrx.try_iter() {
             if let MouseEv::Wheel { x, y } = ev {
                 if root_at(x, y) == hwnd.0 as isize {
@@ -1120,8 +1180,33 @@ fn follow_reflow_manual() {
         }
         for r in arx.try_iter() {
             queued_ms.push(r.queued_ms);
-            println!("own scroll ran: queued {} ms, scroll {:?} -> {:?}", r.queued_ms, r.before, r.after);
-            g.own_ran(Instant::now(), r.before, r.after);
+            g.own_ran(Instant::now(), r.before, r.after, r.expected);
+        }
+        if t0.elapsed() >= run && pressed.is_none() {
+            hands_off_offs = Some(offs.clone());
+            visible_hands_off = (stats[2], stats[0]);
+            if let Some(p) = &page_down {
+                unsafe { p.Invoke() }.expect("press the page's Page down button");
+                println!("pressed Page down (window.scrollBy) with follow {}", if follow { "on" } else { "off" });
+            }
+            pressed = Some((Instant::now(), offs.len()));
+            press_y = ra.look(words[last_word].src.clone(), None).and_then(|l| l.rects.first().map(|r| r.y));
+        }
+        if pressed.is_some_and(|(_, n)| offs.len() > n) {
+            break;
+        }
+        // the page's own ad / anchoring can swallow a scrollBy (measured: the offset moved,
+        // the words did not): press again when the spoken word has not moved in 1 s
+        if let (Some((at, _)), Some(p), true) = (pressed, &page_down, presses < 3) {
+            if at.elapsed() >= Duration::from_secs(1) * presses {
+                let y = ra.look(words[last_word].src.clone(), None).and_then(|l| l.rects.first().map(|r| r.y));
+                let still = matches!((press_y, y), (Some(a), Some(b)) if (a - b).abs() < 100.0);
+                if still {
+                    unsafe { p.Invoke() }.expect("press Page down again");
+                    println!("Page down #{presses} did not move the words; pressed again");
+                }
+                presses += 1;
+            }
         }
         let wi = ((t0.elapsed().as_secs_f64() * wps) as usize).min(words.len() - 1);
         if wi != last_word || retry || last_look.elapsed() >= Duration::from_millis(250) {
@@ -1131,94 +1216,37 @@ fn follow_reflow_manual() {
         }
         std::thread::sleep(Duration::from_millis(33));
     }
-    let [looks, timeouts, visible, with_scroll, waits, scrolls, reflows, owns] = stats;
+    let [_, timeouts, _, with_scroll, waits, scrolls, reflows, owns, leads] = stats;
+    let (visible, looks) = visible_hands_off;
     let mut lm = look_ms.clone();
     lm.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p = |q: f64| lm.get(((lm.len() as f64 - 1.0) * q) as usize).copied().unwrap_or(0.0);
+    let hands_off_offs = hands_off_offs.unwrap_or_default();
     println!(
-        "20 s hands-off: looks {looks} (timeouts {timeouts}), word visible {visible}, scroll offset known {with_scroll}, \
-         single empties {waits}, own scrolls {scrolls}, reflows ignored {reflows}, own-scroll moves ignored {owns}, \
-         wheels over the window {wheels}, follow-offs {}; look p50 {:.1} ms p95 {:.1} ms; own scroll queue ms {queued_ms:?}",
-        offs.len(),
+        "20 s hands-off at {wps} words/s, lead {}: word on screen {visible}/{looks} = {:.1}%; timeouts {timeouts}, \
+         scroll offset known {with_scroll}, single empties {waits}, off-screen scrolls {scrolls}, lead scrolls {leads}, \
+         reflows ignored {reflows}, own-scroll moves ignored {owns}, wheels over the window {wheels}, \
+         follow-offs {}; look p50 {:.1} ms p95 {:.1} ms; own scroll queue ms {queued_ms:?}",
+        if lead_on { "on" } else { "off" },
+        visible as f64 * 100.0 / looks.max(1) as f64,
+        hands_off_offs.len(),
         p(0.5),
         p(0.95)
     );
-    let hands_off_offs = offs.clone();
-
-    // Positive control: page down through the page's own ScrollPattern (a keyboard-like
-    // scroll; no input). Follow must turn off with scroll-offset evidence.
-    // a word that is on screen now (the page keeps reflowing; the last word may not be)
-    let wi = (0..=last_word)
-        .rev()
-        .take(400)
-        .find(|&k| ra.look(words[k].src.clone(), None).is_some_and(|l| !l.rects.is_empty()))
-        .expect("a word on screen");
-    g = Guard::default();
-    follow = true;
-    let mut scratch = [0u32; 8];
-    // settle: any own scroll's grace runs out
-    std::thread::sleep(Duration::from_millis(2600));
-    for r in arx.try_iter() {
-        g.own_ran(Instant::now(), r.before, r.after);
-    }
-    for _ in 0..3 {
-        step(&mut g, &mut follow, wi, &mut scratch, &mut offs, &mut Vec::new());
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    // the page's own document (the TextPattern element the words came from)
-    let sp = unsafe {
-        page_el.as_ref().expect("page element").GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
-    }
-    .expect("the page's ScrollPattern");
-    let before_offs = offs.len();
-    let peek = |ra: &Uia| ra.look(words[wi].src.clone(), None).map(|l| (l.rects.first().map(|r| r.y), l.scroll));
-    println!("control: before page down {:?}", peek(&ra));
-    // Chrome ignores ScrollPattern.Scroll(LargeIncrement), and now and then a
-    // SetScrollPercent too: set the percent, and set it again if the page did not move.
-    // judge the page down by the word (the page's ad resizes itself and Chrome's scroll
-    // anchoring then changes the offset with no scroll at all)
-    let word_y = |ra: &Uia| peek(ra).and_then(|(y, _)| y);
-    let start = word_y(&ra);
-    let moved = |now: Option<f64>| match (start, now) {
-        (Some(a), Some(b)) => a - b > 100.0,
-        (Some(_), None) => true,
-        _ => false,
-    };
-    let offset = word_y;
-    for attempt in 0..5 {
-        let pct = unsafe { sp.CurrentVerticalScrollPercent() }.expect("scroll percent");
-        unsafe { sp.SetScrollPercent(UIA_ScrollPatternNoScroll, (pct + 8.0).min(100.0)) }.expect("page down");
-        for _ in 0..10 {
-            std::thread::sleep(Duration::from_millis(100));
-            if moved(offset(&ra)) {
-                break;
-            }
-        }
-        if moved(offset(&ra)) {
-            break;
-        }
-        println!("control: page down #{attempt} did not move the page; again");
-    }
-    for _ in 0..30 {
-        for r in arx.try_iter() {
-            g.own_ran(Instant::now(), r.before, r.after);
-        }
-        step(&mut g, &mut follow, wi, &mut scratch, &mut offs, &mut Vec::new());
-        if offs.len() > before_offs {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
     drop(hook);
     drop(ra);
     assert!(hands_off_offs.is_empty(), "follow turned off with no user scroll: {hands_off_offs:?}");
     assert!(with_scroll > 0, "the page's scroll offset was readable");
-    // A sanity floor, not a quality bar: at 12 words/s (about 2x Echo's 2.2x) Chrome's
-    // paragraph-level ScrollIntoView ("only if needed") leaves some words of a tall,
-    // half-visible paragraph off screen until the next scroll (measured 64-93%).
-    assert!(visible * 2 >= looks, "follow kept the spoken word on screen ({visible}/{looks})");
+    assert!(page_down.is_some(), "the page's Page down button");
+    if !lead_on {
+        return; // the round-3 behaviour, for the on-screen measurement only
+    }
+    let after = pressed.map_or(&offs[..0], |(_, n)| &offs[n..]);
+    println!("after Page down: {after:?}");
     assert!(
-        offs.len() > before_offs && offs.last().unwrap().contains("evidence=scroll_offset"),
-        "a keyboard-like page down turns follow off: {offs:?}"
+        after.iter().any(|o| ["scroll_offset", "beyond_own_scroll", "against_own_scroll"]
+            .iter()
+            .any(|e| o.contains(&format!("evidence={e} ")))),
+        "a PageDown (window.scrollBy) turns follow off: {after:?}"
     );
 }

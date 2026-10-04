@@ -58,6 +58,18 @@ pub const PENDING_CAP: Duration = Duration::from_secs(5);
 /// words have not followed yet keeps the old baseline this long (then it is taken as
 /// scroll anchoring, which moves the offset but not the words).
 pub const OFFSET_HOLD: Duration = Duration::from_millis(1000);
+/// Inside Echo's own-scroll window, an offset change beyond the asked-for delta plus
+/// this share of the viewport is the user's.
+pub const OWN_SLACK: f64 = 0.25;
+/// Content an own scroll reveals loads right after it lands (lazy images, blocks): an
+/// unmeasured move beyond the asked-for delta counts as the user only after this long.
+pub const LAZY_WINDOW: Duration = Duration::from_millis(700);
+/// Lead scrolling (keep the spoken word on screen): when the word enters the bottom
+/// `LEAD_BOTTOM` of the scroller viewport, scroll so it sits `LEAD_TARGET` from the top.
+pub const LEAD_BOTTOM: f64 = 0.20;
+pub const LEAD_TARGET: f64 = 0.30;
+/// At most one lead scroll this often, unless the word is off screen.
+pub const LEAD_EVERY: Duration = Duration::from_millis(1500);
 /// Empty rect answers in a row before the word counts as off screen.
 pub const EMPTIES: u32 = 2;
 
@@ -70,6 +82,13 @@ pub enum Evidence {
     ScrollOffset,
     /// The scroll offset moved against the direction of Echo's own settling scroll.
     AgainstOwnScroll,
+    /// Inside Echo's own-scroll window the offset moved further than Echo asked for
+    /// (|expected| + 25% of the viewport), against it, or after a scroll that asked for
+    /// no movement: a PageDown on top of our scroll.
+    BeyondOwnScroll,
+    /// The scroll offset is unknown (Acrobat, OCR, no scrollable ancestor) and the word
+    /// left the screen while Echo was not scrolling: the user scrolled it away.
+    LeftScreen,
 }
 
 impl Evidence {
@@ -79,6 +98,8 @@ impl Evidence {
             Evidence::Drag => "drag",
             Evidence::ScrollOffset => "scroll_offset",
             Evidence::AgainstOwnScroll => "against_own_scroll",
+            Evidence::BeyondOwnScroll => "beyond_own_scroll",
+            Evidence::LeftScreen => "left_screen_no_offset",
         }
     }
 }
@@ -175,6 +196,13 @@ struct Own {
     stable: u32,
     /// The page settled after it: Echo may scroll again; only the tail is still ours.
     settled: bool,
+    /// The offset when it ran, and the vertical delta it asked for (`None` = unknown,
+    /// a scroll-into-view).
+    start: Option<ScrollPos>,
+    expected: Option<f64>,
+    /// A look showed the offset where it asked (within the slack): from then on a move
+    /// beyond it is the user's even when no word could be measured.
+    landed: bool,
     /// The last time the page was seen moving (the ack time until then).
     last_move: Instant,
 }
@@ -196,16 +224,22 @@ pub struct Guard {
     own_ran_at: Option<Instant>,
     /// The word Echo already scrolled to (each word is scrolled to once).
     scrolled_word: Option<usize>,
+    /// The last lead scroll (`lead`).
+    last_lead: Option<Instant>,
 }
 
 /// A word move `dw` (px, one axis) fits an offset change `ds` on that axis: the word
 /// moved against the offset. Chrome's scroll anchoring changes the offset while the
-/// words stay put, or (with a reflow at the same time) move WITH it. The size is not
-/// compared: a real scroll while content above the view resizes changes the offset by
-/// less or more than the words moved (measured on Edge: page down 442 px, offset +192).
+/// words stay put, or (with a reflow at the same time) move WITH it or only a little
+/// against it (Edge: word -114, offset +250). The word may move more than the offset (a
+/// real scroll while content above the view shrinks: page down 442 px, offset +192),
+/// but at least `FIT_SHARE` of it.
 fn fits_scroll(dw: f64, ds: f64) -> bool {
-    ds.abs() < SCROLL_PX || (dw.abs() >= SHIFT_PX && dw.signum() == -ds.signum())
+    ds.abs() < SCROLL_PX || (dw.abs() >= SHIFT_PX && dw.signum() == -ds.signum() && dw.abs() >= FIT_SHARE * ds.abs())
 }
+
+/// A word move must be at least this share of the offset change to fit a scroll.
+const FIT_SHARE: f64 = 0.6;
 
 fn sign(v: f64) -> f64 {
     if v.abs() < SCROLL_PX {
@@ -238,17 +272,70 @@ impl Guard {
 
     /// Echo's scroll ran on the UIA worker; `before`/`after` = the page's scroll offset
     /// right before and after the call (a smooth scroll may not have moved yet).
-    pub fn own_ran(&mut self, now: Instant, before: Option<ScrollPos>, after: Option<ScrollPos>) {
+    /// `expected` = the vertical delta (px) it asked for, when known.
+    pub fn own_ran(&mut self, now: Instant, before: Option<ScrollPos>, after: Option<ScrollPos>, expected: Option<f64>) {
         self.pending_at = None;
         let dir = match (before, after) {
             (Some(b), Some(a)) => (sign(a.x - b.x), sign(a.y - b.y)),
             _ => (0.0, 0.0),
         };
-        self.own = Some(Own { ran: now, dir, moved: dir != (0.0, 0.0), stable: 0, settled: false, last_move: now });
+        let expected = expected.filter(|_| before.is_some());
+        self.own = Some(Own {
+            ran: now,
+            dir,
+            moved: dir != (0.0, 0.0),
+            stable: 0,
+            settled: false,
+            last_move: now,
+            start: before,
+            expected,
+            landed: false,
+        });
         self.own_ran_at = Some(now);
         if after.is_some() {
             self.scroll = after; // our own change is never compared against
         }
+    }
+
+    /// Echo may scroll now: no own scroll queued, and the last one settled.
+    pub fn may_scroll(&self, now: Instant) -> bool {
+        let pending = self.pending_at.is_some_and(|t| now.saturating_duration_since(t) < PENDING_CAP);
+        let settled = self.own.is_none_or(|o| o.settled || now.saturating_duration_since(o.ran) >= GRACE_CAP);
+        !pending && settled
+    }
+
+    /// Lead scrolling: the vertical delta (px) that keeps the spoken word on screen, or
+    /// `None` to leave the page alone. `word` = the spoken word's (top, height) on screen
+    /// (`None` = off screen); `prev_y` = the top of the last word seen on screen (used
+    /// when the spoken word is off screen); `view` = the scroller viewport (top, height).
+    /// The word entering the bottom `LEAD_BOTTOM` scrolls it to `LEAD_TARGET` from the
+    /// top, at most every `LEAD_EVERY`; a word off screen (or above the viewport) is
+    /// scrolled to at once. Never while Echo's own scroll is in flight or follow is off.
+    pub fn lead(
+        &mut self,
+        now: Instant,
+        follow: bool,
+        word: Option<(f64, f64)>,
+        prev_y: Option<f64>,
+        view: (f64, f64),
+    ) -> Option<f64> {
+        let (top, h) = view;
+        if !follow || h <= 0.0 || !self.may_scroll(now) {
+            return None;
+        }
+        let target = top + LEAD_TARGET * h;
+        let (y, urgent) = match word {
+            Some((y, _)) if y < top => (y, true),
+            Some((y, wh)) if y + wh > top + (1.0 - LEAD_BOTTOM) * h => (y, false),
+            Some(_) => return None,
+            None => (prev_y?, true),
+        };
+        let throttled = self.last_lead.is_some_and(|t| now.saturating_duration_since(t) < LEAD_EVERY);
+        if throttled && !urgent {
+            return None;
+        }
+        self.last_lead = Some(now);
+        Some(y - target)
     }
 
     /// The word whose anchor is held: when the spoken word changed, the caller re-measures
@@ -329,10 +416,41 @@ impl Guard {
         let mut grace = false;
         let mut tail = false;
         let mut against = false;
+        let mut beyond = false;
         if let Some(o) = self.own.as_mut() {
             let el = now.saturating_duration_since(o.ran);
             if el >= GRACE_CAP {
                 self.own = None;
+            } else if let (Some(e), Some(st), Some(sc)) = (o.expected, o.start, scroll) {
+                // Echo asked for `e` px: a move within |e| + OWN_SLACK of the viewport, in
+                // its direction, is ours; anything else is the user (also after a scroll
+                // that asked for nothing).
+                let cum = sc.y - st.y;
+                let budget = e.abs() + OWN_SLACK * st.extent.max(sc.extent);
+                let claimed = cum.abs() < SCROLL_PX
+                    || (e.abs() >= SCROLL_PX && cum.signum() == e.signum() && cum.abs() <= budget);
+                // only a word measured moving with the page tells a user scroll from lazy
+                // content growing above the view (Chrome's scroll anchoring) meanwhile
+                let measured = shift.is_some();
+                let near = (cum - e).abs() <= OWN_SLACK * st.extent.max(sc.extent);
+                beyond = scroll_moved && !claimed && (measured || (o.landed && el >= LAZY_WINDOW));
+                o.landed |= near && !beyond;
+                if o.settled {
+                    tail = scroll_moved && !beyond;
+                } else {
+                    grace = !beyond;
+                    if scroll_moved || word_moved || went_off {
+                        o.moved = true;
+                        o.stable = 0;
+                        o.last_move = now;
+                    } else if dscroll.is_some() || pair.is_some() {
+                        o.stable += 1;
+                    }
+                    let quiet = now.saturating_duration_since(o.last_move) >= GRACE_SETTLE;
+                    if o.stable >= GRACE_STABLE && quiet && (o.moved || el >= GRACE_QUIET) {
+                        o.settled = true;
+                    }
+                }
             } else {
                 let mut along = false;
                 if let Some(d) = dscroll.filter(|_| scroll_moved) {
@@ -368,10 +486,15 @@ impl Guard {
             Some(Evidence::Wheel)
         } else if recent(self.drag_at) {
             Some(Evidence::Drag)
+        } else if beyond && fits && !pending {
+            Some(Evidence::BeyondOwnScroll)
         } else if scroll_moved && fits && against && !pending {
             Some(Evidence::AgainstOwnScroll)
         } else if scroll_moved && fits && !pending && !grace && !tail {
             Some(Evidence::ScrollOffset)
+        } else if went_off && dscroll.is_none() && !pending && self.own.is_none() {
+            // no offset to go by: the word leaving with Echo not scrolling is the user
+            Some(Evidence::LeftScreen)
         } else {
             None
         };
@@ -446,7 +569,7 @@ mod tests {
         Anchor { word, pos: y.map(|y| (100.0, y)), win: WIN }
     }
     fn sp(y: f64) -> Option<ScrollPos> {
-        Some(ScrollPos { x: 0.0, y, pct: y / 100.0 })
+        Some(ScrollPos { x: 0.0, y, pct: y / 100.0, top: 100.0, extent: 800.0, view_pct: 20.0 })
     }
     fn ms(t0: Instant, n: u64) -> Instant {
         t0 + Duration::from_millis(n)
@@ -590,7 +713,7 @@ mod tests {
         g.observe(t0, true, at(6, None), None);
         assert_eq!(g.observe(ms(t0, 33), true, at(6, None), None), Decision::Scroll);
         g.own_queued(ms(t0, 33));
-        g.own_ran(ms(t0, 40), None, None);
+        g.own_ran(ms(t0, 40), None, None, None);
         // still off screen after the grace ran out: leave it (never fight every tick)
         assert_eq!(g.observe(ms(t0, 3000), true, at(6, None), None), Decision::Nothing);
         assert_eq!(g.observe(ms(t0, 3250), true, at(6, None), None), Decision::Nothing);
@@ -607,7 +730,7 @@ mod tests {
         // the request waited behind a long `more()`: the page moves before the ack
         assert!(!is_off(&g.observe(ms(t0, 400), true, at(6, None), sp(1000.0))));
         // it ran 1.5 s after it was queued; the smooth scroll has not started yet
-        g.own_ran(ms(t0, 1633), sp(1000.0), sp(1000.0));
+        g.own_ran(ms(t0, 1633), sp(1000.0), sp(1000.0), None);
         // two quiet looks right after the ack must not end the grace
         assert!(!is_off(&g.observe(ms(t0, 1666), true, at(6, None), sp(1000.0))));
         assert!(!is_off(&g.observe(ms(t0, 1700), true, at(6, None), sp(1000.0))));
@@ -632,7 +755,7 @@ mod tests {
         let mut g = Guard::default();
         g.observe(t0, true, at(5, Some(400.0)), sp(0.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 10), sp(0.0), sp(0.0));
+        g.own_ran(ms(t0, 10), sp(0.0), sp(0.0), None);
         // a page that never settles (an animation) cannot hold the grace forever
         let mut y = 0.0;
         let mut last = Decision::Nothing;
@@ -649,7 +772,7 @@ mod tests {
         let mut g = Guard::default();
         g.observe(t0, true, at(5, Some(400.0)), sp(1000.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 20), sp(1000.0), sp(1300.0)); // we scrolled down 300 px
+        g.own_ran(ms(t0, 20), sp(1000.0), sp(1300.0), None); // we scrolled down 300 px
         // our scroll keeps easing down: ours
         assert!(!is_off(&g.observe(ms(t0, 120), true, at(5, Some(80.0)), sp(1320.0))));
         // the page goes back up during the grace: the user pressed PgUp
@@ -663,7 +786,7 @@ mod tests {
         let mut g = Guard::default();
         g.observe(t0, true, at(5, Some(400.0)), sp(1000.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 20), sp(1000.0), sp(1300.0));
+        g.own_ran(ms(t0, 20), sp(1000.0), sp(1300.0), None);
         g.wheel(ms(t0, 200));
         let d = g.observe(ms(t0, 300), true, at(5, Some(50.0)), sp(1350.0));
         assert!(matches!(&d, Decision::Off(r) if r.evidence == Evidence::Wheel), "{d:?}");
@@ -780,7 +903,7 @@ mod tests {
         let mut g = Guard::default();
         g.look(t0, true, at(5, Some(720.0)), None, sp(273.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 2), sp(273.0), sp(273.0));
+        g.own_ran(ms(t0, 2), sp(273.0), sp(273.0), None);
         let mut t = 2;
         let mut y = 273.0;
         let mut word = 5;
@@ -829,7 +952,7 @@ mod tests {
         let mut g = Guard::default();
         g.look(t0, true, at(5, Some(700.0)), None, sp(0.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 1), sp(0.0), sp(0.0));
+        g.own_ran(ms(t0, 1), sp(0.0), sp(0.0), None);
         assert!(!is_off(&g.look(ms(t0, 300), true, at(5, Some(284.0)), None, sp(416.0))));
         for t in [383, 466, 550, 633, 716, 800, 883] {
             assert!(!is_off(&g.look(ms(t0, t), true, at(5, Some(284.0)), None, sp(416.0))));
@@ -846,7 +969,7 @@ mod tests {
         let mut g = Guard::default();
         g.look(t0, true, at(5, Some(700.0)), None, sp(500.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 1), sp(500.0), sp(500.0));
+        g.own_ran(ms(t0, 1), sp(500.0), sp(500.0), None);
         assert!(!is_off(&g.look(ms(t0, 300), true, at(5, Some(288.0)), None, sp(912.0))));
         for t in [550, 800, 1050, 1300, 1550, 1800] {
             assert!(!is_off(&g.look(ms(t0, t), true, at(5, Some(288.0)), None, sp(912.0))));
@@ -864,7 +987,7 @@ mod tests {
         let mut g = Guard::default();
         g.look(t0, true, at(5, Some(700.0)), None, sp(500.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 1), sp(500.0), sp(500.0));
+        g.own_ran(ms(t0, 1), sp(500.0), sp(500.0), None);
         g.look(ms(t0, 300), true, at(5, Some(288.0)), None, sp(912.0));
         for t in [550, 800, 1050, 1300] {
             g.look(ms(t0, t), true, at(5, Some(288.0)), None, sp(912.0));
@@ -876,7 +999,7 @@ mod tests {
         let mut g = Guard::default();
         g.look(t0, true, at(5, Some(700.0)), None, sp(500.0));
         g.own_queued(t0);
-        g.own_ran(ms(t0, 1), sp(500.0), sp(500.0));
+        g.own_ran(ms(t0, 1), sp(500.0), sp(500.0), None);
         g.look(ms(t0, 300), true, at(5, Some(288.0)), None, sp(912.0));
         for t in [550, 800, 1050, 1300] {
             g.look(ms(t0, t), true, at(5, Some(288.0)), None, sp(912.0));
@@ -917,5 +1040,193 @@ mod tests {
         }
         let d = g.look(ms(t0, 1600), true, at(5, Some(150.0)), None, sp(1250.0));
         assert!(matches!(&d, Decision::Ignored(Ignored { why: "reflow", .. })), "{d:?}");
+    }
+
+    // ---- fix round 1 ----
+
+    #[test]
+    fn offset_unknown_and_the_word_leaves_the_screen_is_a_user_scroll() {
+        // Acrobat / OCR / no scrollable ancestor: a keyboard scroll moves the word away and
+        // nothing else can tell. Scrolling back would snap the page back on every word.
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(400.0)), None, None);
+        assert_eq!(g.look(ms(t0, 250), true, at(5, None), None, None), Decision::Wait);
+        let d = g.look(ms(t0, 283), true, at(5, None), None, None);
+        assert!(matches!(&d, Decision::Off(r) if r.evidence == Evidence::LeftScreen), "{d:?}");
+        // reading moves on to an off-screen word while the previous one is gone too
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(700.0)), None, None);
+        g.look(ms(t0, 180), true, at(6, None), Some(at(5, None)), None);
+        let d = g.look(ms(t0, 213), true, at(6, None), Some(at(5, None)), None);
+        assert!(matches!(&d, Decision::Off(r) if r.evidence == Evidence::LeftScreen), "{d:?}");
+    }
+
+    #[test]
+    fn offset_unknown_small_reflow_on_screen_keeps_follow_on() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(400.0)), None, None);
+        let d = g.look(ms(t0, 250), true, at(5, Some(430.0)), None, None);
+        assert!(matches!(&d, Decision::Ignored(Ignored { why: "reflow", .. })), "{d:?}");
+        // reading running off the bottom with the previous word still on screen: scroll
+        let d = g.look(ms(t0, 400), true, at(6, None), Some(at(5, Some(430.0))), None);
+        assert_eq!(d, Decision::Wait);
+        assert_eq!(g.look(ms(t0, 433), true, at(6, None), Some(at(5, Some(430.0))), None), Decision::Scroll);
+    }
+
+    #[test]
+    fn offset_unknown_word_leaving_during_our_own_scroll_is_ours() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(700.0)), None, None);
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), None, None, None);
+        g.look(ms(t0, 100), true, at(5, None), None, None);
+        assert!(!is_off(&g.look(ms(t0, 133), true, at(5, None), None, None)));
+    }
+
+    #[test]
+    fn a_big_same_direction_page_down_inside_our_scroll_window_is_the_user() {
+        // our lead scroll asked for +300 px; the user then pressed PageDown (+900 px)
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(600.0)), None, sp(1000.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), sp(1000.0), sp(1000.0), Some(300.0));
+        let d = g.look(ms(t0, 100), true, at(5, Some(300.0)), None, sp(1300.0));
+        assert!(!is_off(&d), "our own +300: {d:?}");
+        let d = g.look(ms(t0, 350), true, at(5, Some(-600.0)), None, sp(2200.0));
+        assert!(matches!(&d, Decision::Off(r) if r.evidence == Evidence::BeyondOwnScroll), "{d:?}");
+    }
+
+    #[test]
+    fn a_small_overshoot_of_our_own_scroll_is_still_ours() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(600.0)), None, sp(1000.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), sp(1000.0), sp(1000.0), Some(300.0));
+        // +300 plus a 120 px reflow-ish overshoot, within |expected| + 25% of 800
+        let d = g.look(ms(t0, 100), true, at(5, Some(180.0)), None, sp(1420.0));
+        assert!(!is_off(&d), "{d:?}");
+    }
+
+    #[test]
+    fn our_scroll_that_did_not_move_claims_nothing() {
+        // the scroll asked for nothing (the page was already at its end): the next move is
+        // the user's even right after it
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(600.0)), None, sp(3200.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), sp(3200.0), sp(3200.0), Some(0.0));
+        let d = g.look(ms(t0, 100), true, at(5, Some(1000.0)), None, sp(2800.0));
+        assert!(matches!(&d, Decision::Off(r) if r.evidence == Evidence::BeyondOwnScroll), "{d:?}");
+    }
+
+    #[test]
+    fn going_against_our_known_scroll_is_the_user() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(600.0)), None, sp(1000.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), sp(1000.0), sp(1000.0), Some(300.0));
+        let d = g.look(ms(t0, 100), true, at(5, Some(900.0)), None, sp(700.0));
+        assert!(matches!(&d, Decision::Off(r) if r.evidence == Evidence::BeyondOwnScroll), "{d:?}");
+    }
+
+    const VIEW: (f64, f64) = (100.0, 800.0); // viewport top, height (screen px)
+
+    #[test]
+    fn lead_keeps_the_word_off_the_bottom() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        // word in the middle: nothing
+        assert_eq!(g.lead(t0, true, Some((500.0, 20.0)), None, VIEW), None);
+        // word enters the bottom 20% (its bottom below 100 + 640): bring it to 30% (340)
+        assert_eq!(g.lead(t0, true, Some((730.0, 20.0)), None, VIEW), Some(390.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), sp(0.0), sp(0.0), Some(390.0));
+        // never while our own scroll is settling
+        assert_eq!(g.lead(ms(t0, 300), true, Some((760.0, 20.0)), None, VIEW), None);
+        // follow off: never
+        let mut g = Guard::default();
+        assert_eq!(g.lead(t0, false, Some((730.0, 20.0)), None, VIEW), None);
+    }
+
+    #[test]
+    fn lead_scrolls_at_most_every_1_5_s_unless_off_screen() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        assert!(g.lead(t0, true, Some((730.0, 20.0)), None, VIEW).is_some());
+        // (no own scroll registered: only the throttle applies)
+        assert_eq!(g.lead(ms(t0, 1000), true, Some((735.0, 20.0)), None, VIEW), None);
+        assert!(g.lead(ms(t0, 1600), true, Some((735.0, 20.0)), None, VIEW).is_some());
+        // off screen: at once, placing the last visible word at 30%
+        assert_eq!(g.lead(ms(t0, 1700), true, None, Some(880.0), VIEW), Some(540.0));
+        // off screen with no word to go by: the caller falls back to scroll-into-view
+        assert_eq!(g.lead(ms(t0, 1800), true, None, None, VIEW), None);
+        // a word above the viewport counts as off screen too
+        let mut g = Guard::default();
+        assert_eq!(g.lead(t0, true, Some((40.0, 20.0)), None, VIEW), Some(-300.0));
+    }
+
+    #[test]
+    fn lazy_content_growing_during_our_scroll_is_not_the_user() {
+        // Measured on Edge (lab page): a 398 px lead scroll; lazy blocks grew above the
+        // view meanwhile and the offset jumped +1082 px, and the words left the screen
+        // with no measurable move. Without a word moving against the offset, it's ours.
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(74, Some(793.0)), None, sp(489.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), sp(489.0), sp(489.0), Some(398.0));
+        assert_eq!(g.look(ms(t0, 130), true, at(75, None), Some(at(74, None)), sp(1571.0)), Decision::Wait);
+        let d = g.look(ms(t0, 165), true, at(75, None), Some(at(74, None)), sp(1571.0));
+        assert!(!is_off(&d), "{d:?}");
+        let d = g.look(ms(t0, 600), true, at(76, None), Some(at(75, None)), sp(1991.0));
+        assert!(!is_off(&d), "{d:?}");
+    }
+
+    #[test]
+    fn a_small_reflow_against_an_anchoring_jump_is_not_a_scroll() {
+        // Measured on Edge: the ad above the view grew (anchoring: offset +250) while a
+        // reflow moved the word up 114 px. A scroll moves the word about as far as the
+        // offset (at least 60% of it; the -442 / +192 case above still counts).
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(110, Some(500.0)), None, sp(676.0));
+        let d = g.look(ms(t0, 150), true, at(110, Some(386.0)), None, sp(926.0));
+        assert!(!is_off(&d), "{d:?}");
+    }
+
+    #[test]
+    fn page_down_after_our_scroll_landed_is_the_user_even_unmeasured() {
+        // our +300 landed; then PageDown takes the word (and the previous one) off the top
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(600.0)), None, sp(1000.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 5), sp(1000.0), sp(1000.0), Some(300.0));
+        assert!(!is_off(&g.look(ms(t0, 120), true, at(6, Some(320.0)), Some(at(5, Some(300.0))), sp(1300.0))));
+        assert_eq!(g.look(ms(t0, 900), true, at(7, None), Some(at(6, None)), sp(2000.0)), Decision::Wait);
+        let d = g.look(ms(t0, 933), true, at(7, None), Some(at(6, None)), sp(2000.0));
+        assert!(matches!(&d, Decision::Off(r) if r.evidence == Evidence::BeyondOwnScroll), "{d:?}");
+    }
+
+    #[test]
+    fn lazy_content_jump_right_after_our_scroll_landed_is_not_the_user() {
+        // Measured on Edge: our lead landed, then 269 ms after it ran content it revealed
+        // loaded above the view (offset 1026 -> 1921) and the words left the screen
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        g.look(t0, true, at(5, Some(700.0)), None, sp(700.0));
+        g.own_queued(t0);
+        g.own_ran(ms(t0, 1), sp(700.0), sp(700.0), Some(326.0));
+        assert!(!is_off(&g.look(ms(t0, 120), true, at(6, Some(400.0)), Some(at(5, Some(374.0))), sp(1026.0))));
+        assert_eq!(g.look(ms(t0, 236), true, at(7, None), Some(at(6, None)), sp(1921.0)), Decision::Wait);
+        let d = g.look(ms(t0, 270), true, at(7, None), Some(at(6, None)), sp(1921.0));
+        assert!(!is_off(&d), "{d:?}");
     }
 }

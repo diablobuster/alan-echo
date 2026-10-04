@@ -187,6 +187,9 @@ pub struct Job {
     pub words: Vec<String>,
     pub rate: f32,
     pub pause_after_ms: f32,
+    /// Structural pauses inside the chunk, sparse: `(i, ms)` = silence between word `i`
+    /// and `i + 1` (`ra_pause::pause_ms` of word `i + 1`'s break).
+    pub inner_pauses: Vec<(usize, f32)>,
 }
 
 pub struct Session {
@@ -421,7 +424,14 @@ impl Session {
             .collect();
         let last = ws.last().map_or(String::new(), |w| ra_junk::strip_footnote(&w.text).into_owned());
         let pause_after_ms = ra_pause::after_ms(&last, next, rate);
-        Some(Job { gen: self.gen(), idx, words, rate, pause_after_ms })
+        let inner_pauses = ws
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, w)| w.brk.is_break())
+            .map(|(k, w)| (k - 1, ra_pause::pause_ms(w.brk, rate)))
+            .collect();
+        Some(Job { gen: self.gen(), idx, words, rate, pause_after_ms, inner_pauses })
     }
 
     /// Words in the chunks past the playhead (pushed-unplayed, pending, in flight).
@@ -615,7 +625,7 @@ pub fn spawn_synth(engine: Arc<Engine>, ctl: u64, gen: Arc<AtomicU64>, out: mpsc
                     continue;
                 }
                 let words: Vec<&str> = job.words.iter().map(String::as_str).collect();
-                let r = engine.synth_job(&words, job.rate, job.pause_after_ms, ctl, job.gen);
+                let r = engine.synth_job(&words, job.rate, job.pause_after_ms, &job.inner_pauses, ctl, job.gen);
                 if out.send(Msg::Chunk(job.gen, job.idx, r)).is_err() {
                     break;
                 }
@@ -2478,6 +2488,35 @@ mod session_tests {
         assert_eq!(j2.pause_after_ms, after_ms("one", None, 2.2), "no next word yet: a sentence pause");
         assert_eq!(s.words[1].text, "Takeaways", "Word::text is never changed");
         assert!(s.job(3, 2.2).is_none());
+        // inner structural pauses: the cell break inside chunk 2 only
+        assert!(j0.inner_pauses.is_empty() && j1.inner_pauses.is_empty());
+        assert_eq!(j2.inner_pauses, vec![(0, pause_ms(Brk::TableCell, 2.2))]);
+    }
+
+    /// Task 10: short list items joined into one chunk carry a sparse list of structural
+    /// pauses, one per item boundary inside the chunk (never after the last word).
+    #[test]
+    fn job_lists_inner_pauses_for_joined_list_items() {
+        use crate::ra_pause::pause_ms;
+        use crate::ra_struct::Brk;
+        let mk = |t: &str, brk| Word { text: t.into(), src: vec![0], para_break_before: false, brk };
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.words = vec![
+            mk("Two", Brk::ListItem),
+            mk("carrots,", Brk::None),
+            mk("sliced", Brk::None),
+            mk("Three", Brk::ListItem),
+            mk("cloves", Brk::None),
+            mk("Salt", Brk::ListItem),
+            mk("Next", Brk::Paragraph),
+        ];
+        s.chunks = vec![0..6, 6..7];
+        let j = s.job(0, 3.0).expect("job");
+        assert_eq!(j.words, ["Two", "carrots,", "sliced.", "Three", "cloves.", "Salt."]);
+        let li = pause_ms(Brk::ListItem, 3.0);
+        assert_eq!(j.inner_pauses, vec![(2, li), (4, li)], "the first word's own break is the previous chunk's");
+        assert_eq!(j.pause_after_ms, pause_ms(Brk::Paragraph, 3.0));
+        assert!(s.job(1, 3.0).expect("job 1").inner_pauses.is_empty());
     }
 
     /// Spec §6: junk blocks mid-article are fed "" (one entry per word), footnote markers

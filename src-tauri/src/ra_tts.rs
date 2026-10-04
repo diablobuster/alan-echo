@@ -676,7 +676,7 @@ impl Engine {
     #[cfg_attr(not(test), allow(dead_code))] // tests, benches, the glitch hunt
     /// The pause after the chunk follows today's punctuation rule (`default_pause_ms`).
     pub fn synth(self: &Arc<Self>, words: &[&str], rate: f32) -> Result<ChunkAudio, String> {
-        self.synth_opts(words, rate, None, None)
+        self.synth_opts(words, rate, None, &[], None)
     }
 
     /// A new controller's generation (each controller's job generations restart at 0).
@@ -718,9 +718,19 @@ impl Engine {
     /// can stop it mid-run (it then returns `Err(CANCELLED)`, which the controller
     /// ignores as stale). `pause_after_ms`: the whole silence after the chunk
     /// (`trim_silence`), for a chunk the model covered in full.
-    pub fn synth_job(self: &Arc<Self>, words: &[&str], rate: f32, pause_after_ms: f32, ctl: u64, gen: u64) -> Result<ChunkAudio, String> {
+    /// `inner_pauses`: `(i, ms)` structural silence between word `i` and `i + 1` inside
+    /// the chunk (`insert_pauses`).
+    pub fn synth_job(
+        self: &Arc<Self>,
+        words: &[&str],
+        rate: f32,
+        pause_after_ms: f32,
+        inner_pauses: &[(usize, f32)],
+        ctl: u64,
+        gen: u64,
+    ) -> Result<ChunkAudio, String> {
         let opts = self.begin_run(ctl, gen);
-        let r = self.synth_opts(words, rate, Some(pause_after_ms), opts.as_deref());
+        let r = self.synth_opts(words, rate, Some(pause_after_ms), inner_pauses, opts.as_deref());
         if self.end_run(opts.as_ref()) { Err(CANCELLED.into()) } else { r }
     }
 
@@ -740,10 +750,17 @@ impl Engine {
 
     /// `synth` with an optional pause after the chunk (`None`: `default_pause_ms`) and
     /// optional run options (cancellable).
-    fn synth_opts(self: &Arc<Self>, words: &[&str], rate: f32, pause_after_ms: Option<f32>, opts: Option<&RunOptions>) -> Result<ChunkAudio, String> {
+    fn synth_opts(
+        self: &Arc<Self>,
+        words: &[&str],
+        rate: f32,
+        pause_after_ms: Option<f32>,
+        inner_pauses: &[(usize, f32)],
+        opts: Option<&RunOptions>,
+    ) -> Result<ChunkAudio, String> {
         self.busy.fetch_add(1, Ordering::SeqCst);
         self.touch();
-        let run = || self.acquire().and_then(|eng| Self::synth_inner_with(&mut eng.lock(), words, rate, pause_after_ms, true, opts));
+        let run = || self.acquire().and_then(|eng| Self::synth_inner_with(&mut eng.lock(), words, rate, pause_after_ms, inner_pauses, true, opts));
         let mut r = run();
         let cancelled = self.run_cancelled(opts);
         if let (Err(e), false) = (&r, cancelled) {
@@ -761,17 +778,19 @@ impl Engine {
 
     #[cfg_attr(not(test), allow(dead_code))] // tests, benches, the glitch hunt
     fn synth_inner(l: &mut Loaded, words: &[&str], rate: f32, map_joined: bool) -> Result<ChunkAudio, String> {
-        Self::synth_inner_with(l, words, rate, None, map_joined, None)
+        Self::synth_inner_with(l, words, rate, None, &[], map_joined, None)
     }
 
     /// One chunk on a loaded engine. `pause_after_ms` applies when the model covered
     /// every word; a partly covered chunk (or `None`) gets `default_pause_ms` of its
-    /// last spoken word, since the rest follows as the next chunk.
+    /// last spoken word, since the rest follows as the next chunk. `inner_pauses` are
+    /// inserted after the stretch, before the edge trim (`insert_pauses`).
     fn synth_inner_with(
         l: &mut Loaded,
         words: &[&str],
         rate: f32,
         pause_after_ms: Option<f32>,
+        inner_pauses: &[(usize, f32)],
         map_joined: bool,
         opts: Option<&RunOptions>,
     ) -> Result<ChunkAudio, String> {
@@ -818,6 +837,7 @@ impl Engine {
         }
         let mut words_t = chunk_word_times(&dur, spans, wav.len(), rate, covered);
         let pcm = ra_wsola::stretch(&wav, rate, ra_timing::SR);
+        let pcm = insert_pauses(pcm, &mut words_t, inner_pauses);
         let eff = model_speed * rate;
         let pause = match pause_after_ms {
             Some(p) if covered >= words.len() => p,
@@ -827,6 +847,105 @@ impl Engine {
         level_chunk(&mut pcm);
         Ok(ChunkAudio { pcm, words: words_t, device, covered })
     }
+}
+
+/// Inserts structural silence inside a chunk (Task 10): for each `(i, ms)` the silence
+/// between word `i`'s sound and the next word's sound becomes about `ms`. Words with no
+/// audio (zero-length) are passed over: the cut is the midpoint between the last word
+/// at or before `i` with audio and the first after `i` with audio. The model's own
+/// silent 10 ms windows around the cut (under the chunk's threshold) count toward the
+/// pause; only the rest is added, as zeros. Pauses that land on the same cut keep the
+/// longest. Every word after `i` shifts by what was inserted before it; one entry per
+/// word, times monotonic. `i` that is a chunk's last word, junk times or junk `ms` are
+/// skipped. Linear in words + pauses (plus a sort of the pauses).
+fn insert_pauses(pcm: Vec<f32>, words: &mut [WordTime], pauses: &[(usize, f32)]) -> Vec<f32> {
+    let sr = ra_timing::SR as f32;
+    let n_words = words.iter().map(|w| w.word + 1).max().unwrap_or(0);
+    if pauses.is_empty() || pcm.is_empty() || n_words < 2 {
+        return pcm;
+    }
+    // per word index: the end of the last sounding word at or before it, the start of
+    // the first sounding word at or after it
+    let mut end_upto: Vec<Option<u64>> = vec![None; n_words];
+    let mut start_from: Vec<Option<u64>> = vec![None; n_words];
+    for w in words.iter().filter(|w| w.end > w.start) {
+        if let Some(e) = end_upto.get_mut(w.word) {
+            *e = Some(e.map_or(w.end, |x| x.max(w.end)));
+        }
+        if let Some(s) = start_from.get_mut(w.word) {
+            *s = Some(s.map_or(w.start, |x| x.min(w.start)));
+        }
+    }
+    for k in 1..n_words {
+        if end_upto[k].is_none() {
+            end_upto[k] = end_upto[k - 1];
+        }
+    }
+    for k in (0..n_words.saturating_sub(1)).rev() {
+        if start_from[k].is_none() {
+            start_from[k] = start_from[k + 1];
+        }
+    }
+    let peak = pcm.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let thr = peak * SILENCE_RE_PEAK;
+    let win = (sr * 0.010) as usize;
+    let quiet = |a: usize, b: usize| pcm.get(a..b).is_some_and(|s| s.iter().all(|x| x.abs() <= thr));
+    // (cut, samples to add, first word index to shift)
+    let mut ins: Vec<(usize, usize, usize)> = Vec::new();
+    for &(i, ms) in pauses {
+        let (Some(&Some(prev_end)), Some(&Some(next_start))) = (end_upto.get(i), start_from.get(i + 1)) else { continue };
+        if next_start < prev_end || next_start as usize > pcm.len() || !(ms > 0.0) {
+            continue;
+        }
+        let cut = ((prev_end + next_start) / 2) as usize;
+        let left = (1..).take_while(|k| cut >= k * win && quiet(cut - k * win, cut - (k - 1) * win)).count();
+        let right = (0..).take_while(|k| quiet(cut + k * win, cut + (k + 1) * win)).count();
+        let want = (ms.min(MAX_PAUSE_MS) / 1000.0 * sr) as usize;
+        let add = want.saturating_sub((left + right) * win);
+        if add > 0 {
+            ins.push((cut, add, i + 1));
+        }
+    }
+    if ins.is_empty() {
+        return pcm;
+    }
+    ins.sort_unstable();
+    // the same cut: keep the longest pause, shifting from the earliest word
+    let mut merged: Vec<(usize, usize, usize)> = Vec::with_capacity(ins.len());
+    for (cut, add, from) in ins {
+        match merged.last_mut() {
+            Some(m) if m.0 == cut => {
+                m.1 = m.1.max(add);
+                m.2 = m.2.min(from);
+            }
+            _ => merged.push((cut, add, from)),
+        }
+    }
+    let total: usize = merged.iter().map(|m| m.1).sum();
+    let mut out = Vec::with_capacity(pcm.len() + total);
+    let mut at = 0;
+    for &(cut, add, _) in &merged {
+        out.extend_from_slice(pcm.get(at..cut).unwrap_or(&[]));
+        out.resize(out.len() + add, 0.0);
+        at = cut;
+    }
+    out.extend_from_slice(pcm.get(at..).unwrap_or(&[]));
+    // shift: a word moves by every insertion attributed to a word index at or before it
+    let mut shift_at = vec![0u64; n_words + 1];
+    for &(_, add, from) in &merged {
+        if let Some(s) = shift_at.get_mut(from) {
+            *s += add as u64;
+        }
+    }
+    for k in 1..shift_at.len() {
+        shift_at[k] += shift_at[k - 1];
+    }
+    for w in words.iter_mut() {
+        let d = shift_at.get(w.word).copied().unwrap_or(0);
+        w.start += d;
+        w.end += d;
+    }
+    out
 }
 
 /// Levels one chunk (`ra_level::level`); tests can switch it off to measure "before".
@@ -2686,6 +2805,89 @@ mod tests {
         assert_eq!(&out[..odd.len()], &odd[..], "speech kept");
     }
 
+    /// Task 10 helpers: a tone of `n` samples and a word time.
+    fn tone10(n: usize) -> Vec<f32> {
+        (0..n).map(|i| if i % 2 == 0 { 0.4f32 } else { -0.4 }).collect()
+    }
+    fn wt(word: usize, start: usize, end: usize) -> WordTime {
+        WordTime { word, start: start as u64, end: end as u64 }
+    }
+
+    /// Task 10: a structural pause inside a chunk inserts zeros between the two words'
+    /// sounds, and every later word time shifts by exactly the inserted length.
+    #[test]
+    fn inner_pause_inserts_silence_between_words_and_shifts_later_times() {
+        let mut pcm = tone10(4800); // word 0: 0..4800
+        pcm.extend(tone10(4800)); // word 1: 4800..9600
+        pcm.extend(tone10(4800)); // word 2: 9600..14400
+        let mut w = vec![wt(0, 0, 4800), wt(1, 4800, 9600), wt(2, 9600, 14400)];
+        let out = insert_pauses(pcm.clone(), &mut w, &[(1, 200.0)]);
+        assert_eq!(out.len(), pcm.len() + 4800, "200 ms at 24 kHz");
+        assert_eq!(&out[..9600], &pcm[..9600], "words 0 and 1 untouched");
+        assert!(out[9600..14400].iter().all(|x| *x == 0.0), "zeros at the boundary");
+        assert_eq!(&out[14400..], &pcm[9600..], "word 2 intact after the pause");
+        assert_eq!(w, vec![wt(0, 0, 4800), wt(1, 4800, 9600), wt(2, 14400, 19200)]);
+        // two pauses: each later word shifts by everything inserted before it
+        let mut w = vec![wt(0, 0, 4800), wt(1, 4800, 9600), wt(2, 9600, 14400)];
+        let out = insert_pauses(pcm.clone(), &mut w, &[(1, 100.0), (0, 50.0)]);
+        assert_eq!(out.len(), pcm.len() + 2400 + 1200);
+        assert_eq!(w, vec![wt(0, 0, 4800), wt(1, 6000, 10800), wt(2, 13200, 18000)]);
+        assert!(out[4800..6000].iter().all(|x| *x == 0.0) && out[10800..13200].iter().all(|x| *x == 0.0));
+    }
+
+    /// Task 10: the model's own gap at the cut counts toward the pause; the cut sits at
+    /// the midpoint between the words, never inside one; a gap already long enough is
+    /// left alone.
+    #[test]
+    fn inner_pause_subtracts_the_models_own_gap() {
+        let mut pcm = tone10(4800); // word 0: 0..4800
+        pcm.extend(vec![0.0; 2400]); // 100 ms model gap
+        pcm.extend(tone10(4800)); // word 1: 7200..12000
+        let mut w = vec![wt(0, 0, 4800), wt(1, 7200, 12000)];
+        let out = insert_pauses(pcm.clone(), &mut w, &[(0, 250.0)]);
+        assert_eq!(out.len(), pcm.len() + 3600, "250 - 100 ms model gap = 150 ms");
+        assert_eq!(&out[..6000], &pcm[..6000], "cut at the midpoint 6000");
+        assert!(out[4800..4800 + 6000].iter().all(|x| *x == 0.0), "one 250 ms silence");
+        assert_ne!(out[4800 + 6000], 0.0);
+        assert_eq!(w, vec![wt(0, 0, 4800), wt(1, 10800, 15600)]);
+        let mut w2 = vec![wt(0, 0, 4800), wt(1, 7200, 12000)];
+        assert_eq!(insert_pauses(pcm.clone(), &mut w2, &[(0, 80.0)]), pcm, "model gap already longer");
+        assert_eq!(w2, vec![wt(0, 0, 4800), wt(1, 7200, 12000)]);
+    }
+
+    /// Task 10: zero-length words (inside a span, or "" junk) are passed over to the
+    /// next word with audio; the last word never gets an inner pause; junk input is safe.
+    #[test]
+    fn inner_pause_handles_empty_words_last_word_and_junk() {
+        let mut pcm = tone10(4800);
+        pcm.extend(tone10(4800));
+        // word 1 has no audio of its own (zero-length at word 0's end)
+        let mut w = vec![wt(0, 0, 4800), wt(1, 4800, 4800), wt(2, 4800, 9600)];
+        let out = insert_pauses(pcm.clone(), &mut w, &[(0, 100.0), (1, 150.0)]);
+        assert_eq!(out.len(), pcm.len() + 3600, "both map to one cut: the longer pause");
+        assert_eq!(w[0], wt(0, 0, 4800));
+        assert!(w[1].start == w[1].end && w[1].start >= 4800 && w[1].end <= w[2].start);
+        assert_eq!(w[2], wt(2, 8400, 13200));
+        // the last word: nothing after it inside the chunk
+        let mut w = vec![wt(0, 0, 4800), wt(1, 4800, 9600)];
+        assert_eq!(insert_pauses(pcm.clone(), &mut w, &[(1, 300.0), (7, 300.0)]), pcm);
+        // no word with audio before the cut, or nothing at all
+        let mut w = vec![wt(0, 0, 0), wt(1, 0, 9600)];
+        assert_eq!(insert_pauses(pcm.clone(), &mut w, &[(0, 300.0)]), pcm);
+        let mut none: Vec<WordTime> = Vec::new();
+        assert!(insert_pauses(Vec::new(), &mut none, &[(0, 300.0)]).is_empty());
+        let mut w = vec![wt(0, 0, 0), wt(1, 0, 0)];
+        assert!(insert_pauses(Vec::new(), &mut w, &[(0, 300.0)]).is_empty());
+        // junk pause values and word times past the audio
+        let mut w = vec![wt(0, 0, 4800), wt(1, 4800, 9600)];
+        assert_eq!(insert_pauses(pcm.clone(), &mut w, &[(0, f32::NAN)]), pcm);
+        assert_eq!(insert_pauses(pcm.clone(), &mut w, &[(0, -5.0)]), pcm);
+        let n = insert_pauses(pcm.clone(), &mut w, &[(0, f32::INFINITY)]).len();
+        assert_eq!(n, pcm.len() + (MAX_PAUSE_MS / 1000.0 * ra_timing::SR as f32) as usize);
+        let mut w = vec![wt(0, 0, 50_000), wt(1, 60_000, 70_000)];
+        assert_eq!(insert_pauses(pcm.clone(), &mut w, &[(0, 300.0)]), pcm, "times past the end: no cut");
+    }
+
     /// Fix round 1: the model's fade-out after the last loud window is never clipped:
     /// at least 25 ms of its own audio stays (not divided by speed), even when the
     /// pause wanted is shorter.
@@ -2805,7 +3007,7 @@ mod tests {
         let h = std::thread::spawn(move || {
             let w: Vec<&str> = w2.iter().map(String::as_str).collect();
             let t = Instant::now();
-            (e2.synth_job(&w, 1.0, ra_pause::after_ms(w.last().copied().unwrap_or(""), None, 1.0), ctl, 1), t.elapsed())
+            (e2.synth_job(&w, 1.0, ra_pause::after_ms(w.last().copied().unwrap_or(""), None, 1.0), &[], ctl, 1), t.elapsed())
         });
         std::thread::sleep(Duration::from_millis(80));
         let stopped = e.cancel_stale(ctl, 2);

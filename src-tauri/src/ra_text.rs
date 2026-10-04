@@ -308,7 +308,7 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
 /// and other apps take CPU, hence the margin.
 const RAMP_Q: f64 = 0.7;
 /// `RAMP_Q` at 3.5x (`ramp_q`).
-const RAMP_Q_FAST: f64 = 0.75;
+const RAMP_Q_FAST: f64 = 0.8;
 /// Fixed synth cost per chunk, net of the fixed audio each chunk adds, in words of
 /// playback: fitted 1.8 at 2.2x and 1.2 at 3.5x.
 const RAMP_O: f64 = 2.0;
@@ -324,7 +324,8 @@ const FAST_RATE: f32 = 2.5;
 
 /// The synth share at reading speed `rate`: above 2.2x the model speaks faster
 /// (`ra_tts::split_rate`) but its cost per word falls less than the words' playback
-/// time (fitted 0.56 at 2.2x, 0.63 at 3.5x), so the share rises to `RAMP_Q_FAST`.
+/// time (fitted 0.56 at 2.2x; 0.80 at 3.5x with the model capped at 1.25), so the share
+/// rises to `RAMP_Q_FAST`.
 fn ramp_q(rate: f32) -> f64 {
     let t = ((rate as f64 - 2.2) / 1.3).clamp(0.0, 1.0);
     RAMP_Q + (RAMP_Q_FAST - RAMP_Q) * t
@@ -336,7 +337,7 @@ fn ramp_q(rate: f32) -> f64 {
 /// chunk (synthesized before the first audio), chunk n must satisfy
 /// `q * (W_n - w0) + n * RAMP_O <= W_(n-1)` (W = words so far, the n-th chunk
 /// included on the left; q = `ramp_q(rate)`). At 2.2x: 12 -> 14 -> 17 -> 21 -> 27 -> 30;
-/// at 3.5x 12 -> 13 -> 15 -> 17 -> 20 -> 24 -> 29 -> 30.
+/// at 3.5x 12 -> 12 -> 13 -> 13 -> 14 -> 15 -> 16 -> 18 -> ... -> 30.
 pub fn ramp_limit(sizes: &[usize], first_max: usize, max: usize, rate: f32) -> usize {
     let Some(&w0) = sizes.first() else { return first_max.max(1) };
     let w: f64 = sizes.iter().sum::<usize>() as f64;
@@ -739,7 +740,7 @@ mod tests {
         // slower ramp at 3.5x
         let c = chunk_ramped(&words(&s), &[], 12, 30, 3.5);
         let sizes: Vec<usize> = c.iter().map(|r| r.len()).collect();
-        assert_eq!(&sizes[..8], &[12, 13, 15, 17, 20, 24, 29, 30], "{sizes:?}");
+        assert_eq!(&sizes[..8], &[12, 12, 13, 13, 14, 15, 16, 18], "{sizes:?}");
         // a first clause under 6 words (8 at 3.5x) is not a cut
         let w = words("Eight times a year, twelve people sit around a long table in Washington and decide.");
         assert!(chunk_ramped(&w, &[], 12, 30, 2.2)[0].len() >= 6);

@@ -564,7 +564,7 @@ pub fn spawn_synth(engine: Arc<Engine>, gen: Arc<AtomicU64>, out: mpsc::Sender<M
                     continue;
                 }
                 let words: Vec<&str> = job.words.iter().map(String::as_str).collect();
-                let r = engine.synth(&words, job.rate);
+                let r = engine.synth_job(&words, job.rate, job.gen);
                 if out.send(Msg::Chunk(job.gen, job.idx, r)).is_err() {
                     break;
                 }
@@ -1424,6 +1424,10 @@ impl Controller {
 
     /// Keep the synthesis queue AHEAD chunks past the playhead; fetch more text when low.
     fn pump(&mut self) {
+        // a jump made the chunk being synthesized stale: stop it, free the worker
+        if self.engine.cancel_stale(self.s.gen()) {
+            log::debug!("read-aloud: stale synth run cancelled");
+        }
         let Some(pos) = self.player.as_ref().map(|p| p.position()) else { return };
         let jobs = self.s.jobs(pos, self.speed);
         self.submit(jobs);

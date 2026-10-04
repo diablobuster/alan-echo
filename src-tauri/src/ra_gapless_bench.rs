@@ -222,7 +222,12 @@ fn gapless_bench() {
     println!("article: {n} words; first chunk {FIRST_MAX}, ramp to {CHUNK_MAX}; ahead {AHEAD} chunks / {AHEAD_WORDS} words (cap {AHEAD_MAX})");
     let rounds: usize = std::env::var("RA_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
     for round in 0..rounds {
-        for rate in [2.2f32, 3.0, 3.5] {
+        // RA_RATES="2.2,3.5" picks rates (default 2.2, 3.0, 3.5)
+        let rates: Vec<f32> = std::env::var("RA_RATES")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+            .unwrap_or_else(|| vec![2.2, 3.0, 3.5]);
+        for &rate in &rates {
             let gen = Arc::new(AtomicU64::new(0));
             let mut s = Session::new(Arc::clone(&gen));
             s.set_rate(rate);

@@ -80,6 +80,8 @@ pub fn prepare(word: &str) -> Cow<'_, str> {
             '\u{2014}' => Some(','),
             // the Hawaiian okina (Hawai\u{02BB}i) is silent for an English reader
             '\u{02BB}' => None,
+            // trademark signs are not read
+            '\u{ae}' | '\u{2122}' => None,
             // transliteration marks (Devgh\u{0101}\u{1E6D}), never in an English dictionary
             '\u{0101}' => Some('a'),
             '\u{0100}' => Some('A'),
@@ -106,11 +108,14 @@ pub fn prepare(word: &str) -> Cow<'_, str> {
         return Cow::Borrowed(",");
     }
     let pm = word.contains("+/-");
-    if !pm && !word.chars().any(|c| map(c).is_some()) {
+    // trademark markers glued to a brand: "Intel(R)", "Office(TM)", "Windows\u{ae}"
+    let mark = word.len() > 3 && (word.contains("(R)") || word.contains("(TM)") || word.contains("(tm)"));
+    if !pm && !mark && !word.chars().any(|c| map(c).is_some()) {
         return Cow::Borrowed(word);
     }
     // "+/-2%" is the plus-or-minus sign
     let w = if pm { word.replace("+/-", "\u{b1}") } else { word.to_string() };
+    let w = if mark { w.replace("(R)", "").replace("(TM)", "").replace("(tm)", "") } else { w };
     Cow::Owned(w.chars().filter_map(|c| map(c).unwrap_or(Some(c))).collect())
 }
 
@@ -581,6 +586,78 @@ mod round2_tests {
             ("Contact sandra.p.jones@nasa.gov/ today", "nasa dot gov"),
             ("basis (2017 reference year) are shown", "twenty seventeen"),
         ]);
+    }
+
+    /// Review fix round 1: the new rules must not fire outside their context.
+    fn check_not(cases: &[(&str, &str)]) {
+        let mut bad = Vec::new();
+        for (src, never) in cases {
+            let got = render(src);
+            if got.contains(never) {
+                bad.push(format!("{src:?}\n   got  {got:?}\n   must not contain {never:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn slash_before_for_is_a_score_only_in_sports_context() {
+        check(&[
+            ("Taxes are due 4/15 for most filers.", "April fifteenth for"),
+            ("I give it 9/10 for effort.", "nine out of ten for"),
+            ("Mahomes was 24/36 for 291 yds", "twenty four of thirty six for"),
+        ]);
+    }
+
+    #[test]
+    fn result_letters_need_a_team() {
+        check(&[("Arsenal W 3-1 vs. Spurs", "Arsenal won three to one"), ("The Yankees L 7-6", "Yankees lost")]);
+        check_not(&[
+            ("Take vitamin D 1-2 times a day.", "drew"),
+            ("Boarding at Gate L 1-10 now.", "lost"),
+            ("Seats in Row W 10-12 are open.", "won"),
+            ("See Appendix D 1-3 for details.", "drew"),
+        ]);
+    }
+
+    #[test]
+    fn party_letters_only_after_a_person() {
+        check(&[("Gov. Josh Shapiro (D) signed it", "Shapiro Democrat signed")]);
+        check(&[("Sen. Ted Cruz (R) spoke", "Cruz Republican spoke")]);
+        check_not(&[("See Appendix (D) for the data.", "Democrat"), ("Plan (R) was chosen", "Republican")]);
+        assert_eq!(prepare("Intel(R)"), "Intel");
+        assert_eq!(prepare("Windows\u{ae}"), "Windows");
+        assert_eq!(prepare("iPhone\u{2122}"), "iPhone");
+        assert_eq!(prepare("Office(TM)"), "Office");
+        assert_eq!(prepare("(R)"), "(R)", "a lone (R) is left to the context rules");
+    }
+
+    #[test]
+    fn pp_is_pages_unless_it_is_about_percent() {
+        check(&[
+            ("The book runs 352 pp. and has an index.", "three hundred fifty two pages"),
+            ("See pp 12-15 for the table.", "pages"),
+            ("Margin fell 2.1 pp to 18.4%.", "percentage points"),
+            ("The rate rose 0.5 pp this year.", "percentage points"),
+            ("The spread widened 30 pp", "percentage points"),
+        ]);
+        check_not(&[("The book runs 352 pp. and has an index.", "percentage")]);
+    }
+
+    #[test]
+    fn mb_is_millibars_only_for_weather() {
+        check(&[
+            ("a 500 mb file", "five hundred megabytes file"),
+            ("The pressure dropped to 897 mb.", "millibars"),
+            ("A 990 mb low moves in", "millibars"),
+            ("central pressure 960 mb, per the hPa chart", "millibars"),
+        ]);
+    }
+
+    #[test]
+    fn in_and_c_at_a_sentence_end_stay_words() {
+        check(&[("He scored 3 in. Then he left.", "three in."), ("Expect 6-10 in. of snow", "inches of snow")]);
+        check_not(&[("He scored 3 in.", "inches"), ("She got a 3 c. That was it.", "cup")]);
     }
 
     #[test]

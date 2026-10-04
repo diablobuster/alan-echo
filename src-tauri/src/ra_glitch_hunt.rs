@@ -158,6 +158,11 @@ fn glitch_synth() {
     let rate: f32 = std::env::var("GH_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let gap_ms: usize = std::env::var("GH_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let gap = vec![0.0f32; ra_timing::SR as usize * gap_ms / 1000];
+    // GH_MODEL_MAX: cap on the model's own speed above 2.2x (1.0 = pure WSOLA)
+    if let Some(m) = std::env::var("GH_MODEL_MAX").ok().and_then(|v| v.parse::<f32>().ok()) {
+        crate::ra_tts::set_model_speed_max(m);
+    }
+    let (mut synth_s, mut audio_s) = (0.0f64, 0.0f64);
     for (n, (id, _src, text)) in rows.iter().enumerate() {
         let p = dir.join(format!("{id}.wav"));
         if p.is_file() {
@@ -171,8 +176,12 @@ fn glitch_synth() {
             let ws: Vec<&str> = words[r].iter().map(|w| w.text.as_str()).collect();
             let mut a = 0;
             while a < ws.len() {
-                match Engine::synth_inner(&mut l, &ws[a..], rate, true) {
+                let t0 = Instant::now();
+                let r = Engine::synth_inner(&mut l, &ws[a..], rate, true);
+                synth_s += t0.elapsed().as_secs_f64();
+                match r {
                     Ok(c) => {
+                        audio_s += c.pcm.len() as f64 / ra_timing::SR as f64;
                         // WordTime is in samples (rate 1.0): to ms in the WAV
                         let off = pcm.len() as u64;
                         let ms = |x: u64| (off + x) * 1000 / ra_timing::SR as u64;
@@ -198,7 +207,7 @@ fn glitch_synth() {
             println!("{n}/{} {:?}", rows.len(), t.elapsed());
         }
     }
-    println!("synth done: {} in {:?}", rows.len(), t.elapsed());
+    println!("synth done: {} in {:?}; RTF {:.3} (synth {synth_s:.1} s / audio {audio_s:.1} s)", rows.len(), t.elapsed(), synth_s / audio_s.max(1e-9));
 }
 
 /// Debug probe: each line of `GH_PROBE` (a file, or the text itself) through the

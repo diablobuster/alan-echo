@@ -215,7 +215,6 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("m", "meter", "meters", false),
     ("mAh", "milliamp hour", "milliamp hours", true),
     ("mL", "milliliter", "milliliters", true),
-    ("mb", "millibar", "millibars", true),
     ("mg", "milligram", "milligrams", true),
     ("mi", "mile", "miles", true),
     ("min", "minute", "minutes", true),
@@ -229,7 +228,6 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("m²", "square meter", "square meters", true),
     ("nm", "nanometer", "nanometers", true),
     ("oz", "ounce", "ounces", true),
-    ("pp", "percentage point", "percentage points", true),
     ("psi", "P S I", "P S I", true),
     ("px", "pixel", "pixels", true),
     ("rpm", "R P M", "R P M", true),
@@ -644,6 +642,34 @@ fn spell_ticker(t: &str) -> Option<String> {
     }
     Some(letters.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "))
 }
+
+/// Any of `keys` (lowercase, punctuation stripped) within `span` words of `i`.
+fn near(w: &[&str], i: usize, span: usize, keys: &[&str]) -> bool {
+    let lo = i.saturating_sub(span);
+    let hi = (i + span + 1).min(w.len());
+    (lo..hi).filter(|&k| k != i).any(|k| {
+        let c = split(w[k]).core.trim_end_matches('.').to_ascii_lowercase();
+        keys.contains(&c.as_str())
+    })
+}
+
+/// A percent figure within `span` words of `i` ("18.4%").
+fn near_percent(w: &[&str], i: usize, span: usize) -> bool {
+    let lo = i.saturating_sub(span);
+    let hi = (i + span + 1).min(w.len());
+    (lo..hi).any(|k| w[k].contains('%'))
+}
+
+/// Location labels before a letter and a range ("Gate L 1-10", "Row W 10-12"):
+/// never a team with a result. Sorted.
+static NOT_TEAMS: &[&str] = &[
+    // BEGIN SORTED
+    "Aisle", "Appendix", "Bay", "Block", "Box", "Building", "Bus", "Car", "Coach", "Concourse", "Deck",
+    "Exhibit", "Exit", "Figure", "Floor", "Gate", "Grade", "Group", "Hall", "Lane", "Level", "Line", "Lot",
+    "Part", "Pier", "Platform", "Pool", "Route", "Row", "Schedule", "Seat", "Section", "Stand", "Suite",
+    "Table", "Terminal", "Tier", "Type", "Unit", "Vitamin", "Wing", "Zone",
+    // END SORTED
+];
 
 /// A sports score ("3-1", "108-102,").
 fn is_score(s: &str) -> bool {
@@ -1448,13 +1474,18 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
     if let Some(said) = party_tag(core) {
         return one(said, false);
     }
-    if matches!(w[i].trim_end_matches([',', '.', ';']), "(D)" | "(R)")
-        && i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| is_proper(p.core))
-    {
+    let person_before = i >= 2
+        && tok(w, i - 1).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core))
+        && tok(w, i - 2).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core));
+    if matches!(w[i].trim_end_matches([',', '.', ';']), "(D)" | "(R)") && person_before {
         return one((if core == "D" { "Democrat" } else { "Republican" }).to_string(), false);
     }
     // A result letter before a score: "Arsenal W 3-1" -> "won".
-    if matches!(core, "W" | "L" | "D") && w.get(i + 1).is_some_and(|n| is_score(n)) {
+    let team_before = i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| {
+        (is_cap(p.core) && !has(NOT_TEAMS, p.core) && !has(STARTERS, p.core) && p.core.chars().count() >= 3)
+            || matches!(p.core.to_ascii_lowercase().as_str(), "won" | "lost" | "result" | "final")
+    });
+    if matches!(core, "W" | "L" | "D") && team_before && w.get(i + 1).is_some_and(|n| is_score(n)) {
         let said = match core {
             "W" => "won",
             "L" => "lost",
@@ -1495,6 +1526,11 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             let last = tok(w, end - 1).map_or("", |n| n.trail);
             return Some((end, finish(said.to_string(), last, sentence_end(w, end - 1) && end == w.len())));
         }
+    }
+
+    // "pp 12-15": pages
+    if core == "pp" && next_is_number(w, i) && !prev_is_number(w, i) {
+        return one("pages".to_string(), false);
     }
 
     // A state code after "City," (`Columbus, OH`).
@@ -1647,8 +1683,22 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         // a unit abbreviation's period before a lowercase word is not a sentence end
         let lower_next = next_core(w, i).and_then(first_char).is_some_and(char::is_lowercase);
         let period = period && !lower_next;
-        // "6-10 in. of snow", "3 c. flour": only with the period (and digits)
-        if let (true, Some((o, m))) = (prev_digits && t.core.ends_with('.'), match body {
+        // "352 pp." pages; "2.1 pp to 18.4%" percentage points (a percent nearby, or
+        // point / rate / spread)
+        if body == "pp" && prev_digits {
+            let pct = near_percent(w, i, 4) || near(w, i, 4, &["point", "points", "rate", "rates", "spread", "spreads"]);
+            return one((if pct { "percentage points" } else { "pages" }).to_string(), period);
+        }
+        // "897 mb" millibars in weather; "500 mb file" megabytes
+        if body == "mb" && prev_digits {
+            let weather = near(w, i, 6, &["pressure", "hpa", "low", "high", "storm", "hurricane", "barometric", "inhg", "cyclone", "typhoon"]);
+            let (o, m) = if weather { ("millibar", "millibars") } else { ("megabyte", "megabytes") };
+            return one((if prev_is_one(w, i) { o } else { m }).to_string(), period);
+        }
+        // "6-10 in. of snow", "3 c. flour": only with the period (and digits), and not
+        // at a sentence end ("He scored 3 in.")
+        let continues = next_core(w, i).and_then(first_char).is_some_and(|c| c.is_lowercase());
+        if let (true, Some((o, m))) = (prev_digits && t.core.ends_with('.') && continues, match body {
             "in" => Some(("inch", "inches")),
             "c" => Some(("cup", "cups")),
             _ => None,
@@ -1722,6 +1772,7 @@ fn check_tables_sorted() {
     sorted("EXCHANGES", EXCHANGES.iter().map(|e| e.0));
     sorted("COMPASS", COMPASS.iter().map(|e| e.0));
     sorted("AP_STATES", AP_STATES.iter().map(|e| e.0));
+    sorted("NOT_TEAMS", NOT_TEAMS.iter());
     sorted("NOT_CITIES", NOT_CITIES.iter());
     sorted("CREDENTIAL_STATES", CREDENTIAL_STATES.iter());
     assert!(ABBREVS.len() >= 80, "{} abbreviations", ABBREVS.len());

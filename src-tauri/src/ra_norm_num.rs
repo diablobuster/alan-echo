@@ -336,7 +336,7 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
         || (next == "blood" && next2 == "pressure")
         || (i.saturating_sub(3)..i).any(|k| matches!(lc_core(words[k]).as_str(), "pressure" | "bp"));
     let after_one = i >= 1 && matches!(prev.as_str(), "1" | "one") && split_punct(words[i - 1]).2.is_empty();
-    let of_next = next == "for";
+    let of_next = next == "for" && words.get(i + 2).is_some_and(|w| split_punct(w).1.starts_with(|c: char| c.is_ascii_digit()));
     // "by 1/4 percentage point": a fraction, not a date
     let frac_next = matches!(next.as_str(), "percentage" | "point" | "points" | "percent" | "of");
     let per_prev = prev == "per";

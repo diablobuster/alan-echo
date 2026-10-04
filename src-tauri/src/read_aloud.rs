@@ -193,6 +193,8 @@ pub struct Session {
     pub words: Vec<Word>,
     /// Per word: it belongs to a junk block (`ra_junk::junk_mask`), spoken as "".
     junk: Vec<bool>,
+    /// Start of the last block of `words` (its end is not known until more text comes).
+    tail_block: usize,
     /// The word range of the one block never skipped as junk: the block the read or
     /// the last seek started in (Alex clicked it), set by `seek`.
     protected: Range<usize>,
@@ -233,6 +235,7 @@ impl Session {
         Session {
             words: Vec::new(),
             junk: Vec::new(),
+            tail_block: 0,
             protected: 0..0,
             raw_len: 0,
             doc_ended: true,
@@ -262,6 +265,7 @@ impl Session {
     pub fn start(&mut self, words: Vec<Word>, raw_len: usize, doc_ended: bool) {
         self.chunks = ra_text::chunk_ramped(&words, &[], FIRST_MAX, CHUNK_MAX, self.rate);
         self.junk = ra_junk::junk_mask(&words, false);
+        self.tail_block = words.iter().rposition(|w| w.brk.is_break()).unwrap_or(0);
         self.words = words;
         self.raw_len = raw_len;
         self.doc_ended = doc_ended;
@@ -283,6 +287,7 @@ impl Session {
         self.seek(0);
         self.words.clear();
         self.junk.clear();
+        self.tail_block = 0;
         self.chunks.clear();
         self.raw_len = 0;
         self.doc_ended = true;
@@ -337,6 +342,14 @@ impl Session {
     /// so the new speed is heard from the current word, not the sentence start.
     /// The caller clears the player.
     pub fn seek_word(&mut self, wi: usize) {
+        // a word in a junk block is not spoken: resume after the junk (never protect it)
+        let mut wi = wi;
+        while self.is_junk(wi) {
+            wi = self.block_of(wi).end.max(wi + 1);
+        }
+        if wi >= self.words.len() && !self.words.is_empty() {
+            return self.seek(self.chunks.len());
+        }
         let Some(c) = self.chunk_of(wi) else { return self.seek(self.next_push.min(self.chunks.len())) };
         let r = self.chunks[c].clone();
         if wi > r.start {
@@ -462,12 +475,29 @@ impl Session {
         }
         self.raw_len += raw.len();
         let tail = self.chunks.get(self.next_chunk).map_or(self.words.len(), |c| c.start);
-        // junk blocks are found per block: redo the last old block (it may continue)
-        let from = self.block_of(self.words.len().saturating_sub(1)).start;
+        // junk marks stay linear: only the last old block (it may continue) and the new
+        // words are examined; a last block already past the junk length limit is not
+        // re-read, its continuation in the batch is just kept as text
+        let old = self.words.len();
+        let long = old.saturating_sub(self.tail_block) > ra_junk::MAX_JUNK_WORDS;
+        let from = if long { old } else { self.tail_block };
         self.words.extend(more);
         self.junk.truncate(from);
-        let fresh = ra_junk::junk_mask(self.words.get(from..).unwrap_or(&[]), false);
+        let mut fresh = ra_junk::junk_mask(self.words.get(from..).unwrap_or(&[]), false);
+        if long {
+            let cont = self.words.get(from..).unwrap_or(&[]).iter().skip(1).take_while(|w| !w.brk.is_break()).count() + 1;
+            if self.words.get(from).is_some_and(|w| !w.brk.is_break()) {
+                if let Some(m) = fresh.get_mut(..cont) {
+                    m.fill(false);
+                }
+            }
+        }
         self.junk.extend(fresh);
+        if let Some(i) = self.words.get(from..).and_then(|w| w.iter().rposition(|w| w.brk.is_break())) {
+            self.tail_block = from + i;
+        } else if long {
+            self.tail_block = self.tail_block.min(old);
+        }
         self.chunks.truncate(self.next_chunk);
         // the not-yet-submitted tail continues the current ramp
         let prior: Vec<usize> = self.chunks.get(self.ramp_from..).unwrap_or(&[]).iter().map(|r| r.len()).collect();
@@ -2485,29 +2515,109 @@ mod session_tests {
         assert_eq!(s.job(2, 2.2).unwrap().words, ["Advertisement."]);
     }
 
-    /// Junk words keep exactly one timing entry: a silent chunk (the engine's empty audio
-    /// or `skip_failed`) is placed in order and the highlight never moves backwards.
+    /// Junk words keep exactly one timing entry: the engine returns empty audio with a
+    /// zero-length entry per word for an all-"" chunk; it is placed in order and the
+    /// highlight never moves backwards.
     #[test]
     fn junk_chunk_keeps_timing_and_order() {
         use crate::ra_struct::Brk;
         let mk = |t: &str, brk| Word { text: t.into(), src: vec![0], para_break_before: false, brk };
         let mut s = Session::new(Arc::new(AtomicU64::new(0)));
-        s.start(vec![mk("Hello", Brk::None), mk("Advertisement", Brk::Paragraph), mk("World", Brk::Paragraph)], 3, true);
-        s.chunks = vec![0..1, 1..2, 2..3];
+        let ws = vec![
+            mk("Hello", Brk::None),
+            mk("Skip", Brk::Paragraph),
+            mk("to", Brk::None),
+            mk("content", Brk::None),
+            mk("World", Brk::Paragraph),
+        ];
+        s.start(ws, 5, true);
+        s.chunks = vec![0..1, 1..4, 4..5];
         let g = s.gen();
         let jobs = s.jobs(0, 2.2);
         assert_eq!(jobs.len(), 3);
-        assert_eq!(jobs[1].words, [""]);
+        assert_eq!(jobs[1].words, ["", "", ""]);
         let wt = |w, a, b| crate::ra_timing::WordTime { word: w, start: a, end: b };
-        let audio = |w| ChunkAudio { pcm: vec![0.0; 100], words: vec![wt(w, 0, 90)], device: Device::Cpu, covered: 1 };
-        s.on_chunk(g, 2, audio(0));
-        let (_, n) = s.skip_failed(g, 1);
+        let speech = |w| ChunkAudio { pcm: vec![0.0; 100], words: vec![wt(w, 0, 90)], device: Device::Cpu, covered: 1 };
+        // what the engine returns for all-"" words (`empty_audio`)
+        let silent = ChunkAudio { pcm: Vec::new(), words: (0..3).map(|k| wt(k, 0, 0)).collect(), device: Device::Cpu, covered: 3 };
+        s.on_chunk(g, 2, speech(0));
+        let (_, n) = s.on_chunk(g, 1, silent);
         assert_eq!(n, 0, "waits for chunk 0");
-        s.on_chunk(g, 0, audio(0));
+        s.on_chunk(g, 0, speech(0));
         assert_eq!(s.next_push, 3);
         let seq: Vec<usize> = s.timeline.iter().map(|t| t.1).collect();
-        assert!(seq.windows(2).all(|x| x[0] <= x[1]), "{seq:?}");
-        assert_eq!(seq, [0, 2]);
+        assert_eq!(seq, [0, 1, 2, 3, 4], "one entry per word, junk included: {seq:?}");
+        assert!(s.timeline.windows(2).all(|x| x[0].0 <= x[1].0), "time never goes back");
+    }
+
+    /// Spec §6 cost: no full rescans. A 5,000-word text with no breaks, appended in 400
+    /// token batches, is examined about once per word, and is never junk.
+    #[test]
+    fn append_more_junk_work_is_linear_on_breakless_text() {
+        let batch = |k: usize| -> Vec<String> { (0..400).map(|i| format!("w{}", k * 400 + i)).collect() };
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(ra_text::normalize(&batch(0)), 400, false);
+        ra_junk::SCANNED.with(|c| c.set(0));
+        let t = Instant::now();
+        for k in 1..13 {
+            s.append_more(&batch(k));
+        }
+        let scanned = ra_junk::SCANNED.with(|c| c.get());
+        assert_eq!(s.words.len(), 5200);
+        assert_eq!(s.junk.len(), 5200);
+        assert!(s.junk.iter().all(|j| !j));
+        assert!(scanned <= 4800 + 24 * 12, "scanned {scanned} words for 4800 new ones");
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A junk block split by the batch edge is still judged whole; a long block's
+    /// continuation in the next batch is never read as a junk block of its own.
+    #[test]
+    fn long_block_continuation_is_not_junk() {
+        let mut raw: Vec<String> = (0..30).map(|i| format!("w{i}")).collect();
+        raw.push("
+".into());
+        raw.extend((0..30).map(|_| "a".to_string()));
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(ra_text::normalize(&raw), raw.len(), false);
+        s.append_more(&["Advertisement".to_string()]);
+        assert!(s.junk.iter().all(|j| !j), "continuation of a 30-word block is text");
+        s.append_more(&["tail".to_string(), "
+".to_string(), "Advertisement".to_string()]);
+        assert_eq!(s.junk.last(), Some(&true), "a real junk block after a break is found");
+    }
+
+    /// A speed change on a junk word resumes after the junk block and does not protect it.
+    #[test]
+    fn seek_word_on_junk_resumes_after_the_block() {
+        use crate::ra_struct::Brk;
+        let mk = |t: &str, brk| Word { text: t.into(), src: vec![0], para_break_before: false, brk };
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        s.start(
+            vec![
+                mk("Intro", Brk::None),
+                mk("Advertisement", Brk::Paragraph),
+                mk("Sponsored", Brk::Paragraph),
+                mk("Body", Brk::Paragraph),
+                mk("text.", Brk::None),
+            ],
+            5,
+            true,
+        );
+        s.chunks = vec![0..1, 1..2, 2..3, 3..5];
+        s.seek_word(1);
+        assert_eq!(s.next_chunk, 3, "both junk blocks skipped");
+        assert!(s.is_junk(1) && s.is_junk(2), "junk blocks stay unprotected");
+        assert_eq!(s.protected, 3..5);
+        // junk to the end: seek to the end
+        s.words.truncate(3);
+        s.chunks = vec![0..1, 1..2, 2..3];
+        s.seek_word(2);
+        assert_eq!(s.next_chunk, 3);
+        // a protected (clicked) junk block is not junk: the speed change keeps its word
+        s.seek(1);
+        s.seek_word(1);
+        assert_eq!(s.next_chunk, 1);
     }
 
     /// Incremental junk marks: a block cut at a batch edge is judged whole.

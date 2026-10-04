@@ -237,6 +237,29 @@ struct Level<N> {
     line: usize,
 }
 
+/// Byte offset of the first whole-word `w` in `text` that starts within `ahead` bytes:
+/// whitespace (or the text's edge) on both sides, so "a" never matches inside "Data".
+pub(crate) fn whole_word_at(text: &str, w: &str, ahead: usize) -> Option<usize> {
+    if w.is_empty() {
+        return None;
+    }
+    let mut from: usize = 0;
+    loop {
+        let pos = from.checked_add(text.get(from..)?.find(w)?)?;
+        if pos > ahead {
+            return None;
+        }
+        let end = pos.checked_add(w.len())?;
+        let before = text.get(..pos)?.chars().next_back().is_none_or(char::is_whitespace);
+        let after = text.get(end..)?.chars().next().is_none_or(char::is_whitespace);
+        if before && after {
+            return Some(pos);
+        }
+        // the next char boundary after `pos`
+        from = pos.checked_add(text.get(pos..)?.chars().next()?.len_utf8())?;
+    }
+}
+
 /// An untagged page's text and, per line, whether a block ends after it.
 struct Lines {
     text: String,
@@ -394,8 +417,9 @@ impl<N: Node> Words<N> {
         }
         let mut t = n.text();
         let line_end = self.ends_untagged_line(&t);
-        if line_end == Some(false) && !t.ends_with(char::is_whitespace) {
-            // a soft wrap: Acrobat gives the line's last word no trailing space
+        if line_end == Some(false) && !t.ends_with(char::is_whitespace) && !t.ends_with(['-', '\u{AD}']) {
+            // a soft wrap: Acrobat gives the line's last word no trailing space (a split
+            // word "coun-" keeps none, so normalize still joins it to "cil")
             t.push(' ');
         }
         if self.ends_block() || line_end == Some(true) {
@@ -441,11 +465,15 @@ impl<N: Node> Words<N> {
         if w.is_empty() {
             return None;
         }
-        let pos = rest.find(w).filter(|&p| p <= LINE_LOOKAHEAD)?;
+        let pos = whole_word_at(rest, w, LINE_LOOKAHEAD)?;
         let skipped = rest.get(..pos).unwrap_or("");
         l.line = l.line.saturating_add(skipped.matches('\n').count());
         let end = l.cursor.saturating_add(pos).saturating_add(w.len());
         l.cursor = end;
+        if !skipped.trim().is_empty() {
+            // found past text the walk never gave: resync, but trust no line end here
+            return None;
+        }
         let tail = lines.text.get(end..).unwrap_or("");
         let gap: &str = tail.get(..tail.len() - tail.trim_start().len()).unwrap_or("");
         let line_ends = gap.contains('\n') || tail.is_empty();
@@ -1818,6 +1846,58 @@ mod tests {
     }
 
     #[test]
+    fn a_word_matches_the_page_text_only_as_a_whole_word_where_expected() {
+        // the page text lacks "a" ("Read a book" -> "Read book"): "a" must not match inside
+        // "Data" at the end of the heading line below and break there
+        let lines = ["Final Data", "The committee met on Tuesday to discuss the budget for the coming", "year and agreed that spending should rise."];
+        let content = "P|Final Data\r\nThe committee met on Tuesday to discuss the budget for the coming\r\nyear and agreed that spending should rise.";
+        let words = vec![w("Read ", None), w("a ", None), w("book ", None)];
+        let mut ws = words;
+        ws.extend(line_words(&lines));
+        let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, content, None, ws)])]);
+        let toks = read_all(doc);
+        assert_eq!(toks[1], "a ", "no break inside a later word");
+        assert_eq!(toks.iter().filter(|t| t.ends_with('\n')).map(|t| t.as_str()).collect::<Vec<_>>(), ["Data\n", "rise.\n"], "{toks:?}");
+    }
+
+    #[test]
+    fn whole_word_matches_skip_parts_of_words_and_respect_the_lookahead() {
+        assert_eq!(whole_word_at("Data a b", "a", 64), Some(5));
+        assert_eq!(whole_word_at("Data\r\nmore", "a", 64), None);
+        assert_eq!(whole_word_at("x vote.\r\n", "vote.", 64), Some(2));
+        assert_eq!(whole_word_at("caf\u{e9} \u{e9}t\u{e9} \u{e9}", "\u{e9}", 64), Some(12));
+        assert_eq!(whole_word_at("far away a", "a", 3), None, "beyond the lookahead");
+        assert_eq!(whole_word_at("", "a", 64), None);
+        assert_eq!(whole_word_at("a", "", 64), None);
+    }
+
+    #[test]
+    fn a_word_found_past_skipped_text_adds_no_break_but_resyncs() {
+        // "Report" is missing from the words: "2026" is found past skipped text, so its
+        // line end gives no break; the next lines still match and break as usual
+        let content = "P|Budget Report 2026\r\nThe committee met on Tuesday to discuss the budget for the coming\r\nyear and they agreed.\r\nMembers also asked the treasurer to report on the new parking fees.";
+        let ws = vec![w("Budget ", None), w("2026", None)]
+            .into_iter()
+            .chain(line_words(&["The committee met on Tuesday to discuss the budget for the coming", "year and they agreed.", "Members also asked the treasurer to report on the new parking fees."]))
+            .collect();
+        let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, content, None, ws)])]);
+        let toks = read_all(doc);
+        assert_eq!(toks[1], "2026", "found past skipped text: untouched");
+        assert_eq!(toks.iter().filter(|t| t.ends_with('\n')).map(|t| t.as_str()).collect::<Vec<_>>(), ["agreed.\n", "fees.\n"], "{toks:?}");
+    }
+
+    #[test]
+    fn a_hyphenated_line_end_keeps_no_space_so_it_still_joins() {
+        let lines = ["The members of the city voted for the plan and the coun-", "cil agreed to fund the new roads before the end of the year."];
+        let toks = read_all(untagged(&lines));
+        assert!(toks.iter().any(|t| t == "coun-"), "{toks:?}");
+        let ws = crate::ra_text::normalize(&toks);
+        // ra_text's PDF hyphen join: one word over both tokens (it keeps the hyphen)
+        let joined = ws.iter().find(|w| w.text.starts_with("coun"));
+        assert_eq!(joined.map(|w| (w.text.as_str(), w.src.len())), Some(("coun-cil", 2)), "{:?}", ws.iter().map(|w| &w.text).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn untagged_line_ends_survive_a_rollback() {
         let mut rd = Walk::new(words(untagged(&PAGE), MAX_WORDS), Vec::new());
         let a = rd.take(5, far());
@@ -2196,16 +2276,7 @@ mod live {
             let items: Vec<&str> = marked.iter().map(|(_, t)| *t).collect();
             assert_eq!(items, ["\u{2022}", "\u{2022}", "1.", "2."]);
             let ends: Vec<&str> = ends.iter().map(|s| s.as_str()).collect();
-            assert_eq!(ends, ["2026
-", "agreed.
-", "ends.
-", "bread
-", "Eggs
-", "box
-", "guide
-", "tango.
-", "time.
-"]);
+            assert_eq!(ends, ["2026\n", "agreed.\n", "ends.\n", "bread\n", "Eggs\n", "box\n", "guide\n", "tango.\n", "time.\n"]);
             assert!(toks.iter().any(|t| t == "for "), "the soft wrap stays running text: {toks:?}");
         } else {
             assert_eq!(marked, [(Brk::Heading(1), "Page "), (Brk::ListItem, "The "), (Brk::ListItem, "Alpha ")]);

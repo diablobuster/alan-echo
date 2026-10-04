@@ -244,10 +244,35 @@ fn opens_item(w: &str) -> bool {
     is_bullet(w) || strip_glued_bullet(w).is_some() || is_item_number(w)
 }
 
+/// The word surely opens a list item, even after a soft wrap: a real bullet glyph
+/// (not a dash or `*`, alone or glued on) or a digit item number ("1." "12)" "3.Go").
+/// A letter ("F." "v." "p."), a roman number or a dash may be part of a sentence.
+fn opens_item_surely(w: &str) -> bool {
+    let glyph = w.chars().next().is_some_and(|c| !matches!(c, '-' | '\u{2013}' | '*'));
+    let digits = w.bytes().next().is_some_and(|b| b.is_ascii_digit());
+    (glyph && (is_bullet(w) || strip_glued_bullet(w).is_some())) || (digits && is_item_number(w))
+}
+
+/// The line ends a sentence or a clause (`.!?:;`, also inside closing quotes /
+/// brackets): an item opened by a letter, roman number or dash may follow it.
+fn ends_terminal(w: &str) -> bool {
+    let core = w.trim_end_matches(['"', '\'', ')', ']', '\u{201D}', '\u{2019}', '\u{BB}']);
+    core.ends_with(['.', '!', '?', ':', ';', '\u{2026}'])
+}
+
+/// A word split at the line end ("coun-" / "cil"): the line never ends a block.
+fn ends_split_word(w: &str) -> bool {
+    let core = w.trim_end_matches(['-', '\u{AD}']);
+    core.len() < w.len() && core.chars().last().is_some_and(char::is_alphabetic)
+}
+
 /// Untagged PDF text (one block of `\n`-separated lines, as Acrobat gives a page): for
 /// each line, whether a block ends after it. Soft-wrapped lines inside a paragraph
-/// never break; a line breaks when it is the last or blank, or the next is blank, or
-/// the next opens a list item, or it is short (< 3/4 of the upper-quartile line) and ends a
+/// never break, nor does a line ending in a split word ("coun-"); a line breaks when it
+/// is the last or blank, or the next is blank, or the next surely opens a list item
+/// (bullet glyph, digit number), or the next opens one with a letter, roman number or
+/// dash and this line ends with `.!?:;` or is an item itself, or it is short (< 3/4 of
+/// the upper-quartile line) and ends a
 /// sentence (`.!?:`) before a line starting with a capital or digit, or it or the next
 /// line is a heading: short, at most 12 words, no end punctuation, after a sentence
 /// end (or first), before a capital or digit. Pure; never panics.
@@ -268,6 +293,7 @@ pub(crate) fn line_breaks(text: &str) -> Vec<bool> {
             !l.is_empty()
                 && !first(i).is_some_and(opens_item)
                 && !last(i).is_some_and(ends_with_punct)
+                && !last(i).is_some_and(ends_split_word)
                 && l.split_whitespace().count() <= HEADING_WORDS
                 && short(l)
                 && after_stop
@@ -278,9 +304,15 @@ pub(crate) fn line_breaks(text: &str) -> Vec<bool> {
         .map(|i| {
             let l = lines.get(i).copied().unwrap_or("");
             let Some(next) = lines.get(i + 1) else { return true };
+            if last(i).is_some_and(ends_split_word) && !next.is_empty() {
+                return false;
+            }
+            let item_next = first(i + 1).is_some_and(opens_item_surely)
+                || (first(i + 1).is_some_and(opens_item)
+                    && (last(i).is_some_and(ends_terminal) || first(i).is_some_and(opens_item)));
             l.is_empty()
                 || next.is_empty()
-                || first(i + 1).is_some_and(opens_item)
+                || item_next
                 || (short(l) && last(i).is_some_and(ends_stop) && next_capital(i))
                 || heading.get(i).copied().unwrap_or(false)
                 || heading.get(i + 1).copied().unwrap_or(false)
@@ -1664,6 +1696,37 @@ mod pdf_line_tests {
         assert_eq!(breaks(t), [0, 1, 2, 3]);
         // a year or a decimal at a line start is not an item number
         let t = "The plan was first proposed by the mayor in the spring of\r\n2024. It passed the council in a narrow vote late that year.";
+        assert_eq!(breaks(t), [1]);
+    }
+
+    #[test]
+    fn letters_dashes_and_romans_open_an_item_only_after_a_sentence_end() {
+        // a soft wrap before an initial, "v.", "p.", a roman-looking word or a spaced dash
+        let wraps = [
+            "The treaty was signed in the oval office by President John\r\nF. Kennedy and witnessed by the full cabinet in the afternoon.",
+            "The case that settled the question was decided as Smith\r\nv. Jones in the supreme court of the state many years ago.",
+            "The full figures for each of the districts can be found, see\r\np. 12 of the annual report that was published in the spring.",
+            "Most of the money went to the schools and to the budget\r\n\u{2013} and the roads \u{2013} which pleased the voters across the city.",
+            "The council voted on the third amendment to chapter\r\niv. The mayor then closed the meeting and went straight home.",
+            "Members of the board asked for more time to review the\r\n- figures before they would agree to anything at all today.",
+        ];
+        for t in wraps {
+            assert_eq!(breaks(t), [1], "{t:?}");
+        }
+        // after a sentence end (or a ; or :) they do open an item
+        assert_eq!(breaks("Choose one:\r\na. Tea\r\nb. Coffee"), [0, 1, 2]);
+        assert_eq!(breaks("First the cost of the work.\r\n- Roads\r\n- Schools;\r\niv. Parks"), [0, 1, 2, 3]);
+        // real bullet glyphs and digit numbers always do
+        assert_eq!(breaks("We need\r\n\u{2022} Milk\r\n\u{25E6} Eggs"), [0, 1, 2]);
+        assert_eq!(breaks("The steps are\r\n1. Open\r\n12) Close"), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_hyphenated_line_end_never_breaks() {
+        // a short line ending "coun-" before a capital is a split word, not a heading
+        let t = "The members met on Tuesday and all of them took part in the vote.\r\nCoun-\r\nCil was unanimous and the plan went ahead without delay.";
+        assert_eq!(breaks(t), [2]);
+        let t = "The members of the city coun-\r\ncil voted. Then they all went home again.";
         assert_eq!(breaks(t), [1]);
     }
 

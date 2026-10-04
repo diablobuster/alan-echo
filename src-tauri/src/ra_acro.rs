@@ -30,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     OBJID_CLIENT,
 };
 
+use crate::ra_struct::{mark, Brk};
 use crate::ra_uia::Rect;
 
 /// Error text when the point is not on an Acrobat word (the caller may try OCR next).
@@ -77,6 +78,11 @@ const SID_GET_PD_DOM_NODE: GUID = GUID::from_u128(0xc0a1d5e9_1142_4cf3_b607_82fc
 /// `CPDDomNode_Word` in the IDL's `CPDDomNodeType` enum (Document = 1, Page = 2,
 /// StructElement = 3, Text = 4, Word = 5, Char = 6, ...).
 pub(crate) const WORD: i32 = 5;
+/// `CPDDomNode_StructElement`: a structure element with children (Document, L, LI, TR).
+const STRUCT_ELEMENT: i32 = 3;
+/// `CPDDomNode_Text`: a run of words. A leaf structure element (P, H1, LBody, TD) is a
+/// Text node; an untagged page is one Text node (named "P").
+const TEXT_NODE: i32 = 4;
 
 /// IDL method order of `IPDDomNode` (after IDispatch's 7). `com_bindings_match_the_idl`
 /// checks the vtable against it (test-only: the check is the only reader).
@@ -162,6 +168,16 @@ mod com {
         pub fn GetTextInLines(&self, visible_only: BOOL, out: *mut Option<IPDDomNode>) -> HRESULT;
     }
 
+    /// `IPDDomElement : IPDDomNode` (a structure element; from the type library in
+    /// Acrobat's `plug_ins\Accessibility.api`): the 14 `IPDDomNode` methods, then these.
+    #[interface("198f17ae-b921-4308-9543-288d426a5c2b")]
+    pub unsafe trait IPDDomElement: IPDDomNode {
+        pub fn GetTagName(&self, out: *mut BSTR) -> HRESULT;
+        pub fn GetStdName(&self, out: *mut BSTR) -> HRESULT;
+        pub fn GetID(&self, out: *mut BSTR) -> HRESULT;
+        pub fn GetAttribute(&self, attr: *const u16, owner: *const u16, out: *mut BSTR) -> HRESULT;
+    }
+
     /// `IPDDomNodeExt : IUnknown`. We only call `GetPageNum` (manual test); never
     /// `SetFocus` / `DoDefaultAction` (that would act on the user's document).
     #[interface("4A894040-247E-4aff-BB08-3489E9905235")]
@@ -191,6 +207,9 @@ pub(crate) trait Node: Sized {
     /// `None` on an error (that child is skipped).
     fn child(&self, i: usize) -> Option<Self>;
     fn text(&self) -> String;
+    /// A structure element's type (`GetName`: "P", "H1", "LI", ...); "" otherwise or
+    /// on an error.
+    fn name(&self) -> String;
     /// `None` = off screen ((0,0,0,0) or an empty box) or an error.
     fn location(&self) -> Option<Rect>;
 }
@@ -201,6 +220,11 @@ struct Level<N> {
     node: N,
     next: usize,
     count: usize,
+    kind: i32,
+    /// Its structure name, read on first need (`Words::token` only; hover never reads it).
+    name: Option<String>,
+    /// No word inside it has been passed yet.
+    fresh: bool,
 }
 
 /// Depth-first document-order iterator over Word leaves; stops after `cap` words.
@@ -210,6 +234,9 @@ pub(crate) struct Words<N: Node> {
     stack: Vec<Level<N>>,
     cap: usize,
     seen: usize,
+    /// Stack levels from this index up held no word before the last word passed: that
+    /// word starts them.
+    starts_from: usize,
 }
 
 pub(crate) fn words<N: Node>(root: N, cap: usize) -> Words<N> {
@@ -218,7 +245,52 @@ pub(crate) fn words<N: Node>(root: N, cap: usize) -> Words<N> {
         stack: Vec::new(),
         cap,
         seen: 0,
+        starts_from: 0,
     }
+}
+
+/// The marker a structure element's first word gets (`GetStdName`, any case).
+pub(crate) fn brk_of(name: &str) -> Brk {
+    let n = name.to_ascii_uppercase();
+    match n.as_str() {
+        "H" => Brk::Heading(0),
+        "LI" => Brk::ListItem,
+        "TR" => Brk::TableRow,
+        "TD" | "TH" => Brk::TableCell,
+        "CAPTION" => Brk::Caption,
+        "BLOCKQUOTE" => Brk::Quote,
+        "CODE" => Brk::Code,
+        _ => match n.strip_prefix('H').and_then(|d| d.parse::<u8>().ok()) {
+            Some(l @ 1..=6) if n.len() == 2 => Brk::Heading(l),
+            _ => Brk::None,
+        },
+    }
+}
+
+/// When two elements start at the same word: the outer row beats its cell, a heading
+/// beats everything.
+fn brk_rank(b: Brk) -> u8 {
+    match b {
+        b if b.is_heading() => 7,
+        Brk::TableRow => 6,
+        Brk::TableCell => 5,
+        Brk::ListItem => 4,
+        Brk::Caption => 3,
+        Brk::Quote => 2,
+        Brk::Code => 1,
+        _ => 0,
+    }
+}
+
+/// Inline structure types: their end is not the end of a paragraph. Everything else
+/// (and a name that could not be read) is a block. A list label is inline so "1." is
+/// read with its item.
+pub(crate) fn is_inline(name: &str) -> bool {
+    const INLINE: [&str; 18] = [
+        "Span", "Link", "Annot", "Quote", "Note", "Reference", "BibEntry", "Lbl", "Ruby", "RB",
+        "RT", "RP", "Warichu", "WT", "WP", "Form", "Em", "Strong",
+    ];
+    INLINE.iter().any(|i| i.eq_ignore_ascii_case(name))
 }
 
 impl<N: Node> Iterator for Words<N> {
@@ -226,11 +298,12 @@ impl<N: Node> Iterator for Words<N> {
     fn next(&mut self) -> Option<N> {
         while self.seen < self.cap {
             let n = self.next_node()?;
-            if n.kind() == WORD {
-                self.seen += 1;
+            let kind = n.kind();
+            if kind == WORD {
+                self.passed();
                 return Some(n);
             }
-            self.open(n);
+            self.open(n, kind);
         }
         None
     }
@@ -257,11 +330,75 @@ impl<N: Node> Words<N> {
     }
 
     /// Walk into a container (its children come next).
-    fn open(&mut self, n: N) {
+    fn open(&mut self, n: N, kind: i32) {
         let count = n.child_count();
         if count > 0 {
-            self.stack.push(Level { node: n, next: 0, count });
+            self.stack.push(Level { node: n, next: 0, count, kind, name: None, fresh: true });
         }
+    }
+
+    /// A word was passed: count it and note which open containers it starts. The fresh
+    /// levels are always the top of the stack (a level opened inside a fresh one is fresh).
+    fn passed(&mut self) {
+        self.seen += 1;
+        let mut i = self.stack.len();
+        while i > 0 && self.stack.get(i - 1).is_some_and(|l| l.fresh) {
+            i -= 1;
+            if let Some(l) = self.stack.get_mut(i) {
+                l.fresh = false;
+            }
+        }
+        self.starts_from = i;
+    }
+
+    /// Structure name of stack level `i` ("" for a page, the document node, or a read
+    /// error), read once per level.
+    fn level_name(&mut self, i: usize) -> &str {
+        let Some(l) = self.stack.get_mut(i) else { return "" };
+        if l.name.is_none() {
+            let named = l.kind == STRUCT_ELEMENT || l.kind == TEXT_NODE;
+            l.name = Some(if named { l.node.name() } else { String::new() });
+        }
+        l.name.as_deref().unwrap_or("")
+    }
+
+    /// The token for `n`, the word this walk passed last (call it before walking on):
+    /// its text, prefixed with the marker of the structure it starts (heading, list
+    /// item, table row or cell, caption, quote, code), and ending in "\n" instead of its
+    /// trailing space when it is the last word of a block (natural-reading spec §5).
+    pub(crate) fn token(&mut self, n: &N) -> String {
+        let mut brk = Brk::None;
+        for i in self.starts_from..self.stack.len() {
+            let b = brk_of(self.level_name(i));
+            if brk_rank(b) > brk_rank(brk) {
+                brk = b;
+            }
+        }
+        let mut t = n.text();
+        if self.ends_block() {
+            let keep = t.trim_end().len();
+            t.truncate(keep);
+            t.push('\n');
+        }
+        if brk.is_break() {
+            t.insert_str(0, &mark(brk));
+        }
+        t
+    }
+
+    /// The word passed last ends a block: every container from its parent out to the
+    /// nearest block-level one has no children left (inline ones are looked through).
+    fn ends_block(&mut self) -> bool {
+        for i in (0..self.stack.len()).rev() {
+            let more = self.stack.get(i).is_some_and(|l| l.next < l.count);
+            if more {
+                return false;
+            }
+            if !is_inline(self.level_name(i)) {
+                return true;
+            }
+        }
+        true
     }
 
     /// Next on-screen word and its box, in document order. Skips (without walking into)
@@ -277,13 +414,14 @@ impl<N: Node> Words<N> {
         while self.seen < self.cap {
             let n = self.next_node()?;
             let loc = n.location();
-            if n.kind() == WORD {
-                self.seen += 1;
+            let kind = n.kind();
+            if kind == WORD {
+                self.passed();
                 if let Some(r) = loc {
                     return Some((n, r));
                 }
             } else if loc.as_ref().is_some_and(&keep) {
-                self.open(n);
+                self.open(n, kind);
             }
         }
         None
@@ -371,7 +509,7 @@ impl<N: Node + Clone> Walk<N> {
         while out.len() < n && !self.ended && Instant::now() < deadline {
             match self.walk.next() {
                 Some(w) => {
-                    out.push(w.text());
+                    out.push(self.walk.token(&w));
                     self.nodes.push(w);
                 }
                 None => self.ended = true,
@@ -560,6 +698,25 @@ impl Node for IPDDomNode {
                 String::new()
             }
         }
+    }
+
+    /// `IPDDomElement::GetStdName` (the standard type after the role map), else
+    /// `GetTagName`. `IPDDomNode::GetName` answers "" (or the text) here, so it is not used.
+    fn name(&self) -> String {
+        let Ok(el) = self.cast::<com::IPDDomElement>() else { return String::new() };
+        let read = |std: bool| {
+            let mut b = BSTR::new();
+            let r = unsafe { if std { el.GetStdName(&mut b) } else { el.GetTagName(&mut b) } }.ok();
+            match r {
+                Ok(()) => b.to_string(),
+                Err(e) => {
+                    log::debug!("read-aloud: acro GetStdName/GetTagName {e}");
+                    String::new()
+                }
+            }
+        };
+        let std = read(true);
+        if std.is_empty() { read(false) } else { std }
     }
 
     fn location(&self) -> Option<Rect> {
@@ -776,7 +933,7 @@ impl AcroRead {
         let mut walk = words(dom_root(pv)?, MAX_WORDS);
         let first = seek(&mut walk, x as f64, y as f64, deadline)
             .ok_or_else(|| seek_error(Instant::now() >= deadline))?;
-        let mut out = vec![first.text()];
+        let mut out = vec![walk.token(&first)];
         let mut read = AcroRead {
             frame: frame.0 as isize,
             w: Walk::new(walk, vec![first]),
@@ -936,6 +1093,11 @@ mod tests {
         fn text(&self) -> String {
             self.1.to_string()
         }
+        /// A container's text field holds its structure name (tests only).
+        fn name(&self) -> String {
+            NAMES.with(|c| c.set(c.get() + 1));
+            if self.0 == WORD { String::new() } else { self.1.to_string() }
+        }
         fn location(&self) -> Option<Rect> {
             self.2.map(|(x, y, w, h)| Rect { x, y, w, h })
         }
@@ -944,6 +1106,11 @@ mod tests {
     thread_local! {
         /// Child fetches made by the fake DOM on this test thread.
         static FETCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Structure-name reads made by the fake DOM on this test thread.
+        static NAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn names() -> usize {
+        NAMES.with(|c| c.get())
     }
     fn fetches() -> usize {
         FETCHES.with(|c| c.get())
@@ -1111,15 +1278,21 @@ mod tests {
 
     #[test]
     fn a_rolled_back_batch_is_read_again() {
+        // tree()'s blocks end at "b", "c" and "e" (their last word ends in a line break)
         let mut rd = Walk::new(words(tree(), 100), Vec::new());
-        assert_eq!(rd.take(2, far()), ["a ", "b "]);
+        assert_eq!(rd.take(2, far()), ["a ", "b
+"]);
         let m = rd.mark();
-        assert_eq!(rd.take(10, far()), ["c ", "d ", "e"]);
+        assert_eq!(rd.take(10, far()), ["c
+", "d ", "e
+"]);
         assert!(rd.ended);
         rd.rollback(m);
         assert!(!rd.ended, "the end was not delivered");
         assert_eq!(rd.nodes.len(), 2, "source indices are back where the caller is");
-        assert_eq!(rd.take(10, far()), ["c ", "d ", "e"]);
+        assert_eq!(rd.take(10, far()), ["c
+", "d ", "e
+"]);
         assert_eq!(rd.nodes.len(), 5);
     }
 
@@ -1132,11 +1305,15 @@ mod tests {
         assert!(!rd.ended, "a short batch is not the end");
         // a slice that is over, rolled back like an undelivered reply
         let m = rd.mark();
-        assert_eq!(rd.more_sliced(past, far()), Ok(vec!["b ".to_string()]));
+        assert_eq!(rd.more_sliced(past, far()), Ok(vec!["b
+".to_string()]));
         rd.rollback(m);
         assert_eq!(rd.nodes.len(), 1);
         // a long slice: the rest (capped at MORE_BATCH)
-        assert_eq!(rd.more_sliced(far(), far()), Ok(vec!["b ".to_string(), "c ".into(), "d ".into(), "e".into()]));
+        assert_eq!(rd.more_sliced(far(), far()), Ok(vec!["b
+".to_string(), "c
+".into(), "d ".into(), "e
+".into()]));
         assert_eq!(rd.more_sliced(past, far()), Ok(vec![]), "only empty is the end");
         assert!(rd.ended);
         // the hard budget ran out before any word: an error, not the end
@@ -1274,6 +1451,187 @@ mod tests {
         assert_eq!(got, Some(vec![Rect { x: 0.0, y: 30.0, w: 2.0, h: 10.0 }]));
         // both paragraphs fetched, plus one word of the second; none of the first's words
         assert_eq!(fetches() - before, 3);
+    }
+
+    // ---- structure: paragraph ends and markers (natural-reading spec §5) ----
+
+    use crate::ra_struct::{mark, Brk};
+
+    fn m(b: Brk, t: &str) -> String {
+        format!("{}{t}", mark(b))
+    }
+
+    /// Every token of the document, the way `more` hands them out.
+    fn read_all(doc: F) -> Vec<String> {
+        Walk::new(words(doc, MAX_WORDS), Vec::new()).take(MAX_WORDS, far())
+    }
+
+    #[test]
+    fn the_last_word_of_each_paragraph_ends_with_a_line_break() {
+        // like Acrobat: a tagged P is a Text node named "P" under the Document element
+        let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "Document", None, vec![
+            F(TEXT, "P", None, vec![w("One ", None), w("two.", None)]),
+            F(TEXT, "P", None, vec![w("Three ", None), w("four. ", None)]),
+        ])]);
+        assert_eq!(read_all(doc), ["One ", "two.\n", "Three ", "four.\n"]);
+    }
+
+    #[test]
+    fn a_heading_marks_its_first_word() {
+        let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "Document", None, vec![
+            F(TEXT, "H1", None, vec![w("Big ", None), w("Title", None)]),
+            F(TEXT, "P", None, vec![w("Body ", None), w("text.", None)]),
+            F(STRUCT, "Sect", None, vec![F(TEXT, "H", None, vec![w("Plain", None)]), F(TEXT, "h3", None, vec![w("Small", None)])]),
+        ])]);
+        assert_eq!(
+            read_all(doc),
+            [m(Brk::Heading(1), "Big "), "Title\n".into(), "Body ".into(), "text.\n".into(), m(Brk::Heading(0), "Plain\n"), m(Brk::Heading(3), "Small\n")]
+        );
+    }
+
+    #[test]
+    fn an_untagged_doc_gets_only_line_breaks() {
+        // untagged, Acrobat makes one "P" Text node per page under a nameless group
+        let page = |a: &'static str, b: &'static str| F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, "P", None, vec![w(a, None), w(b, None)])]);
+        let doc = F(DOC, "StructTreeRoot", None, vec![page("a ", "b "), page("c ", "d")]);
+        assert_eq!(read_all(doc), ["a ", "b\n", "c ", "d\n"]);
+        // a node whose name could not be read is still a block
+        let doc = F(DOC, "", None, vec![F(TEXT, "", None, vec![w("x ", None)]), F(TEXT, "", None, vec![w("y ", None)])]);
+        assert_eq!(read_all(doc), ["x\n", "y\n"]);
+    }
+
+    #[test]
+    fn list_items_and_table_rows_and_cells_are_marked() {
+        let item = |a: &'static str, b: &'static str| {
+            F(STRUCT, "LI", None, vec![F(TEXT, "Lbl", None, vec![w(a, None)]), F(TEXT, "LBody", None, vec![w(b, None)])])
+        };
+        let row = |a: &'static str, b: &'static str| {
+            F(STRUCT, "TR", None, vec![F(TEXT, "TD", None, vec![w(a, None)]), F(TEXT, "TH", None, vec![w(b, None)])])
+        };
+        let doc = F(DOC, "", None, vec![
+            F(STRUCT, "L", None, vec![item("1. ", "Milk "), item("2. ", "Eggs")]),
+            F(STRUCT, "Table", None, vec![row("a ", "b "), row("c ", "d ")]),
+            F(TEXT, "Caption", None, vec![w("Fig ", None), w("one", None)]),
+            F(TEXT, "BlockQuote", None, vec![w("Said ", None)]),
+            F(TEXT, "Code", None, vec![w("x=1", None)]),
+        ]);
+        assert_eq!(
+            read_all(doc),
+            [
+                // the label stays with its item: no break after "1."
+                m(Brk::ListItem, "1. "), "Milk\n".into(), m(Brk::ListItem, "2. "), "Eggs\n".into(),
+                m(Brk::TableRow, "a\n"), m(Brk::TableCell, "b\n"), m(Brk::TableRow, "c\n"), m(Brk::TableCell, "d\n"),
+                m(Brk::Caption, "Fig "), "one\n".into(),
+                m(Brk::Quote, "Said\n"),
+                m(Brk::Code, "x=1\n"),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_elements_do_not_end_the_paragraph() {
+        let doc = F(DOC, "", None, vec![
+            F(STRUCT, "P", None, vec![
+                F(TEXT, "Span", None, vec![w("See ", None), w("the ", None)]),
+                F(TEXT, "Link", None, vec![w("site ", None)]),
+                F(TEXT, "Span", None, vec![w("now. ", None)]),
+            ]),
+            F(TEXT, "P", None, vec![w("Next", None)]),
+        ]);
+        assert_eq!(read_all(doc), ["See ", "the ", "site ", "now.\n", "Next\n"]);
+    }
+
+    #[test]
+    fn a_picked_word_gets_its_marker_only_at_the_start_of_its_block() {
+        let doc = || F(DOC, "", r(0.0, 0.0, 500.0, 100.0), vec![
+            F(TEXT, "H2", r(0.0, 0.0, 300.0, 20.0), vec![w("Head ", r(0.0, 0.0, 50.0, 20.0)), w("line", r(60.0, 0.0, 50.0, 20.0))]),
+            F(TEXT, "P", r(0.0, 50.0, 300.0, 20.0), vec![w("body ", r(0.0, 50.0, 50.0, 20.0)), w("end", r(60.0, 50.0, 50.0, 20.0))]),
+        ]);
+        let pick = |x, y| {
+            let mut ws = words(doc(), 100);
+            let first = seek(&mut ws, x, y, far()).expect("a word");
+            let mut out = vec![ws.token(&first)];
+            out.extend(Walk::new(ws, vec![first]).take(10, far()));
+            out
+        };
+        assert_eq!(pick(10.0, 10.0), [m(Brk::Heading(2), "Head "), "line\n".into(), "body ".into(), "end\n".into()]);
+        assert_eq!(pick(70.0, 10.0), ["line\n", "body ", "end\n"]);
+        // the fallback (no word under the point) rewinds to the word's own state
+        assert_eq!(pick(200.0, 35.0), ["body ", "end\n"]);
+    }
+
+    #[test]
+    fn structure_costs_one_name_read_per_container_and_none_on_hover() {
+        // 20 paragraphs of 5 words: 21 named containers (Document + 20 P), 100 words
+        let doc = || F(DOC, "", r(0.0, 0.0, 500.0, 500.0), vec![F(STRUCT, "Document", r(0.0, 0.0, 500.0, 500.0),
+            (0..20).map(|p| F(TEXT, "P", r(0.0, 20.0 * p as f64, 100.0, 10.0),
+                (0..5).map(|i| w("w ", r(20.0 * i as f64, 20.0 * p as f64, 10.0, 10.0))).collect())).collect())]);
+        let before = names();
+        let toks = read_all(doc());
+        assert_eq!(toks.len(), 100);
+        assert_eq!(toks.iter().filter(|t| t.ends_with('\n')).count(), 20);
+        assert!(names() - before <= 21, "name reads: {}", names() - before);
+        let before = names();
+        assert!(hover_rects(&mut words(doc(), MAX_WORDS), 25.0, 205.0, far()).is_some());
+        let mut seen = Vec::new();
+        assert!(hover_seen(&mut seen, doc(), 25.0, 305.0, far()).is_some());
+        assert_eq!(names(), before, "hover reads no names");
+    }
+
+    #[test]
+    fn rollback_and_slices_keep_one_token_per_word() {
+        let doc = F(DOC, "", None, vec![
+            F(TEXT, "H1", None, vec![w("A ", None), w("B ", None)]),
+            F(TEXT, "P", None, vec![w("c ", None), w("d ", None)]),
+        ]);
+        let mut rd = Walk::new(words(doc, 100), Vec::new());
+        assert_eq!(rd.take(1, far()), [m(Brk::Heading(1), "A ")]);
+        let mk = rd.mark();
+        assert_eq!(rd.take(10, far()), ["B\n", "c ", "d\n"]);
+        rd.rollback(mk);
+        assert_eq!(rd.take(10, far()), ["B\n", "c ", "d\n"]);
+        assert_eq!(rd.nodes.len(), 4, "one node per token");
+    }
+
+    #[test]
+    fn normalize_reads_the_markers_and_paragraph_ends() {
+        let doc = F(DOC, "", None, vec![
+            F(TEXT, "H2", None, vec![w("Big ", None), w("news", None)]),
+            F(TEXT, "P", None, vec![w("It ", None), w("rained.", None)]),
+            F(STRUCT, "L", None, vec![F(STRUCT, "LI", None, vec![F(TEXT, "LBody", None, vec![w("Milk", None)])])]),
+        ]);
+        let ws = crate::ra_text::normalize(&read_all(doc));
+        let got: Vec<(&str, Brk, Vec<usize>)> = ws.iter().map(|w| (w.text.as_str(), w.brk, w.src.clone())).collect();
+        assert_eq!(
+            got,
+            [
+                ("Big", Brk::Heading(2), vec![0]),
+                ("news", Brk::None, vec![1]),
+                ("It", Brk::Paragraph, vec![2]),
+                ("rained.", Brk::None, vec![3]),
+                ("Milk", Brk::ListItem, vec![4]),
+            ]
+        );
+    }
+
+    #[test]
+    fn structure_names_map_to_breaks() {
+        assert_eq!(brk_of("H1"), Brk::Heading(1));
+        assert_eq!(brk_of("h6"), Brk::Heading(6));
+        assert_eq!(brk_of("H7"), Brk::None);
+        assert_eq!(brk_of("H"), Brk::Heading(0));
+        assert_eq!(brk_of("LI"), Brk::ListItem);
+        assert_eq!(brk_of("TR"), Brk::TableRow);
+        assert_eq!(brk_of("TD"), Brk::TableCell);
+        assert_eq!(brk_of("TH"), Brk::TableCell);
+        assert_eq!(brk_of("Caption"), Brk::Caption);
+        assert_eq!(brk_of("BlockQuote"), Brk::Quote);
+        assert_eq!(brk_of("Code"), Brk::Code);
+        for n in ["P", "", "Document", "StructTreeRoot", "L", "Table", "Span", "Lbl", "LBody", "Hx", "H10", "\u{E0F0}"] {
+            assert_eq!(brk_of(n), Brk::None, "{n:?}");
+        }
+        assert!(is_inline("Span") && is_inline("link") && is_inline("Lbl") && is_inline("Quote"));
+        assert!(!is_inline("P") && !is_inline("") && !is_inline("Code") && !is_inline("BlockQuote"));
     }
 
     #[test]
@@ -1546,6 +1904,90 @@ mod live {
                 assert!(r.is_ok(), "pick at the last word: {:?}", r.err());
             }
             println!("pick at the page's last word: {}", pct(&picks));
+        }
+        drop(guard);
+    }
+
+    /// Structure markers against a real Acrobat (natural-reading spec §5): prints the
+    /// DOM's containers (type, `GetStdName`) and the tokens of a full read of a PDF
+    /// tagged H1, P, list, then checks the markers and paragraph ends. Same launch and
+    /// cleanup rules as `acro_live`. RA_ACRO_UNTAGGED=1 checks the untagged fallback
+    /// (paragraph ends only, no markers).
+    /// cargo test acro_struct_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn acro_struct_live() {
+        use crate::ra_struct::strip_mark;
+        if running("Acrobat.exe") || running("AcroRd32.exe") {
+            println!("skipped: Acrobat already running");
+            return;
+        }
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let untagged = std::env::var_os("RA_ACRO_UNTAGGED").is_some();
+        let pdf = std::env::temp_dir().join(format!("ra_acro_struct_{}.pdf", std::process::id()));
+        let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("tools").join("read-aloud").join("mkpdf.py");
+        let mut py = Command::new("py");
+        py.arg(&tool).arg(&pdf).arg("--struct");
+        if untagged {
+            py.arg("--untagged");
+        }
+        let made = py.output().expect("run py mkpdf.py");
+        assert!(made.status.success() && pdf.exists(), "mkpdf failed: {made:?}");
+        let child = Command::new(ACROBAT).arg(&pdf).spawn().expect("launch Acrobat");
+        let mut guard = Launched { child, frame: None, pdf: pdf.clone() };
+        let t0 = Instant::now();
+        let frame = loop {
+            if let Some(f) = acrobat_frames().into_iter().next() {
+                break f;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no Acrobat frame in 40 s");
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        guard.frame = Some(frame);
+        let root = loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let pv = page_views(frame).into_iter().filter(|(_, vis, r)| *vis && r.w > 0.0 && r.h > 0.0).map(|(h, _, _)| h).next();
+            let found = pv.and_then(|pv| dom_root(pv).ok()).filter(|r| words(r.clone(), 5).count() >= 3);
+            if let Some(r) = found {
+                break r;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(40), "no DOM words in 40 s");
+        };
+        fn dump(n: &IPDDomNode, depth: usize) {
+            let k = n.kind();
+            if k == WORD || depth > 4 {
+                return;
+            }
+            println!("{}type {k} name {:?} kids {}", "  ".repeat(depth), n.name(), n.child_count());
+            for i in 0..n.child_count().min(12) {
+                if let Some(c) = n.child(i) {
+                    dump(&c, depth + 1);
+                }
+            }
+        }
+        dump(&root, 0);
+        let mut rd = Walk::new(words(root, MAX_WORDS), Vec::new());
+        let t = Instant::now();
+        let toks = rd.take(MAX_WORDS, Instant::now() + CALL_BUDGET);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        let marked: Vec<(Brk, &str)> = toks.iter().filter_map(|t| match strip_mark(t) {
+            (Some(b), rest) => Some((b, rest)),
+            _ => None,
+        }).collect();
+        let ends: Vec<&String> = toks.iter().filter(|t| t.ends_with('\n')).collect();
+        println!("{} tokens in {ms:.0} ms; markers {marked:?}; {} paragraph ends: {ends:?}", toks.len(), ends.len());
+        assert!(rd.ended, "the whole test document was read");
+        assert_eq!(rd.nodes.len(), toks.len(), "one token per word");
+        if untagged {
+            assert!(marked.is_empty(), "no markers on an untagged PDF");
+            assert_eq!(ends.len(), 3, "one block per page");
+        } else {
+            assert_eq!(marked, [(Brk::Heading(1), "Page "), (Brk::ListItem, "The "), (Brk::ListItem, "Alpha ")]);
+            assert_eq!(ends.len(), 12, "every line of the test PDF is its own block");
+            assert_eq!(ends.first().map(|s| s.as_str()), Some("vote.\n"));
         }
         drop(guard);
     }

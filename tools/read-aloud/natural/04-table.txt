@@ -1,0 +1,15 @@
+# Comparing Three Phone Plans
+
+We looked at three prepaid plans that cost under forty dollars a month. The table below lists the price, the data allowance and the hotspot limit for each one.
+
+| Plan | Monthly price | Data | Hotspot |
+| Basic | Fifteen dollars | Five gigabytes | None |
+| Standard | Twenty five dollars | Fifteen gigabytes | Five gigabytes |
+| Plus | Thirty five dollars | Unlimited | Ten gigabytes |
+
+Caption: Table one. Prices include taxes and fees for a single line.
+
+The Basic plan suits someone who mostly uses wifi at home and at work. The Standard plan is the best value for most people, since fifteen gigabytes covers maps, music and some video on the go. The Plus plan only makes sense if you stream a lot of video away from home or share your connection with a laptop.
+
+## Our Pick
+For a typical user we recommend the Standard plan. It costs ten dollars less than Plus, and very few people use more than fifteen gigabytes in a month. You can switch plans at any time without a fee, so start small and move up if you need to.

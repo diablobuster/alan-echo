@@ -1,6 +1,8 @@
 # Test tool for ra_acro's manual test (acro_live): writes a hand-built 3-page text PDF.
-# Usage: py mkpdf.py OUT.pdf [--untagged] [--dense]   (no dependencies)
+# Usage: py mkpdf.py OUT.pdf [--untagged] [--dense] [--struct]   (no dependencies)
 # --dense: page one holds 40 lines (~440 words) at 11 pt, for the hover bench.
+# --struct: page one is tagged H1, P, then a list (L > LI > LBody) of two items;
+#   every other line stays a P.
 # Page 3 holds the marker word ZEBRAFINCH, which the test reads up to and scrolls to.
 import sys
 PAGES = [
@@ -18,7 +20,7 @@ PAGES = [
   "Last line on page three with Pelosi one more time."],
 ]
 def esc(s): return s  # test text has no parens or backslashes
-def build(tagged, out, dense=False):
+def build(tagged, out, dense=False, struct=False):
     pages = [list(p) for p in PAGES]
     if dense:
         words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo".split()
@@ -31,10 +33,25 @@ def build(tagged, out, dense=False):
     cont_ids = [5+2*i for i in range(n_pages)]
     nxt = 4+2*n_pages
     struct_root = nxt; doc_elem = nxt+1; parent_tree = nxt+2; nxt += 3
-    p_elems = []  # (objid, page_index, mcid)
+    p_elems = []  # (objid, page_index, mcid): the element holding each line
+    tags = {}     # objid -> (struct type, parent objid or None = Document)
+    top_kids = [] # Document's children, in order
+    lst = None
     for pi, lines in enumerate(pages):
         for li in range(len(lines)):
-            p_elems.append((nxt, pi, li)); nxt += 1
+            kind = "P"
+            if struct and pi == 0:
+                kind = {0: "H1", 1: "P"}.get(li, "LI")
+            if kind == "LI":
+                if lst is None:
+                    lst = nxt; nxt += 1; tags[lst] = ("L", None); top_kids.append(lst)
+                item = nxt; body = nxt + 1; nxt += 2
+                tags[item] = ("LI", lst); tags[body] = ("LBody", item)
+                p_elems.append((body, pi, li))
+            else:
+                lst = None
+                tags[nxt] = (kind, None); top_kids.append(nxt)
+                p_elems.append((nxt, pi, li)); nxt += 1
     cat = "<< /Type /Catalog /Pages 2 0 R"
     if tagged:
         cat += f" /MarkInfo << /Marked true >> /StructTreeRoot {struct_root} 0 R /Lang (en-US)"
@@ -53,16 +70,23 @@ def build(tagged, out, dense=False):
         objs[cont_ids[pi]] = f"<< /Length {len(s.encode('latin-1'))} >>\nstream\n{s}endstream"
     if tagged:
         objs[struct_root] = f"<< /Type /StructTreeRoot /K [{doc_elem} 0 R] /ParentTree {parent_tree} 0 R /ParentTreeNextKey {n_pages} >>"
-        objs[doc_elem] = f"<< /Type /StructElem /S /Document /P {struct_root} 0 R /K [{' '.join(f'{o} 0 R' for o,_,_ in p_elems)}] >>"
+        objs[doc_elem] = f"<< /Type /StructElem /S /Document /P {struct_root} 0 R /K [{' '.join(f'{o} 0 R' for o in top_kids)}] >>"
         nums = []
         for pi in range(n_pages):
             arr = ' '.join(f'{o} 0 R' for o,p,_ in p_elems if p==pi)
             nums.append(f"{pi} [{arr}]")
         objs[parent_tree] = f"<< /Nums [{' '.join(nums)}] >>"
-        for o,pi,mcid in p_elems:
-            objs[o] = f"<< /Type /StructElem /S /P /P {doc_elem} 0 R /Pg {page_ids[pi]} 0 R /K {mcid} >>"
+        holders = {o: (pi, mcid) for o, pi, mcid in p_elems}
+        for o, (kind, parent) in tags.items():
+            par = parent if parent is not None else doc_elem
+            if o in holders:
+                pi, mcid = holders[o]
+                k = f"/Pg {page_ids[pi]} 0 R /K {mcid}"
+            else:
+                k = "/K [" + ' '.join(f'{c} 0 R' for c, (_, pp) in tags.items() if pp == o) + "]"
+            objs[o] = f"<< /Type /StructElem /S /{kind} /P {par} 0 R {k} >>"
     else:
-        for k in [struct_root, doc_elem, parent_tree] + [o for o,_,_ in p_elems]:
+        for k in [struct_root, doc_elem, parent_tree] + list(tags):
             objs[k] = "null"
     maxid = max(objs)
     buf = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"; offs = {}
@@ -77,5 +101,6 @@ def build(tagged, out, dense=False):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit("usage: mkpdf.py OUT.pdf [--untagged] [--dense]")
-    build("--untagged" not in sys.argv[2:], sys.argv[1], "--dense" in sys.argv[2:])
+    a = sys.argv[2:]
+    build("--untagged" not in a, sys.argv[1], "--dense" in a, "--struct" in a)
     print("ok")

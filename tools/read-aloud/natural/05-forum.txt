@@ -1,0 +1,23 @@
+# Bike chain keeps slipping on hills
+
+Posted by trailmix_42
+
+My chain slips every time I stand up to climb. It happens most in the middle gears. I replaced the chain last month but the problem came back after a week. Any ideas before I take it to a shop?
+
+Reply from gearhead
+
+A new chain on an old cassette is the classic cause. The worn teeth on the cassette do not match the new chain, so it skips under load. Count how many rides the cassette has done. If it is more than two chains old, replace it.
+
+Reply from trailmix_42
+
+> If it is more than two chains old, replace it.
+
+That makes sense. The cassette is the original one from four years ago. I will order a new one tonight.
+
+Reply from slowroller
+
+Also check the derailleur hanger. A bent hanger can cause the same skipping, and it is a cheap part. Look at the bike from behind and see if the derailleur sits straight under the cassette.
+
+Reply from trailmix_42
+
+Update: new cassette fitted and the hanger was fine. No slipping on the climb today. Thanks everyone.

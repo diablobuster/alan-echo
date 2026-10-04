@@ -233,21 +233,21 @@ fn gapless_bench() {
             s.set_rate(rate);
             let words = article_words(0);
             let len = words.len();
-            s.start(words, len, true);
+            s.start(words, len, true, false);
             report(&format!("r{round} start @{rate}x"), &play(&e, &mut s, rate));
             // click-to-jump: a fresh read from the click (mid-article)
             let mut s = Session::new(Arc::clone(&gen));
             s.set_rate(rate);
             let words = article_words(150);
             let len = words.len();
-            s.start(words, len, true);
+            s.start(words, len, true, false);
             report(&format!("r{round} jump  @{rate}x"), &play(&e, &mut s, rate));
             // skip / speed change: seek inside an existing read
             let mut s = Session::new(Arc::clone(&gen));
             s.set_rate(rate);
             let words = article_words(0);
             let len = words.len();
-            s.start(words, len, true);
+            s.start(words, len, true, false);
             let c = s.chunk_of(150).unwrap_or(0);
             s.seek(c);
             report(&format!("r{round} skip  @{rate}x"), &play(&e, &mut s, rate));

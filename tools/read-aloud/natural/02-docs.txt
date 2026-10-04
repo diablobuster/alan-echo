@@ -1,0 +1,21 @@
+# Getting Started with the Sync Tool
+
+The sync tool copies files between two folders and keeps them matched. It runs on any recent version of Windows and needs no account.
+
+## Install
+1. Download the installer from the release page
+2. Run the installer and accept the default folder
+3. Restart your computer when it asks you to
+
+## First Sync
+Open the app and choose a source folder and a target folder. Press Start. The first pass can take a while because every file is compared, but later passes only look at files that changed.
+
+> Note: the tool never deletes a file in the target folder unless you turn on mirror mode.
+
+## Settings
+- Interval sets how often a sync runs
+- Mirror mode removes files that no longer exist in the source
+- Quiet hours pause syncing during the times you choose
+
+## Troubleshooting
+If a sync stops with an error, open the log from the Help menu. Most errors come from a file that another program has locked. Close that program and press Start again.

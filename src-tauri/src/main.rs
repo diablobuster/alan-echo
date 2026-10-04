@@ -23,6 +23,12 @@ mod trial;
 mod updater;
 mod whisper;
 #[cfg(target_os = "windows")]
+mod ra_pause;
+#[cfg(target_os = "windows")]
+mod ra_struct;
+#[cfg(target_os = "windows")]
+mod ra_junk;
+#[cfg(target_os = "windows")]
 mod ra_text;
 #[cfg(target_os = "windows")]
 mod ra_model;
@@ -30,6 +36,8 @@ mod ra_model;
 mod ra_timing;
 #[cfg(target_os = "windows")]
 mod ra_wsola;
+#[cfg(target_os = "windows")]
+mod ra_level;
 #[cfg(target_os = "windows")]
 mod ra_tts;
 #[cfg(target_os = "windows")]

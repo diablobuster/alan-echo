@@ -29,12 +29,23 @@ const SENTENCE_MS: f32 = 200.0;
 const COMMA_MS: f32 = 150.0;
 const PHRASE_MS: f32 = 60.0;
 
+/// Silence kept before a chunk's first sound, at 1x (divided by the reading speed),
+/// but never less than `KEEP_LEAD_MIN_MS` whatever the speed: a quiet first sound
+/// ("h", "f", "s") fades in below the threshold and must not be clipped.
+pub const KEEP_LEAD_MS: f32 = 40.0;
+pub const KEEP_LEAD_MIN_MS: f32 = 30.0;
+
 /// Closing quotes and brackets, skipped when looking at a word's last punctuation.
 const CLOSERS: [char; 6] = ['"', '\'', ')', ']', '\u{201D}', '\u{2019}'];
 
 /// The reading speed for pauses: below 1x (or junk) counts as 1x.
 fn speed(rate: f32) -> f32 {
     rate.max(1.0)
+}
+
+/// The silence the engine keeps before a chunk's first sound at `rate`.
+pub fn lead_ms(rate: f32) -> f32 {
+    (KEEP_LEAD_MS / speed(rate)).max(KEEP_LEAD_MIN_MS)
 }
 
 /// The pause for a structural boundary at `rate`: `base / rate^0.6`, never under
@@ -75,40 +86,54 @@ pub fn punct_ms(last: &str, rate: f32) -> f32 {
     base / speed(rate)
 }
 
-/// The silence to leave after a chunk ending in `last_word`, before a word whose
-/// boundary is `next_brk` (`None`: no next word yet, the end of the read so far: a
-/// sentence pause). A structural break never pauses less than the punctuation.
+/// The whole silence to leave after a chunk ending in `last_word`, before a word whose
+/// boundary is `next_brk`. Running text (`Brk::None`) keeps today's audible gap: the
+/// punctuation pause plus the next chunk's lead. `None` (no next word yet, the end of
+/// the read so far) is a sentence's gap. A structural break never pauses less than the
+/// punctuation gap.
 pub fn after_ms(last_word: &str, next_brk: Option<Brk>, rate: f32) -> f32 {
-    match next_brk {
+    let punct = match next_brk {
         None => SENTENCE_MS / speed(rate),
-        Some(b) => pause_ms(b, rate).max(punct_ms(last_word, rate)),
-    }
+        Some(_) => punct_ms(last_word, rate),
+    } + lead_ms(rate);
+    pause_ms(next_brk.unwrap_or_default(), rate).max(punct)
 }
 
-/// How `word` is spoken before a boundary `next_brk` (never stored in `Word::text`):
-/// before a heading, list item, row, paragraph, caption, quote, code, section or line
-/// a word without a final `.` `!` `?` `:` `;` gets a "." (a falling end); before a
-/// table cell a word ending in a letter or digit gets a ",". Closing quotes and
-/// brackets are looked past. A word with no letter or digit is left alone.
+/// How `word` is spoken before a boundary `next_brk` (never stored in `Word::text`).
+/// Before a heading, list item, row, paragraph, caption, quote, code, section or line:
+/// a final `,` or dash is replaced by "." and a word not ending in `.` `!` `?` `:` `;`
+/// gets a "." (a falling end). Before a table cell: a final dash is replaced by "," and
+/// a word ending in a letter or digit gets a ",". Closing quotes and brackets are looked
+/// past and kept after the mark. A word with no letter or digit is left alone.
 pub fn speak_form(word: &str, next_brk: Brk) -> Cow<'_, str> {
-    if !word.chars().any(char::is_alphanumeric) {
+    if next_brk == Brk::None || !word.chars().any(char::is_alphanumeric) {
         return Cow::Borrowed(word);
     }
-    let last = core(word).chars().last();
-    let add = match next_brk {
-        Brk::None => None,
-        Brk::TableCell => last.filter(|c| c.is_alphanumeric()).map(|_| ','),
-        _ => (!last.is_some_and(|c| matches!(c, '.' | '!' | '?' | ':' | ';'))).then_some('.'),
-    };
-    match add {
-        Some(c) => {
-            let mut s = String::with_capacity(word.len() + 1);
-            s.push_str(word);
-            s.push(c);
-            Cow::Owned(s)
+    let body = core(word);
+    let closers = word.get(body.len()..).unwrap_or("");
+    let Some(last) = body.chars().last() else { return Cow::Borrowed(word) };
+    let dash = matches!(last, '\u{2014}' | '\u{2013}');
+    let (cut, mark) = if next_brk == Brk::TableCell {
+        if dash {
+            (true, ',')
+        } else if last.is_alphanumeric() {
+            (false, ',')
+        } else {
+            return Cow::Borrowed(word);
         }
-        None => Cow::Borrowed(word),
-    }
+    } else if dash || last == ',' {
+        (true, '.')
+    } else if matches!(last, '.' | '!' | '?' | ':' | ';') {
+        return Cow::Borrowed(word);
+    } else {
+        (false, '.')
+    };
+    let keep = if cut { body.get(..body.len() - last.len_utf8()).unwrap_or(body) } else { body };
+    let mut s = String::with_capacity(word.len() + 1);
+    s.push_str(keep);
+    s.push(mark);
+    s.push_str(closers);
+    Cow::Owned(s)
 }
 
 #[cfg(test)]
@@ -175,20 +200,25 @@ mod tests {
 
     #[test]
     fn after_ms_takes_the_longer_of_break_and_punctuation() {
-        // end of the words so far: a sentence pause whatever the last word
-        assert_eq!(after_ms("developers", None, 1.0), 200.0);
-        assert_eq!(after_ms("developers", None, 2.0), 100.0);
-        // running text: the punctuation pause
-        assert_eq!(after_ms("developers", Some(Brk::None), 1.0), 60.0);
-        assert_eq!(after_ms("year,", Some(Brk::None), 1.0), 150.0);
+        // end of the words so far: a sentence pause (plus the lead, as today)
+        assert_eq!(after_ms("developers", None, 1.0), 200.0 + KEEP_LEAD_MS);
+        assert_eq!(after_ms("developers", None, 2.0), 100.0 + KEEP_LEAD_MIN_MS);
+        // running text: today's audible gap, the punctuation trail plus the next lead
+        assert_eq!(after_ms("developers", Some(Brk::None), 1.0), 60.0 + KEEP_LEAD_MS);
+        assert_eq!(after_ms("year,", Some(Brk::None), 1.0), 150.0 + KEEP_LEAD_MS);
+        for rate in [1.0f32, 2.2, 3.0, 3.5] {
+            assert_eq!(after_ms("ended.", Some(Brk::None), rate), punct_ms("ended.", rate) + lead_ms(rate));
+        }
+        assert_eq!(lead_ms(1.0), 40.0);
+        assert_eq!(lead_ms(2.2), 30.0);
+        assert_eq!(lead_ms(f32::NAN), 40.0);
         // a break: its pause
         assert_eq!(after_ms("Takeaways", Some(Brk::AfterHeading), 1.0), 650.0);
         assert_eq!(after_ms("grew.", Some(Brk::Paragraph), 2.2), pause_ms(Brk::Paragraph, 2.2));
-        // never less than the punctuation pause (a sentence end before a table cell at 1x
-        // is 250 vs 200; at 1x a cell pause wins, the floor keeps it above a comma)
+        // never less than the punctuation gap
         for rate in [1.0f32, 2.2, 3.0, 3.5] {
             for b in ALL {
-                assert!(after_ms("ended.", Some(b), rate) >= punct_ms("ended.", rate), "{b:?} {rate}");
+                assert!(after_ms("ended.", Some(b), rate) >= punct_ms("ended.", rate) + lead_ms(rate), "{b:?} {rate}");
             }
         }
     }
@@ -201,12 +231,26 @@ mod tests {
         assert_eq!(speak_form("grew.", Brk::Paragraph), "grew.");
         assert_eq!(speak_form("why?", Brk::Section), "why?");
         assert_eq!(speak_form("Note:", Brk::Line), "Note:");
-        assert_eq!(speak_form("\"Hello\"", Brk::Paragraph), "\"Hello\".");
+        assert_eq!(speak_form("\"Hello\"", Brk::Paragraph), "\"Hello.\"", "the mark goes inside the closers");
         assert_eq!(speak_form("\"Hello.\"", Brk::Paragraph), "\"Hello.\"");
-        assert_eq!(speak_form("(see\u{201D})", Brk::Quote), "(see\u{201D}).");
+        assert_eq!(speak_form("(see\u{201D})", Brk::Quote), "(see.\u{201D})");
         assert_eq!(speak_form("Price", Brk::TableCell), "Price,");
         assert_eq!(speak_form("Price:", Brk::TableCell), "Price:");
         assert_eq!(speak_form("$4.20", Brk::TableCell), "$4.20,");
+        // a trailing comma or dash is replaced, never stacked
+        assert_eq!(speak_form("apples,", Brk::ListItem), "apples.");
+        assert_eq!(speak_form("so\u{2014}", Brk::Paragraph), "so.");
+        assert_eq!(speak_form("then\u{2013}", Brk::AfterHeading), "then.");
+        assert_eq!(speak_form("\"apples,\"", Brk::Paragraph), "\"apples.\"");
+        assert_eq!(speak_form("(so\u{2014})", Brk::Section), "(so.)");
+        assert_eq!(speak_form("so\u{2014}", Brk::TableCell), "so,");
+        assert_eq!(speak_form("so\u{2013}", Brk::TableCell), "so,");
+        assert_eq!(speak_form("apples,", Brk::TableCell), "apples,");
+        assert_eq!(speak_form("Price.", Brk::TableCell), "Price.");
+        // only punctuation: untouched
+        assert_eq!(speak_form(",", Brk::Paragraph), ",");
+        assert_eq!(speak_form("\u{2013}", Brk::TableCell), "\u{2013}");
+        assert_eq!(speak_form("\"\u{2014}\"", Brk::Heading(1)), "\"\u{2014}\"");
         // never: running text, no letters or digits
         assert_eq!(speak_form("Takeaways", Brk::None), "Takeaways");
         assert_eq!(speak_form("\u{2014}", Brk::Paragraph), "\u{2014}");

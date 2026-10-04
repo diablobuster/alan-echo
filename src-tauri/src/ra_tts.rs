@@ -10,7 +10,7 @@ use crate::{
     ra_g2pen::G2pEn,
     ra_homograph, ra_model,
     ra_names::{self, Lex, Lts, NameFallback, Names},
-    ra_norm, ra_pause, ra_text,
+    ra_norm, ra_pause, ra_struct, ra_text,
     ra_timing::{self, WordTime},
     ra_wsola,
 };
@@ -265,33 +265,27 @@ const WSOLA_MAX: f32 = 2.2;
 /// The error of a synth run stopped by `Engine::cancel_stale`.
 pub const CANCELLED: &str = "cancelled: stale job";
 
-/// Silence kept before a chunk's first sound, at 1x (divided by the reading speed),
-/// but never less than `KEEP_LEAD_MIN_MS` whatever the speed: a quiet first sound
-/// ("h", "f", "s") fades in below the threshold and must not be clipped.
-const KEEP_LEAD_MS: f32 = 40.0;
-const KEEP_LEAD_MIN_MS: f32 = 30.0;
+/// The model's own audio always kept after a chunk's last loud 10 ms window (not
+/// divided by speed): its fade-out sits below the threshold and must not be clipped.
+const MIN_TAIL_KEEP_MS: f32 = 25.0;
 /// The longest silence `trim_silence` leaves after a chunk (bounds junk input).
 const MAX_PAUSE_MS: f32 = 5000.0;
 /// A 10 ms window is silence when its peak is under this fraction of the chunk's
 /// peak (-50 dB re peak), so a quiet onset of a loud chunk still counts as sound.
 const SILENCE_RE_PEAK: f32 = 0.003_162;
 
-/// The silence kept before a chunk's first sound at `rate` (the effective speed).
-fn lead_ms(rate: f32) -> f32 {
-    (KEEP_LEAD_MS / rate.max(1.0)).max(KEEP_LEAD_MIN_MS)
-}
-
 /// The pause after a chunk when its boundary is unknown (a test, a bench, a chunk the
-/// model only partly covered): today's rule from the last spoken word, the trail
-/// kept as it always was (the punctuation pause plus the next chunk's lead).
+/// model only partly covered): today's punctuation gap from the last spoken word
+/// (`ra_pause::after_ms` before running text).
 fn default_pause_ms(last: Option<&str>, rate: f32) -> f32 {
-    ra_pause::punct_ms(last.unwrap_or(""), rate) + lead_ms(rate)
+    ra_pause::after_ms(last.unwrap_or(""), Some(ra_struct::Brk::None), rate)
 }
 
-/// Trims a chunk's leading silence to `lead_ms(rate)` and makes its trailing silence
-/// exactly `pause_after_ms - lead_ms(rate)` (at least 0, sample-exact after the last
-/// loud 10 ms window): the model's silence is cut to that, or zeros are appended when
-/// it left less, so with the next chunk's lead the gap is `pause_after_ms`. Word times
+/// Trims a chunk's leading silence to `ra_pause::lead_ms(rate)` and makes its trailing
+/// silence exactly `pause_after_ms - lead_ms(rate)`, but at least `MIN_TAIL_KEEP_MS`
+/// (sample-exact after the last loud 10 ms window): the model's audio is cut to that,
+/// or zeros are appended when it left less, so with the next chunk's lead the gap is
+/// `pause_after_ms`. Word times
 /// shift with the lead and are not moved by the padding. Silence is judged relative to
 /// the chunk's own peak. Never trims inside the speech; an all-silent chunk is left as
 /// it is. Word times stay one per word, clamped to the new length.
@@ -307,9 +301,9 @@ fn trim_silence(pcm: Vec<f32>, words: &mut [WordTime], rate: f32, pause_after_ms
     let loud = |k: usize| pcm[k * win..(k + 1) * win].iter().any(|x| x.abs() > thr);
     let Some(first) = (0..n).find(|&k| loud(k)) else { return pcm };
     let last = (0..n).rev().find(|&k| loud(k)).unwrap_or(first);
-    let lead = lead_ms(rate);
+    let lead = ra_pause::lead_ms(rate);
     let pause = if pause_after_ms.is_nan() { 0.0 } else { pause_after_ms.min(MAX_PAUSE_MS) };
-    let trail_ms = (pause - lead).max(0.0);
+    let trail_ms = (pause - lead).max(MIN_TAIL_KEEP_MS);
     let keep_lead = (lead / 1000.0 * sr) as usize;
     let keep_trail = (trail_ms / 1000.0 * sr) as usize;
     let start = (first * win).saturating_sub(keep_lead);
@@ -1405,6 +1399,7 @@ mod glitch_hunt;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ra_pause::{lead_ms, KEEP_LEAD_MIN_MS, KEEP_LEAD_MS};
     use std::time::Duration;
 
     fn joined(ph: &[(usize, String, bool)]) -> String {
@@ -2523,10 +2518,10 @@ mod tests {
         let fast = trim_silence(pcm.clone(), &mut w2, 3.5, 200.0 / 3.5);
         assert!(fast.len() < out.len());
         assert!(fast[..lead].iter().all(|x| *x == 0.0) && fast[lead] != 0.0);
-        // all silence, or no silence and no pause wanted: unchanged
+        // all silence: unchanged; no silence and no pause wanted: the 25 ms minimum tail
         let mut w3 = Vec::new();
         assert_eq!(trim_silence(vec![0.0; 4800], &mut w3, 2.2, 500.0).len(), 4800);
-        assert_eq!(trim_silence(tone(4800, 0.2), &mut w3, 2.2, 0.0).len(), 4800);
+        assert_eq!(trim_silence(tone(4800, 0.2), &mut w3, 2.2, 0.0).len(), 4800 + sr * 25 / 1000);
         assert!(trim_silence(Vec::new(), &mut w3, 2.2, 500.0).is_empty());
     }
 
@@ -2603,13 +2598,14 @@ mod tests {
                 assert_eq!(w[0].end, (lead + sr / 2) as u64, "word times not moved by the padding");
             }
         }
-        // a pause under the lead keeps no trail; junk pauses are safe
+        // a pause under the lead keeps the 25 ms minimum tail; junk pauses are safe
         let mut pcm = tone(sr / 2);
         pcm.extend(vec![0.0f32; sr / 2]);
         let n = |p| trim_silence(pcm.clone(), &mut [], 1.0, p).len();
-        assert_eq!(n(10.0), sr / 2);
-        assert_eq!(n(-5.0), sr / 2);
-        assert_eq!(n(f32::NAN), sr / 2);
+        let min_tail = sr * 25 / 1000;
+        assert_eq!(n(10.0), sr / 2 + min_tail);
+        assert_eq!(n(-5.0), sr / 2 + min_tail);
+        assert_eq!(n(f32::NAN), sr / 2 + min_tail);
         assert_eq!(n(f32::INFINITY), sr / 2 + ((MAX_PAUSE_MS - KEEP_LEAD_MS) / 1000.0 * sr as f32) as usize);
         // speech in a final partial window (not judged): the trail counts from the last
         // whole loud window, so the silence is exact to within one 10 ms window and the
@@ -2619,6 +2615,63 @@ mod tests {
         let out = trim_silence(odd.clone(), &mut [], 1.0, 240.0);
         assert_eq!(out.len(), win * 11 + ((240.0 - KEEP_LEAD_MS) / 1000.0 * sr as f32) as usize, "lead 10 ms < 40: kept whole");
         assert_eq!(&out[..odd.len()], &odd[..], "speech kept");
+    }
+
+    /// Fix round 1: the model's fade-out after the last loud window is never clipped:
+    /// at least 25 ms of its own audio stays (not divided by speed), even when the
+    /// pause wanted is shorter.
+    #[test]
+    fn the_model_fade_out_keeps_at_least_25_ms() {
+        let sr = ra_timing::SR as usize;
+        let keep = (MIN_TAIL_KEEP_MS / 1000.0 * sr as f32) as usize;
+        let mut pcm: Vec<f32> = (0..sr / 2).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let speech = pcm.len();
+        // a 100 ms fade below the silence threshold (-50 dB re peak), then zeros
+        pcm.extend((0..sr / 10).map(|i| if i % 2 == 0 { 0.001 } else { -0.001 }));
+        pcm.extend(vec![0.0f32; sr / 2]);
+        for (rate, pause) in [(1.0f32, 0.0f32), (2.2, 40.0), (3.5, 17.0), (3.5, 0.0), (1.0, f32::NAN)] {
+            let out = trim_silence(pcm.clone(), &mut [], rate, pause);
+            assert_eq!(out.len(), speech + keep, "{rate}x pause {pause}");
+            assert_eq!(&out[speech..], &pcm[speech..speech + keep], "the model's own fade is kept");
+        }
+        // a longer pause keeps more of the model's own fade
+        let out = trim_silence(pcm.clone(), &mut [], 1.0, 140.0);
+        assert_eq!(&out[speech..speech + sr / 10], &pcm[speech..speech + sr / 10]);
+    }
+
+    /// Fix round 1: the audible gap between chunk N's last loud window and chunk N+1's
+    /// first is today's at a punctuation edge (trail + the next chunk's lead) and
+    /// `pause_ms(brk)` at a structural edge.
+    #[test]
+    fn gap_between_chunks_matches_the_edge() {
+        use crate::ra_pause::{after_ms, pause_ms, punct_ms};
+        use crate::ra_struct::Brk;
+        let sr = ra_timing::SR as usize;
+        let tone = |n: usize| (0..n).map(|i| if i % 2 == 0 { 0.4f32 } else { -0.4 }).collect::<Vec<f32>>();
+        let chunk = || {
+            let mut p = vec![0.0f32; sr / 4];
+            p.extend(tone(sr / 4));
+            p.extend(vec![0.0f32; sr / 2]);
+            p
+        };
+        let first_loud = |p: &[f32]| p.iter().position(|x| x.abs() > 0.01).unwrap_or(0);
+        let last_loud = |p: &[f32]| p.iter().rposition(|x| x.abs() > 0.01).map_or(0, |i| i + 1);
+        let gap_ms = |pause: f32, rate: f32| {
+            let a = trim_silence(chunk(), &mut [], rate, pause);
+            let b = trim_silence(chunk(), &mut [], rate, pause);
+            ((a.len() - last_loud(&a)) + first_loud(&b)) as f32 * 1000.0 / sr as f32
+        };
+        for rate in [1.0f32, 2.2, 3.0, 3.5] {
+            for w in ["ended.", "year,", "developers"] {
+                let old = punct_ms(w, rate).max(MIN_TAIL_KEEP_MS) + lead_ms(rate);
+                let got = gap_ms(after_ms(w, Some(Brk::None), rate), rate);
+                assert!((got - old).abs() <= 0.1, "{w} at {rate}x: {got} vs today's {old}");
+            }
+            for b in [Brk::Line, Brk::ListItem, Brk::Paragraph, Brk::AfterHeading, Brk::Section] {
+                let got = gap_ms(after_ms("word", Some(b), rate), rate);
+                assert!((got - pause_ms(b, rate)).abs() <= 0.1, "{b:?} at {rate}x: {got}");
+            }
+        }
     }
 
     /// Review fix: nothing to cancel without a run in flight; a run of the current

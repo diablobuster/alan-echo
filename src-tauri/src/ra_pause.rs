@@ -267,15 +267,27 @@ mod tests {
 
     /// Final-review ruling: a word the abbreviation table would expand once dotted
     /// ("St." = saint, "Dr." = doctor, "No." = number) never gets the ".": the pause
-    /// alone marks the break. Case-insensitive; other words still fall.
+    /// alone marks the break. Matched as written in the table, or ALL CAPS; a lowercase
+    /// common word ("sun", "no") still falls.
     #[test]
     fn speak_form_never_dots_an_abbreviation() {
         let line: Vec<String> = ["Main", "St"].iter().map(|w| speak_form(w, Brk::None).into_owned()).collect();
         assert_eq!(line, ["Main", "St"]);
         assert_eq!(speak_form("St", Brk::Line), "St", "14 Main St / Springfield");
         assert_eq!(speak_form("Dr", Brk::Line), "Dr");
-        assert_eq!(speak_form("no", Brk::ListItem), "no");
+        assert_eq!(speak_form("No", Brk::ListItem), "No");
+        assert_eq!(speak_form("Mr", Brk::Line), "Mr");
         assert_eq!(speak_form("ST", Brk::Paragraph), "ST");
+        assert_eq!(speak_form("DR", Brk::Line), "DR");
+        // controller ruling: never the lowercase common word
+        let the_sun: Vec<String> = [("the", Brk::None), ("sun", Brk::Paragraph)].iter().map(|(w, b)| speak_form(w, *b).into_owned()).collect();
+        assert_eq!(the_sun, ["the", "sun."]);
+        let say_no: Vec<String> = [("Say", Brk::None), ("no", Brk::Paragraph)].iter().map(|(w, b)| speak_form(w, *b).into_owned()).collect();
+        assert_eq!(say_no, ["Say", "no."]);
+        for w in ["cat", "art", "wed", "st", "dr", "mar"] {
+            assert_eq!(speak_form(w, Brk::Paragraph), format!("{w}."), "{w}");
+        }
+        assert_eq!(speak_form("sT", Brk::Paragraph), "sT.", "mixed case is not the table form");
         assert_eq!(speak_form("Ave", Brk::AfterHeading), "Ave");
         assert_eq!(speak_form("Inc", Brk::Heading(2)), "Inc");
         assert_eq!(speak_form("(Jr)", Brk::Paragraph), "(Jr)");

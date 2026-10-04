@@ -64,7 +64,8 @@ pauses fit the structure, and chunks sound like one voice at one loudness.
   has no terminal punctuation gets a "." so the model gives a falling end; a word
   before a `TableCell` gets ",". Headings therefore end with a falling tone even when
   the page has no period. (Final-review ruling: a word the abbreviation table would
-  expand once dotted, such as "St", "Dr", "no", gets no "."; the pause alone marks
+  expand once dotted (matched as written in the table or ALL CAPS: "St", "Dr",
+  "No", "ST"; never a lowercase word like "sun" or "no") gets no "."; the pause alone marks
   the break, so "14 Main St" / "Springfield" never reads "Main saint".)
 
 ## 3. Chunking aligned to structure (`ra_text::chunk_with`)

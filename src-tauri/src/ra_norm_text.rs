@@ -653,6 +653,13 @@ fn near(w: &[&str], i: usize, span: usize, keys: &[&str]) -> bool {
     })
 }
 
+/// Words that make "mb" megabytes even next to "high" / "low" / "storm".
+const MB_STORAGE: &[&str] = &[
+    "file", "files", "download", "downloads", "upload", "uploads", "storage", "disk", "drive", "ram",
+    "memory", "cache", "attachment", "attachments", "photo", "photos", "image", "images", "video", "videos",
+    "data", "app", "apps", "update", "install", "installer", "size", "ssd", "zip", "pdf",
+];
+
 /// A percent figure within `span` words of `i` ("18.4%").
 fn near_percent(w: &[&str], i: usize, span: usize) -> bool {
     let lo = i.saturating_sub(span);
@@ -1474,9 +1481,12 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
     if let Some(said) = party_tag(core) {
         return one(said, false);
     }
-    let person_before = i >= 2
-        && tok(w, i - 1).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core))
-        && tok(w, i - 2).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core));
+    let name_at = |j: usize| tok(w, j).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core));
+    // "Sen. Ted Cruz (R)", or a political title before a one-word name: "Rep. Smith (R)"
+    let titled = |j: usize| {
+        w.get(j).is_some_and(|x| matches!(x.trim_end_matches('.'), "Rep" | "Sen" | "Gov" | "Del") && x.ends_with('.'))
+    };
+    let person_before = i >= 2 && name_at(i - 1) && (name_at(i - 2) || titled(i - 2));
     if matches!(w[i].trim_end_matches([',', '.', ';']), "(D)" | "(R)") && person_before {
         return one((if core == "D" { "Democrat" } else { "Republican" }).to_string(), false);
     }
@@ -1689,9 +1699,12 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             let pct = near_percent(w, i, 4) || near(w, i, 4, &["point", "points", "rate", "rates", "spread", "spreads"]);
             return one((if pct { "percentage points" } else { "pages" }).to_string(), period);
         }
-        // "897 mb" millibars in weather; "500 mb file" megabytes
+        // "897 mb" millibars in weather; "500 mb file" megabytes. Round 3: the weather
+        // word must be within 3 words of the figure ("The pressure dropped to 897 mb"),
+        // and no file / storage word may be near ("500 mb file, high quality").
         if body == "mb" && prev_digits {
-            let weather = near(w, i, 6, &["pressure", "hpa", "low", "high", "storm", "hurricane", "barometric", "inhg", "cyclone", "typhoon"]);
+            let weather = near(w, i, 4, &["pressure", "hpa", "low", "high", "storm", "storm's", "hurricane", "barometric", "inhg", "cyclone", "typhoon", "millibar", "millibars"])
+                && !near(w, i, 6, MB_STORAGE);
             let (o, m) = if weather { ("millibar", "millibars") } else { ("megabyte", "megabytes") };
             return one((if prev_is_one(w, i) { o } else { m }).to_string(), period);
         }

@@ -625,6 +625,14 @@ mod round2_tests {
         check(&[("Gov. Josh Shapiro (D) signed it", "Shapiro Democrat signed")]);
         check(&[("Sen. Ted Cruz (R) spoke", "Cruz Republican spoke")]);
         check_not(&[("See Appendix (D) for the data.", "Democrat"), ("Plan (R) was chosen", "Republican")]);
+        // round 3: a title abbreviation before a one-word name
+        check(&[
+            ("Rep. Smith (R) voted no", "Smith Republican voted"),
+            ("Sen. Warren (D) said", "Warren Democrat said"),
+            ("Gov. Newsom (D), who", "Newsom Democrat"),
+            ("Del. Norton (D) asked", "Norton Democrat asked"),
+        ]);
+        check_not(&[("In Exhibit (R) the totals", "Republican"), ("Mr. Smith (R) is a typo", "Republican")]);
         assert_eq!(prepare("Intel(R)"), "Intel");
         assert_eq!(prepare("Windows\u{ae}"), "Windows");
         assert_eq!(prepare("iPhone\u{2122}"), "iPhone");
@@ -651,6 +659,18 @@ mod round2_tests {
             ("The pressure dropped to 897 mb.", "millibars"),
             ("A 990 mb low moves in", "millibars"),
             ("central pressure 960 mb, per the hPa chart", "millibars"),
+        ]);
+        // round 3: a weather word within 3 words, and no file / storage word
+        check(&[
+            ("500 mb file, high quality", "five hundred megabytes file"),
+            ("a 700 mb download with high speed", "megabytes"),
+            ("The storm's 950 mb center", "millibars"),
+        ]);
+        check_not(&[
+            ("500 mb file, high quality", "millibars"),
+            ("a 700 mb download with high speed", "millibars"),
+            ("high resolution photos take 12 mb each", "millibars"),
+            ("The storm photos were a 20 mb storage hog", "millibars"),
         ]);
     }
 

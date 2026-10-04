@@ -120,10 +120,24 @@ pub struct Engine {
     watchers: AtomicU32,
     /// Loads started (observable so tests can prove reset_to_cpu is idempotent).
     loads: AtomicU32,
-    /// The synth run in flight: (job generation, its run options, terminated). A jump
-    /// terminates a run whose generation went stale (`cancel_stale`), so the worker
-    /// is free for the new position at once instead of finishing the old chunk.
-    run: Mutex<Option<(u64, Arc<RunOptions>, bool)>>,
+    /// The synth run in flight. A jump terminates a run whose generation went stale
+    /// (`cancel_stale`), so the worker is free for the new position at once instead of
+    /// finishing the old chunk. Keyed by controller generation too (round 3): the
+    /// engine outlives controllers, whose job generations restart at 0.
+    run: Mutex<Option<Run>>,
+    /// Controller generations handed out (`controller_gen`).
+    ctl_seq: AtomicU64,
+}
+
+/// The synth run in flight (see `Engine::run`).
+pub struct Run {
+    /// The controller generation whose worker runs it.
+    pub ctl: u64,
+    /// Its job generation (that controller's `Session::gen`).
+    pub gen: u64,
+    pub opts: Arc<RunOptions>,
+    /// Terminated by `cancel_stale`.
+    pub done: bool,
 }
 
 #[cfg_attr(not(test), allow(dead_code))] // test/diagnostic API
@@ -465,6 +479,7 @@ impl Engine {
             watchers: AtomicU32::new(0),
             loads: AtomicU32::new(0),
             run: Mutex::new(None),
+            ctl_seq: AtomicU64::new(0),
         })
     }
 
@@ -661,26 +676,59 @@ impl Engine {
         self.synth_opts(words, rate, None)
     }
 
-    /// `synth` for a queued job of generation `gen`: `cancel_stale` can stop it mid-run
-    /// (it then returns `Err(CANCELLED)`, which the controller ignores as stale).
-    pub fn synth_job(self: &Arc<Self>, words: &[&str], rate: f32, gen: u64) -> Result<ChunkAudio, String> {
-        let opts = RunOptions::new().ok().map(Arc::new);
-        if let Some(o) = &opts {
-            *self.run.lock() = Some((gen, Arc::clone(o), false));
-        }
-        let r = self.synth_opts(words, rate, opts.as_deref());
-        let cancelled = self.run.lock().take().is_some_and(|(_, _, c)| c);
-        if cancelled { Err(CANCELLED.into()) } else { r }
+    /// A new controller's generation (each controller's job generations restart at 0).
+    pub fn controller_gen(&self) -> u64 {
+        self.ctl_seq.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Terminates the synth run in flight if its job generation is not `gen` (a jump
-    /// made it stale). True when a run was stopped. Never blocks on the model.
-    pub fn cancel_stale(&self, gen: u64) -> bool {
+    /// Register a run of controller `ctl`'s job generation `gen` in the slot. A worker
+    /// of an older controller never overwrites a newer controller's run (`None`: its
+    /// run is simply not cancellable).
+    pub fn begin_run(&self, ctl: u64, gen: u64) -> Option<Arc<RunOptions>> {
+        let mut slot = self.run.lock();
+        if slot.as_ref().is_some_and(|r| r.ctl > ctl) {
+            return None;
+        }
+        let opts = Arc::new(RunOptions::new().ok()?);
+        *slot = Some(Run { ctl, gen, opts: Arc::clone(&opts), done: false });
+        Some(opts)
+    }
+
+    /// The run with these options finished: free the slot if it is still ours (never
+    /// someone else's) and say whether it was cancelled.
+    pub fn end_run(&self, opts: Option<&Arc<RunOptions>>) -> bool {
+        let Some(o) = opts else { return false };
+        let mut slot = self.run.lock();
+        if slot.as_ref().is_some_and(|r| Arc::ptr_eq(&r.opts, o)) {
+            return slot.take().is_some_and(|r| r.done);
+        }
+        false
+    }
+
+    /// Our run (these options) was terminated by `cancel_stale`.
+    fn run_cancelled(&self, opts: Option<&RunOptions>) -> bool {
+        let Some(o) = opts else { return false };
+        self.run.lock().as_ref().is_some_and(|r| std::ptr::eq(Arc::as_ptr(&r.opts), o) && r.done)
+    }
+
+    /// `synth` for a queued job of controller `ctl`'s generation `gen`: `cancel_stale`
+    /// can stop it mid-run (it then returns `Err(CANCELLED)`, which the controller
+    /// ignores as stale).
+    pub fn synth_job(self: &Arc<Self>, words: &[&str], rate: f32, ctl: u64, gen: u64) -> Result<ChunkAudio, String> {
+        let opts = self.begin_run(ctl, gen);
+        let r = self.synth_opts(words, rate, opts.as_deref());
+        if self.end_run(opts.as_ref()) { Err(CANCELLED.into()) } else { r }
+    }
+
+    /// Terminates the synth run in flight if it is stale for controller `ctl` at job
+    /// generation `gen`: another generation (a jump), or an older controller's run.
+    /// True when a run was stopped. Never blocks on the model.
+    pub fn cancel_stale(&self, ctl: u64, gen: u64) -> bool {
         let mut run = self.run.lock();
         match run.as_mut() {
-            Some((g, opts, done)) if *g != gen && !*done => {
-                *done = opts.terminate().is_ok();
-                *done
+            Some(r) if (r.ctl != ctl || r.gen != gen) && r.ctl <= ctl && !r.done => {
+                r.done = r.opts.terminate().is_ok();
+                r.done
             }
             _ => false,
         }
@@ -691,7 +739,7 @@ impl Engine {
         self.touch();
         let run = || self.acquire().and_then(|eng| Self::synth_inner_with(&mut eng.lock(), words, rate, true, opts));
         let mut r = run();
-        let cancelled = self.run.lock().as_ref().is_some_and(|(_, _, c)| *c);
+        let cancelled = self.run_cancelled(opts);
         if let (Err(e), false) = (&r, cancelled) {
             if e.starts_with("dml:") {
                 log::warn!("read-aloud: DirectML runtime error ({e}); switching to CPU");
@@ -2535,12 +2583,42 @@ mod tests {
     #[test]
     fn cancel_stale_only_stops_an_older_generation() {
         let e = Engine::new(std::env::temp_dir().join("ra-tts-cancel"));
-        assert!(!e.cancel_stale(3), "no run in flight");
-        let o = Arc::new(RunOptions::new().unwrap());
-        *e.run.lock() = Some((3, Arc::clone(&o), false));
-        assert!(!e.cancel_stale(3), "same generation keeps running");
-        assert!(e.cancel_stale(4), "a jump stops it");
-        assert!(!e.cancel_stale(5), "once only");
+        let ctl = e.controller_gen();
+        assert!(!e.cancel_stale(ctl, 3), "no run in flight");
+        let o = e.begin_run(ctl, 3).expect("registered");
+        assert!(!e.cancel_stale(ctl, 3), "same generation keeps running");
+        assert!(e.cancel_stale(ctl, 4), "a jump stops it");
+        assert!(!e.cancel_stale(ctl, 5), "once only");
+        assert!(e.end_run(Some(&o)), "the run learns it was cancelled");
+        assert!(e.run.lock().is_none(), "and frees the slot");
+    }
+
+    /// Round 3: the run slot is shared by every controller (the engine outlives them),
+    /// and each controller's job generations start at 0 again. An old controller's
+    /// worker, still finishing its job, must neither overwrite nor clear the slot of a
+    /// newer controller's run.
+    #[test]
+    fn an_old_controllers_worker_cannot_touch_the_new_run_slot() {
+        let e = Engine::new(std::env::temp_dir().join("ra-tts-slot"));
+        let old = e.controller_gen();
+        let new = e.controller_gen();
+        assert!(new > old);
+        let old_run = e.begin_run(old, 1).expect("old run registered");
+        // the new controller starts: its run replaces the old (stale) one
+        let new_run = e.begin_run(new, 1).expect("new run registered");
+        // the old worker finishing must not clear the new run's slot
+        assert!(!e.end_run(Some(&old_run)), "the old run was not cancelled");
+        assert!(e.run.lock().as_ref().is_some_and(|r| r.ctl == new && Arc::ptr_eq(&r.opts, &new_run)));
+        // the old worker's next job must not overwrite it (same job generation number)
+        assert!(e.begin_run(old, 1).is_none(), "an older controller cannot take the slot");
+        assert!(e.run.lock().as_ref().is_some_and(|r| r.ctl == new));
+        // the new controller's same-numbered generation is not stale for it
+        assert!(!e.cancel_stale(new, 1));
+        // a run of an older controller is always stale for a newer one
+        let e2 = Engine::new(std::env::temp_dir().join("ra-tts-slot2"));
+        let (a, b) = (e2.controller_gen(), e2.controller_gen());
+        let _r = e2.begin_run(a, 7).unwrap();
+        assert!(e2.cancel_stale(b, 7), "same number, older controller: stale");
     }
 
     /// Real CPU model: a long chunk stopped mid-run returns quickly with `CANCELLED`.
@@ -2557,14 +2635,15 @@ mod tests {
         e.synth(&words, 1.0).unwrap();
         let full = t.elapsed();
         let e2 = Arc::clone(&e);
+        let ctl = e.controller_gen();
         let w2: Vec<String> = words.iter().map(|s| s.to_string()).collect();
         let h = std::thread::spawn(move || {
             let w: Vec<&str> = w2.iter().map(String::as_str).collect();
             let t = Instant::now();
-            (e2.synth_job(&w, 1.0, 1), t.elapsed())
+            (e2.synth_job(&w, 1.0, ctl, 1), t.elapsed())
         });
         std::thread::sleep(Duration::from_millis(80));
-        let stopped = e.cancel_stale(2);
+        let stopped = e.cancel_stale(ctl, 2);
         let (r, took) = h.join().unwrap();
         println!("full {full:?}; cancelled run took {took:?}; stopped {stopped}; err {:?}", r.as_ref().err());
         assert!(stopped && r.is_err_and(|x| x == CANCELLED));

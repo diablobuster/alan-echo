@@ -501,8 +501,10 @@ impl Session {
 }
 
 /// The synth worker: runs jobs in order on its own thread, skipping any made stale by
-/// a jump, and answers with `Msg::Chunk`. Ends when the job sender is dropped.
-pub fn spawn_synth(engine: Arc<Engine>, gen: Arc<AtomicU64>, out: mpsc::Sender<Msg>) -> Option<mpsc::Sender<Job>> {
+/// a jump, and answers with `Msg::Chunk`. Ends when the job sender is dropped. `ctl` =
+/// the owning controller's generation (`Engine::controller_gen`): the engine's run slot
+/// is keyed by it, so this worker can never disturb a later controller's run.
+pub fn spawn_synth(engine: Arc<Engine>, ctl: u64, gen: Arc<AtomicU64>, out: mpsc::Sender<Msg>) -> Option<mpsc::Sender<Job>> {
     let (tx, rx) = mpsc::channel::<Job>();
     std::thread::Builder::new()
         .name("ra-synth".into())
@@ -512,7 +514,7 @@ pub fn spawn_synth(engine: Arc<Engine>, gen: Arc<AtomicU64>, out: mpsc::Sender<M
                     continue;
                 }
                 let words: Vec<&str> = job.words.iter().map(String::as_str).collect();
-                let r = engine.synth_job(&words, job.rate, job.gen);
+                let r = engine.synth_job(&words, job.rate, ctl, job.gen);
                 if out.send(Msg::Chunk(job.gen, job.idx, r)).is_err() {
                     break;
                 }
@@ -878,6 +880,8 @@ fn click_slop(x: i32, y: i32) -> i32 {
 struct Controller {
     app: AppHandle,
     engine: Arc<Engine>,
+    /// This controller's generation (keys the engine's shared synth run slot).
+    ctl: u64,
     tx: mpsc::Sender<Msg>,
     slot: Arc<Mutex<Option<mpsc::Sender<Msg>>>>,
     phase: Phase,
@@ -951,6 +955,7 @@ impl Controller {
         let now = Instant::now();
         Controller {
             app,
+            ctl: engine.controller_gen(),
             engine,
             tx,
             slot,
@@ -1335,7 +1340,7 @@ impl Controller {
             }
         }
         if self.synth.is_none() {
-            self.synth = spawn_synth(Arc::clone(&self.engine), Arc::clone(&self.s.gen), self.tx.clone());
+            self.synth = spawn_synth(Arc::clone(&self.engine), self.ctl, Arc::clone(&self.s.gen), self.tx.clone());
             if self.synth.is_none() {
                 return self.fail("Voice engine failed");
             }
@@ -1382,7 +1387,7 @@ impl Controller {
     /// Keep the synthesis queue AHEAD chunks past the playhead; fetch more text when low.
     fn pump(&mut self) {
         // a jump made the chunk being synthesized stale: stop it, free the worker
-        if self.engine.cancel_stale(self.s.gen()) {
+        if self.engine.cancel_stale(self.ctl, self.s.gen()) {
             log::debug!("read-aloud: stale synth run cancelled");
         }
         let Some(pos) = self.player.as_ref().map(|p| p.position()) else { return };
@@ -2584,7 +2589,7 @@ mod session_tests {
         s.start(ra_text::normalize(&raw), raw.len(), true);
         let n_words = s.words.len();
         let (tx, rx) = mpsc::channel::<Msg>();
-        let synth = spawn_synth(Arc::clone(&engine), Arc::clone(&gen), tx).expect("synth worker");
+        let synth = spawn_synth(Arc::clone(&engine), engine.controller_gen(), Arc::clone(&gen), tx).expect("synth worker");
         let player = Player::start().expect("player");
         let (mut first_audio, mut seen, mut audio_samples) = (None, Vec::<usize>::new(), 0u64);
         let deadline = t0 + Duration::from_secs(120);

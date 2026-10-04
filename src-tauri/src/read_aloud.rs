@@ -220,6 +220,9 @@ pub struct Session {
     closed: bool,
     stop_at: Option<u64>,
     gen: Arc<AtomicU64>,
+    /// The last raw token received ended a line: the next batch starts a block.
+    /// Unknown for the picked text (false: its next batch is read as mid-line).
+    line_end: bool,
 }
 
 impl Session {
@@ -243,6 +246,7 @@ impl Session {
             closed: false,
             stop_at: None,
             gen,
+            line_end: false,
         }
     }
 
@@ -257,6 +261,7 @@ impl Session {
         self.raw_len = raw_len;
         self.doc_ended = doc_ended;
         self.closed = false;
+        self.line_end = false;
         self.read_id += 1;
         self.seek(0);
     }
@@ -412,7 +417,9 @@ impl Session {
             self.doc_ended = true;
             return;
         }
-        let mut more = ra_text::normalize(raw);
+        // a batch is cut by token count: its first word starts a block only after a line end
+        let mut more = ra_text::normalize_cont(raw, self.line_end);
+        self.line_end = raw.last().is_some_and(|t| t.contains(['\r', '\n']));
         for w in &mut more {
             for s in &mut w.src {
                 *s += self.raw_len;
@@ -2510,6 +2517,22 @@ mod session_tests {
         assert!(!s.finished(u64::MAX));
         s.append_more(&[]);
         assert!(!s.wants_more(), "an empty batch ends the document");
+    }
+
+    /// Fix round 1: a batch cut mid-line keeps a leading dash spoken and adds no break;
+    /// after a batch that ended a line, the next batch starts a block.
+    #[test]
+    fn more_text_starts_a_block_only_after_a_line_end() {
+        let mut s = Session::new(Arc::new(AtomicU64::new(0)));
+        let raw: Vec<String> = ["Paris ", "is "].iter().map(|t| t.to_string()).collect();
+        s.start(ra_text::normalize(&raw), raw.len(), false);
+        s.append_more(&["- ".to_string(), "the ".to_string(), "city\n".to_string()]);
+        assert_eq!(s.words[2].text, "-", "a mid-line dash is still spoken");
+        assert_eq!(s.words[2].src, vec![2]);
+        assert!(s.words[2..].iter().all(|w| w.brk == crate::ra_struct::Brk::None && !w.para_break_before));
+        s.append_more(&["- ".to_string(), "Apples".to_string()]);
+        let last = s.words.last().map(|w| (w.text.as_str(), w.brk, w.para_break_before, w.src.clone()));
+        assert_eq!(last, Some(("Apples", crate::ra_struct::Brk::ListItem, true, vec![5, 6])));
     }
 
     #[test]

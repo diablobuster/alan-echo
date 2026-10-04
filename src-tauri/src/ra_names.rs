@@ -449,11 +449,13 @@ pub const EMPHASIS: &[&str] = &[
 
 /// Acronyms whose lowercase is also a dictionary word (or that a dictionary has a
 /// word reading for): always spelled, in mixed text and in headlines, unless they
-/// are PRONOUNCED. Covers the dense-acronym misfires (ER, ERA, ETA, AD, MA, SAT,
-/// IRA) and 4-5 letter acronyms and tickers a dictionary would read as a word.
-pub const ACRONYM_WORDS: &[&str] = &[
-    "AD", "AP", "ER", "ERA", "ETA", "IRA", "MA", "SAT", "AARP", "AAPL", "ACLU", "DRAM", "OLED",
-];
+/// are PRONOUNCED. Covers the dense-acronym misfires (ER, ETA, MA, IRA) and 4-5
+/// letter acronyms and tickers a dictionary would read as a word.
+pub const ACRONYM_WORDS: &[&str] = &["ER", "ETA", "MA", "AP", "IRA", "AARP", "AAPL", "ACLU", "DRAM", "OLED"];
+
+/// Acronyms that are as often plain words in caps text: spelled, except in a
+/// sentence that is 100% caps ("SHE SAT DOWN", "THE ERA OF AI", "THE AD").
+pub const AMBIGUOUS_ACRONYMS: &[&str] = &["SAT", "ERA", "AD"];
 
 /// Two-letter acronyms whose lowercase is a word (ra_text's KEEP_CAPS): spelled when
 /// they carry a plural or possessive (PCs, TVs, AI's).

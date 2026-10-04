@@ -16,6 +16,16 @@ PUNCT6 = set(";:,.!?")
 QUOTES = set("\"'“”‘’()[]{}«»")
 VOWELS = set("AIOWYaeiouæɑɒɔəɛɜɪʊʌᵻɐ")
 
+# Valid Roman-numeral letters that are everyday acronyms, spelled on purpose (round 2)
+ROMAN_ACRONYMS = {"CC", "CD", "CI", "CV", "DC", "DM", "IV", "MC", "MD", "MI", "VC", "XL"}
+MODEL_NAMES = re.compile(r"\b(Llama|Mistral|Mixtral|Qwen\S*|Gemma|Falcon|Phi|DeepSeek\S*|Grok|Claude|GPT\S*)\b")
+
+# Round 2: finance / sports / weather shorthand that must be expanded, not read as
+# letters or left to misaki ("bps", "Y/Y", "FY25", "1H24", "mb", "W 3-1").
+SHORTHAND = re.compile(r"^(bps?|pp|Y/Y|Q/Q|M/M|YoY|QoQ|MoM|FY\d{2,4}|[12]H\d{2,4}|[1-4]Q\d{2,4}|mb|kcal|Tbsp|NW|NE|SE|SW|"
+                       r"(NASDAQ|NYSE|Nasdaq):[A-Z.]+|[DRI]-[A-Z][A-Za-z.]+|\+/-.*|\d+(\.\d+)?[KM]\+?)$")
+SCORE = re.compile(r"^\d{1,3}[-\u2013]\d{1,3}[,.;]?$")
+
 def letters(s):
     return sum(c.isalpha() for c in s)
 
@@ -49,7 +59,7 @@ def span_spelled(core, cat, spoken, phs):
     others = [x for x in words if not (len(x) == 1 and x.isupper())]
     flags = []
     plain = core.replace(".", "")
-    if cat == "roman" and len(letters) >= 2 and "".join(letters) == plain:
+    if cat == "roman" and len(letters) >= 2 and "".join(letters) == plain and plain not in ROMAN_ACRONYMS:
         flags.append("ROMAN_SPELLED")
     if plain.upper() in WORD_ACRONYMS and "".join(letters) == plain.upper():
         flags.append("WORD_ACRONYM_SPELLED")
@@ -64,6 +74,7 @@ def main():
     total_words = 0
     gru = Counter()
     sent_words = defaultdict(int)
+    prev_chunk = {}
     for r in rows:
         if "err" in r:
             out.append(dict(id=r["id"], src="", word="", context="", fed="", tokens="", phonemes="", flag="G2P_ERROR", category="error", detail=r["err"]))
@@ -85,11 +96,25 @@ def main():
                 last_owner = o
             else:
                 nxt = next((tk[2] for tk in toks[k + 1:] if tk[2] >= 0), None)
-                if nxt is not None and nxt != last_owner and words[nxt][1].lstrip().startswith(t):
+                # a symbol opening the next word, also inside its bracket ("($DIS)")
+                if nxt is not None and nxt != last_owner and words[nxt][1].lstrip().lstrip("([{\"'“").startswith(t):
                     by_word[nxt].append((k, t, ph, fb, False))
                 elif last_owner >= 0:
                     by_word[last_owner].append((k, t, ph, fb, False))
         ctx_all = " ".join(w for w, _ in words)
+        # (round 2) a chunk cut after an abbreviation's period: the next chunk starts
+        # lowercase, with a digit or with "§" ("tbsp. | kosher", "Cat. | 5", "U.S.C. | §")
+        pw = prev_chunk.get(r["id"])
+        # only after an abbreviation-shaped word (dotted, or 5 letters or fewer): "Corp.",
+        # "a.m.", "tbsp."; an ordinary word ("containers.") ends a real sentence
+        pw_letters = sum(c.isalpha() for c in (pw or ""))
+        abbrev_like = bool(pw) and (re.search(r"[A-Za-z]\.[A-Za-z]", pw) is not None or pw_letters <= 4)
+        if pw and abbrev_like and re.search(r"[A-Za-z]\.[\"')\]]*$", pw) and words:
+            nxt0 = re.sub(r"^[\"'(\[]+", "", words[0][0])
+            if nxt0[:1].islower() or nxt0[:1].isdigit() or nxt0[:1] == "§":
+                out.append(dict(id=r["id"], src=r["src"], word=pw, context=ctx_all[:160], fed="", tokens="", phonemes="",
+                                flag="FALSE_SENTENCE_BREAK", category=category(pw), detail=words[0][0]))
+        prev_chunk[r["id"]] = words[-1][0] if words else ""
         # coverage: an inner word of a multi-word span that is a plain word ("billion",
         # "War", "Louis") must be in the span's spoken text. Inner words the span
         # rewrites on purpose are not checked: units and abbreviations ("km" ->
@@ -100,8 +125,12 @@ def main():
             for j in range(a + 1, min(b, n)):
                 w = words[j][0]
                 c = re.sub(r"^\W+|\W+$", "", w)
-                plain_word = re.fullmatch(r"[A-Za-z][a-z]{2,}", c) and c.lower() not in UNITS and c.lower() not in ABBREV
-                if plain_word and c.lower() not in said and c.lower() not in spelled:
+                plain_word = re.fullmatch(r"[A-Za-z][a-z]{2,}", c) and c.lower() not in UNITS and c.lower() not in ABBREV                     and c.lower() not in ("tbsp", "tsp")
+                # a plural unit the span says in the singular ("3/4 cups" -> "of a cup")
+                singular = c.lower().endswith("s") and c.lower()[:-1] in said
+                # an abbreviation the span says in full ("Civ." -> "civil")
+                singular = singular or any(x.startswith(c.lower()) and len(x) > len(c) for x in said)
+                if plain_word and c.lower() not in said and c.lower() not in spelled and not singular:
                     out.append(dict(id=r["id"], src=r["src"], word=w, context=" ".join(x for x, _ in words)[:160], fed="",
                                     tokens="", phonemes="", flag="SPAN_COVERAGE", category=category(w), detail=sp))
         for i, (w, fed) in enumerate(words):
@@ -124,7 +153,7 @@ def main():
                     break  # checked above against what the span says
                 if own and t.isalpha() and (fb == "spell" or looks_spelled(t, ph)) and len(t) >= 2:
                     if t.isupper():
-                        if ROMAN.match(t) and cat == "roman":
+                        if ROMAN.match(t) and cat == "roman" and t not in ROMAN_ACRONYMS:
                             flags.append("ROMAN_SPELLED")
                         elif t in WORD_ACRONYMS:
                             flags.append("WORD_ACRONYM_SPELLED")
@@ -158,6 +187,8 @@ def main():
                     if not own and (ph.strip() in PUNCT6 or ph == " " or ph == ""):
                         if ph == "" or (t in "-‐‑" and not ph.strip()):
                             continue  # in-word hyphen: dropped on purpose by token_phonemes
+                        if t == "," and any(d in w for d in "—•"):
+                            continue  # round 2: an em dash or bullet inside a word is a pause on purpose
                         flags.append(f"PAUSE_IN_WORD({t})")
                         break
             # (e2) multi-space pause inside one token's phonemes (misaki number words: "twenty   five")
@@ -202,10 +233,19 @@ def main():
                 sym = re.search(r"[$€£¥]", w)
                 if sym and not any(x in phs_n for x in ("dˈɑlɚ", "jˈʊɹO", "jˈʊɹɹO", "pˈWnd", "jˈɛn")) and not money_sub:
                     flags.append("CURRENCY_UNIT_MISSING")
+            # (round 2) shorthand left as written (static: fed text unchanged or spelled)
+            if spoken_txt is None and SHORTHAND.match(core) and (fed.strip("()[],.;:") == core or "[" in fed):
+                flags.append("SHORTHAND_UNEXPANDED")
+            # a W/L/D result letter before a score ("Arsenal W 3-1")
+            if spoken_txt is None and core in ("W", "L", "D") and i + 1 < n and SCORE.match(words[i + 1][0]):
+                flags.append("SHORTHAND_UNEXPANDED")
             if flags:
                 flags = list(dict.fromkeys(flags))
                 # letters inside codes (10-K, H100, 3D) are read as letter names: correct
                 flags = ["INFO_ALNUM_LETTERS" if f == "ALNUM_LETTERS" and cat == "alnum_code" else f for f in flags]
+                # an AI model size after the model's name ("Llama 3.1 70B" -> "seventy B")
+                if re.fullmatch(r"\W*\d+(\.\d+)?B\W*", w) and MODEL_NAMES.search(ctx_all):
+                    flags = ["INFO_MODEL_SIZE" if f == "ALNUM_LETTERS" else f for f in flags]
                 # a cashtag ($AAPL, $BTC) is the ticker: the $ is silent on purpose, no "dollars"
                 if re.fullmatch(r"\W*\$[A-Z]{1,5}\W*", w):
                     flags = ["INFO_CASHTAG" if f in ("SYMBOL_DROPPED($)", "CURRENCY_UNIT_MISSING") else f for f in flags]
@@ -224,7 +264,8 @@ def main():
         wr.writeheader()
         wr.writerows(out)
     flag_base = Counter(re.sub(r"\(.*", "", o["flag"]) for o in out)
-    NOT_GLITCH = ("GRU", "INFO_INITIALISM_SPELLED", "INFO_ALNUM_LETTERS", "INFO_EMOJI_SILENT", "INFO_QUOTE_UNK", "INFO_CASHTAG")
+    NOT_GLITCH = ("GRU", "INFO_INITIALISM_SPELLED", "INFO_ALNUM_LETTERS", "INFO_EMOJI_SILENT", "INFO_QUOTE_UNK", "INFO_CASHTAG",
+                  "INFO_MODEL_SIZE")
     glitch_words = {(o["id"], o["word"], o["context"]) for o in out if o["flag"] not in NOT_GLITCH}
     summ = dict(total_words=total_words, sentences=len(sent_words), flagged_rows=len(out), flags=flag_base,
                 glitch_words=len(glitch_words), static_rate_per_1k=round(1000 * len(glitch_words) / total_words, 2),

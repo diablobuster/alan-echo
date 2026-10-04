@@ -112,3 +112,20 @@ Everything is pure and never panics; the pre-pass returns `Vec<Span>`. On any in
 | CamelCase splitting real words ("McDonald", "iPhone") | Hand list and CMU lookup come first; split only on a CMU miss |
 | misaki POS tagger quality limits homograph accuracy | Context rules first; measure on 50 targeted sentences; accept ≥ 85% |
 | The overrides change prosody | Round-trip gate plus the listening board |
+
+## Spec exception (round 2): Kokoro's own speed above 2.2x
+**Exception to the phase-1 rule "never Kokoro speed > 1.0".** Above 2.2x the reading speed is split between the model's own `speed` input and the WSOLA stretch (`ra_tts::split_rate`). The model's part is capped at **1.25**. Up to 2.2x nothing changes: the model runs at 1.0 and WSOLA does it all.
+
+**Why:**
+- On CPU a 3.5x read with WSOLA alone needs about as much synth time as it plays (real-time factor ~0.93-1.0), so the audio ran dry. Letting the model speak faster cuts the synth time.
+- The cap was chosen by clarity, measured below. Round 2's first try (a cap of 1.6) was clearly worse.
+
+**Evidence:** Whisper large-v3 (our own server on 8199) word error rate on 100 seeded random control sentences from the round-2 corpus (2,074 words), with the round-trip spoken-form normalisation (`tools/read-aloud/glitch-hunt/clarity_wer.py`).
+
+| Speed | WSOLA only (old) | Model ≤ 1.25 (chosen) | Model ≤ 1.6 (rejected) |
+|---|---|---|---|
+| 2.2x | 6.85% | same (model 1.0) | same |
+| 3.0x | 9.64% | **8.39%** | 17.45% |
+| 3.5x | 15.28% | **11.43%** | 28.69% |
+
+With the 1.25 cap, the model also stays out of the range where its articulation breaks down: at 1.36-1.59, Whisper mishears acronyms and short words.

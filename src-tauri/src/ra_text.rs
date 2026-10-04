@@ -270,13 +270,115 @@ fn date_comma(words: &[Word], k: usize) -> bool {
         && words.get(k).is_some_and(|w| w.text.len() >= 4 && w.text.chars().take(4).all(|c| c.is_ascii_digit()))
 }
 
+/// An abbreviation's period inside a sentence: the next word starts lowercase
+/// ("1 tbsp. kosher", "9 a.m. to", "(D-Mass.) called"), or a short abbreviation is
+/// followed by a number or "\u{a7}" ("Cat. 5", "H.R. 4366", "U.S.C. \u{a7} 230").
+/// A number's period ("in 1990. 2001 was") still ends the sentence.
+fn abbrev_continues(w: &str, next: Option<&Word>) -> bool {
+    let Some(n) = next else { return false };
+    let core = w.trim_end_matches(|c| matches!(c, '"' | '\'' | ')' | ']' | '\u{201D}' | '\u{2019}'));
+    let Some(body) = core.strip_suffix('.') else { return false };
+    if !body.chars().any(char::is_alphabetic) || body.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let nt = n.text.trim_start_matches(['(', '[', '"', '\'', '\u{201C}']);
+    let Some(c) = nt.chars().next() else { return false };
+    if c.is_lowercase() {
+        return true;
+    }
+    let letters = body.chars().filter(|c| c.is_alphabetic()).count();
+    // "Fed. R. Civ. P. 12": a short abbreviation before a capital initial ("R.", "P.")
+    let initial_next = nt.len() == 2 && c.is_ascii_uppercase() && nt.ends_with('.');
+    (c.is_ascii_digit() || c == '\u{a7}' || initial_next) && letters <= 4
+}
+
 fn ends_clause(w: &str) -> bool {
     w.ends_with([',', ';', ':'])
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // fixed limits: tests; the app uses `chunk_ramped`
 pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> {
-    // a 0 limit would never advance
     let (first_max, max) = (first_max.max(1), max.max(1));
+    chunk_with(words, &|out: &[Range<usize>]| if out.is_empty() { first_max } else { max }, &|_: &[Range<usize>]| 1)
+}
+
+/// Synth time per word as a share of the word's playback time, with margin. Fitted on
+/// the CPU model in release (round 2 gapless bench, chunk silence trimmed): 0.56 at
+/// 2.2x and 0.63 at 3.5x; numbers and symbols expand to more sounds per written word,
+/// and other apps take CPU, hence the margin.
+const RAMP_Q: f64 = 0.7;
+/// `RAMP_Q` at 3.5x (`ramp_q`).
+const RAMP_Q_FAST: f64 = 0.8;
+/// Fixed synth cost per chunk, net of the fixed audio each chunk adds, in words of
+/// playback: fitted 1.8 at 2.2x and 1.2 at 3.5x.
+const RAMP_O: f64 = 2.0;
+/// Smallest ramp chunk: below this the per-chunk cost dominates, and a run of tiny
+/// chunks sounds choppy (each chunk ends on a falling tone). In the ramp a shorter
+/// sentence joins the next one.
+const RAMP_MIN: usize = 6;
+
+/// Smallest first chunk (`RAMP_MIN`), and above `FAST_RATE` this: a 4-word first
+/// clause plays for under half a second there, less than any next chunk takes to make.
+const FAST_FIRST_MIN: usize = 8;
+const FAST_RATE: f32 = 2.5;
+
+/// The synth share at reading speed `rate`: above 2.2x the model speaks faster
+/// (`ra_tts::split_rate`) but its cost per word falls less than the words' playback
+/// time (fitted 0.56 at 2.2x; 0.80 at 3.5x with the model capped at 1.25), so the share
+/// rises to `RAMP_Q_FAST`.
+fn ramp_q(rate: f32) -> f64 {
+    let t = ((rate as f64 - 2.2) / 1.3).clamp(0.0, 1.0);
+    RAMP_Q + (RAMP_Q_FAST - RAMP_Q) * t
+}
+
+/// The word limit for the next chunk of a ramp whose earlier chunks have `sizes`
+/// words, at reading speed `rate`: the largest chunk the CPU voice can synthesize
+/// while the chunks before it play, so the audio never runs dry. With `w0` the first
+/// chunk (synthesized before the first audio), chunk n must satisfy
+/// `q * (W_n - w0) + n * RAMP_O <= W_(n-1)` (W = words so far, the n-th chunk
+/// included on the left; q = `ramp_q(rate)`). At 2.2x: 12 -> 14 -> 17 -> 21 -> 27 -> 30;
+/// at 3.5x 12 -> 12 -> 13 -> 13 -> 14 -> 15 -> 16 -> 18 -> ... -> 30.
+pub fn ramp_limit(sizes: &[usize], first_max: usize, max: usize, rate: f32) -> usize {
+    let Some(&w0) = sizes.first() else { return first_max.max(1) };
+    let w: f64 = sizes.iter().sum::<usize>() as f64;
+    let n = sizes.len() as f64;
+    let budget = (w - n * RAMP_O) / ramp_q(rate) + w0 as f64 - w;
+    (budget.max(0.0).floor() as usize).clamp(RAMP_MIN.min(max), max.max(1))
+}
+
+/// `chunk` with ramped limits (`ramp_limit`) so playback is gapless from the first
+/// word on, at reading speed `rate`. `prior`: sizes of the chunks of the same ramp
+/// already made (a re-chunk of the not-yet-submitted tail passes them; a fresh start
+/// passes none). While the ramp is below `max`, no chunk is shorter than
+/// `RAMP_MIN` words (8 for the first chunk above 2.5x): a shorter clause is not a cut,
+/// and a shorter sentence joins the next one (not across a paragraph break). After
+/// the ramp, chunks are cut as `chunk` cuts them.
+pub fn chunk_ramped(words: &[Word], prior: &[usize], first_max: usize, max: usize, rate: f32) -> Vec<Range<usize>> {
+    let sizes = |out: &[Range<usize>]| -> Vec<usize> { prior.iter().copied().chain(out.iter().map(|r| r.len())).collect() };
+    chunk_with(
+        words,
+        &|out: &[Range<usize>]| ramp_limit(&sizes(out), first_max, max, rate),
+        &|out: &[Range<usize>]| {
+            let sz = sizes(out);
+            if sz.is_empty() {
+                (if rate > FAST_RATE { FAST_FIRST_MIN } else { RAMP_MIN }).min(first_max)
+            } else if ramp_limit(&sz, first_max, max, rate) < max {
+                RAMP_MIN.min(max)
+            } else {
+                1
+            }
+        },
+    )
+}
+
+/// Sentences, then each cut to `limit(chunks so far)` words (at a clause when possible).
+/// No chunk is shorter than `min_len(chunks so far)` words where it can be avoided: no
+/// cut that leaves less, and a shorter sentence joins the next (same paragraph).
+fn chunk_with(
+    words: &[Word],
+    limit: &dyn Fn(&[Range<usize>]) -> usize,
+    min_len: &dyn Fn(&[Range<usize>]) -> usize,
+) -> Vec<Range<usize>> {
     // 1) sentences
     let mut sentences: Vec<Range<usize>> = Vec::new();
     let mut start = 0;
@@ -288,6 +390,7 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
         if ends_sentence(&w.text)
             && !month_before_number(&w.text, words.get(i + 1))
             && !clock_before_zone(&w.text, words.get(i + 1))
+            && !abbrev_continues(&w.text, words.get(i + 1))
         {
             sentences.push(start..i + 1);
             start = i + 1;
@@ -298,16 +401,24 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
     }
     // 2) enforce limits (first chunk smaller, cut at a clause when possible)
     let mut out = Vec::new();
-    for s in sentences {
-        let mut a = s.start;
+    // start of a short chunk that joins the next sentence
+    let mut carry: Option<usize> = None;
+    for (si, s) in sentences.iter().enumerate() {
+        let mut a = carry.take().unwrap_or(s.start);
         while a < s.end {
-            let limit = if out.is_empty() { first_max } else { max };
+            let limit = limit(&out).max(1); // a 0 limit would never advance
+            let min = min_len(&out).clamp(1, limit);
             if s.end - a <= limit {
-                out.push(a..s.end);
+                let next_joins = sentences.get(si + 1).is_some_and(|n| !words[n.start].para_break_before);
+                if s.end - a < min && next_joins {
+                    carry = Some(a);
+                } else {
+                    out.push(a..s.end);
+                }
                 break;
             }
             let hard = a + limit;
-            let cut = (a + 1..hard)
+            let cut = ((a + min).min(hard)..hard)
                 .rev()
                 .find(|&k| ends_clause(&words[k - 1].text) && !date_comma(words, k))
                 .unwrap_or_else(|| {
@@ -315,12 +426,19 @@ pub fn chunk(words: &[Word], first_max: usize, max: usize) -> Vec<Range<usize>> 
                     // (`450` | `GeV`, `in` | `1990`) when a cut nearby avoids it,
                     // and best cut before a joining word (`… references | as most …`)
                     // so the chunk's falling tone lands at a phrase edge
-                    let quiet = |k: usize| !has_digit(&words[k - 1].text) && !has_digit(&words[k].text);
-                    let near = a + 1 + limit / 2..=hard;
+                    // and never right after an abbreviation inside the sentence (`U.S. | evidence`)
+                    let quiet = |k: usize| {
+                        !has_digit(&words[k - 1].text)
+                            && !has_digit(&words[k].text)
+                            && !abbrev_continues(&words[k - 1].text, words.get(k))
+                    };
+                    let near = a + (1 + limit / 2).max(min)..=hard;
                     near.clone()
                         .rev()
                         .find(|&k| quiet(k) && joins_phrase(&words[k].text))
                         .or_else(|| near.rev().find(|&k| quiet(k)))
+                        // a short ramp chunk: an earlier quiet gap still beats `3.5 | ft`
+                        .or_else(|| (a + 1..hard).rev().find(|&k| quiet(k)))
                         .unwrap_or(hard)
                 });
             out.push(a..cut);
@@ -581,6 +699,89 @@ mod tests {
         let c = chunk(&w, 12, 50);
         assert_eq!(c[0], 0..4); // "Eight times a year,"
         assert_eq!(c[1].start, 4);
+    }
+
+    /// Round 2 gapless: every chunk of a ramp fits the synth budget of the chunks
+    /// before it; the first chunk is unchanged (first audio as fast as before).
+    #[test]
+    fn ramped_chunks_fit_the_synth_budget() {
+        let s = "Eight times a year, twelve people sit around a long table in Washington and decide what your money \
+                 costs. They do not vote on your rent, your car loan, or your credit card, but every one of those prices \
+                 moves within days of their meeting. Most people never watch it happen. The room is quiet, the statement \
+                 is short, and the market reacts in seconds and then keeps going for a long while without any pause at all \
+                 because nothing in the long sentence has a comma or a clause mark anywhere near its middle part here.";
+        let w = words(s);
+        let c = chunk_ramped(&w, &[], 12, 30, 2.2);
+        assert!(c[0].len() >= RAMP_MIN, "no 4-word first chunk: {c:?}");
+        let sizes: Vec<usize> = c.iter().map(|r| r.len()).collect();
+        for n in 1..sizes.len() {
+            let w_prev: usize = sizes[..n].iter().sum();
+            let w_now: usize = sizes[..=n].iter().sum();
+            let need = ramp_q(2.2) * (w_now - sizes[0]) as f64 + n as f64 * RAMP_O;
+            assert!(need <= w_prev as f64 + 1e-9, "chunk {n} too big: {sizes:?}");
+            assert!(sizes[n] >= RAMP_MIN || n + 1 == sizes.len() || sizes[n - 1] >= 30, "chunk {n} too small: {sizes:?}");
+        }
+        assert!(c.iter().all(|r| r.len() <= 30));
+        assert_eq!(c.last().unwrap().end, w.len());
+        // long plain text ramps up to the max
+        let s = (0..200).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let c = chunk_ramped(&words(&s), &[], 12, 30, 2.2);
+        let sizes: Vec<usize> = c.iter().map(|r| r.len()).collect();
+        assert_eq!(&sizes[..6], &[12, 14, 17, 21, 27, 30], "{sizes:?}");
+        // a re-chunk deep into a ramp goes straight to the max
+        let c = chunk_ramped(&words(&s), &[12, 14, 17, 21, 27], 12, 30, 2.2);
+        assert_eq!(c[0].len(), 30);
+        // the limit itself
+        assert_eq!(ramp_limit(&[], 12, 30, 2.2), 12);
+        assert_eq!(ramp_limit(&[4], 12, 30, 2.2), RAMP_MIN);
+        assert_eq!(ramp_limit(&[6], 12, 30, 2.2), RAMP_MIN);
+        assert_eq!(ramp_limit(&[12, 14, 17], 12, 30, 2.2), 21);
+        assert_eq!(ramp_limit(&[12], 12, 30, 2.2), 14);
+        // slower ramp at 3.5x
+        let c = chunk_ramped(&words(&s), &[], 12, 30, 3.5);
+        let sizes: Vec<usize> = c.iter().map(|r| r.len()).collect();
+        assert_eq!(&sizes[..8], &[12, 12, 13, 13, 14, 15, 16, 18], "{sizes:?}");
+        // a first clause under 6 words (8 at 3.5x) is not a cut
+        let w = words("Eight times a year, twelve people sit around a long table in Washington and decide.");
+        assert!(chunk_ramped(&w, &[], 12, 30, 2.2)[0].len() >= 6);
+        assert!(chunk_ramped(&w, &[], 12, 30, 3.5)[0].len() >= 8);
+        // in the ramp a short sentence joins the next one, not across a paragraph
+        let w = words("Rates fell. The Fed cut its rate by a quarter point on Wednesday afternoon.");
+        let c = chunk_ramped(&w, &[], 12, 30, 2.2);
+        assert!(c[0].start == 0 && c[0].end >= 8, "{c:?}");
+        let mut w = words("Rates fell. The Fed cut its rate by a quarter point on Wednesday afternoon.");
+        w[2].para_break_before = true;
+        assert_eq!(chunk_ramped(&w, &[], 12, 30, 2.2)[0], 0..2);
+        // a short ramp chunk never parts a number from its unit
+        let w = words("The cable was 1 ft long, but the next one was 3.5 ft long.");
+        let c = chunk_ramped(&w, &[], 12, 30, 2.2);
+        assert!(c.iter().all(|r| w[r.start].text != "ft"), "{c:?}");
+        // after the ramp, sentences are chunks of their own again
+        let w = words("Rates fell. The Fed cut.");
+        assert_eq!(chunk_ramped(&w, &[12, 15, 19, 25, 30], 12, 30, 2.2), vec![0..2, 2..5]);
+    }
+
+    /// Round 2: an abbreviation's period before a lowercase word, or a short one
+    /// before a number or "§", does not end the sentence (no chunk cut, no pause).
+    #[test]
+    fn abbreviation_periods_inside_a_sentence_do_not_cut() {
+        for s in [
+            "Season with 1 tbsp. kosher salt and pepper.",
+            "Expect 6-10 in. of snow above 5,000 ft.",
+            "Hurricane Milton is a Cat. 5 storm with 180 mph winds.",
+            "Section 230 of the Act, 47 U.S.C. § 230, is at issue.",
+            "H.R. 4366 passed by a vote of 286-134.",
+            "Open from 9 a.m. to 5 p.m. daily.",
+            "The court cited Fed. R. Civ. P. 12(b)(6) in its ruling.",
+        ] {
+            assert_eq!(chunk(&words(s), 30, 50).len(), 1, "{s}");
+        }
+        // a length cut does not land right after one either
+        let w = words("there is no real U.S. evidence to indicate that the Dutch auction fares any better.");
+        assert!(chunk(&w, 5, 50).iter().all(|r| r.start == 0 || !w[r.start - 1].text.ends_with('.')));
+        // real sentence ends stay cuts
+        assert_eq!(chunk(&words("It closed in 1990. 2001 was the next."), 30, 50).len(), 2);
+        assert_eq!(chunk(&words("We met at noon. Then we left."), 30, 50).len(), 2);
     }
 
     #[test]

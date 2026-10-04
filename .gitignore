@@ -14,6 +14,8 @@ tools/read-aloud/names_ab.html
 
 # Glitch hunt: fetched corpus (Wikipedia is CC BY-SA, never committed), cache and outputs
 tools/read-aloud/glitch-hunt/cache/
+tools/read-aloud/glitch-hunt/cache_r2/
+tools/read-aloud/glitch-hunt/corpus_round2.tsv
 tools/read-aloud/glitch-hunt/__pycache__/
 tools/read-aloud/glitch-hunt/corpus.tsv
 tools/read-aloud/glitch-hunt/corpus.txt

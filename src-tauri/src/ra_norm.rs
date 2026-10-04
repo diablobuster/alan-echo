@@ -69,17 +69,54 @@ fn merge(
 /// Character fixes before G2P: ’ ‘ ʼ → `'`, and U+2010 / U+2011 (hyphen,
 /// non-breaking hyphen) → `-`. Borrows when nothing changes.
 pub fn prepare(word: &str) -> Cow<'_, str> {
-    fn map(c: char) -> Option<char> {
-        match c {
+    /// `Some(None)`: drop the character.
+    fn map(c: char) -> Option<Option<char>> {
+        Some(match c {
             '\u{2019}' | '\u{2018}' | '\u{02BC}' => Some('\''),
             '\u{2010}' | '\u{2011}' => Some('-'),
-            _ => None,
-        }
+            // round 2: list bullets are a pause, not a silent symbol
+            '\u{2022}' | '\u{25CF}' | '\u{25AA}' | '\u{25E6}' | '\u{2023}' => Some(','),
+            // an em dash is a pause ("The market\u{2014}already shaky\u{2014}fell" ran on)
+            '\u{2014}' => Some(','),
+            // the Hawaiian okina (Hawai\u{02BB}i) is silent for an English reader
+            '\u{02BB}' => None,
+            // trademark signs are not read
+            '\u{ae}' | '\u{2122}' => None,
+            // transliteration marks (Devgh\u{0101}\u{1E6D}), never in an English dictionary
+            '\u{0101}' => Some('a'),
+            '\u{0100}' => Some('A'),
+            '\u{0113}' => Some('e'),
+            '\u{012B}' => Some('i'),
+            '\u{014D}' => Some('o'),
+            '\u{016B}' => Some('u'),
+            '\u{016A}' => Some('U'),
+            '\u{1E6D}' => Some('t'),
+            '\u{1E6C}' => Some('T'),
+            '\u{1E0D}' => Some('d'),
+            '\u{1E47}' => Some('n'),
+            '\u{1E63}' => Some('s'),
+            '\u{1E62}' => Some('S'),
+            '\u{1E25}' => Some('h'),
+            '\u{1E5B}' => Some('r'),
+            '\u{1E37}' => Some('l'),
+            '\u{1E43}' => Some('m'),
+            _ => return None,
+        })
     }
-    if !word.chars().any(|c| map(c).is_some()) {
+    // a dash standing alone between words is a pause too
+    if matches!(word, "-" | "\u{2013}" | "--") {
+        return Cow::Borrowed(",");
+    }
+    let pm = word.contains("+/-");
+    // trademark markers glued to a brand: "Intel(R)", "Office(TM)", "Windows\u{ae}"
+    let mark = word.len() > 3 && (word.contains("(R)") || word.contains("(TM)") || word.contains("(tm)"));
+    if !pm && !mark && !word.chars().any(|c| map(c).is_some()) {
         return Cow::Borrowed(word);
     }
-    Cow::Owned(word.chars().map(|c| map(c).unwrap_or(c)).collect())
+    // "+/-2%" is the plus-or-minus sign
+    let w = if pm { word.replace("+/-", "\u{b1}") } else { word.to_string() };
+    let w = if mark { w.replace("(R)", "").replace("(TM)", "").replace("(tm)", "") } else { w };
+    Cow::Owned(w.chars().filter_map(|c| map(c).unwrap_or(Some(c))).collect())
 }
 
 /// Latin accent fold for one character: Latin-1 letters (À–ÿ), Latin Extended-A
@@ -399,3 +436,244 @@ mod tests {
         assert!(per < 0.5, "{per} ms per chunk");
     }
 }
+
+/// Round 2: the next layer of glitches from the finance / tech / politics / sports /
+/// weather / recipe corpus, end to end through `spans` (numbers and text merged).
+#[cfg(test)]
+mod round2_tests {
+    use super::*;
+
+    /// Source words with each span replaced by its spoken text.
+    fn render(text: &str) -> String {
+        // as `ra_tts::g2p_chunk` feeds them: prepared words
+        let raw: Vec<&str> = text.split_whitespace().collect();
+        let prepared: Vec<Cow<str>> = raw.iter().map(|x| prepare(x)).collect();
+        let w: Vec<&str> = prepared.iter().map(|c| c.as_ref()).collect();
+        let sp = spans(&w);
+        let (mut out, mut i, mut k) = (Vec::new(), 0, 0);
+        while i < w.len() {
+            if k < sp.len() && sp[k].start == i {
+                out.push(sp[k].spoken.clone());
+                i = sp[k].end;
+                k += 1;
+            } else {
+                out.push(w[i].to_string());
+                i += 1;
+            }
+        }
+        out.join(" ")
+    }
+
+    fn check(cases: &[(&str, &str)]) {
+        let mut bad = Vec::new();
+        for (src, want) in cases {
+            let got = render(src);
+            if !got.contains(want) {
+                bad.push(format!("{src:?}\n   got  {got:?}\n   want ..{want:?}.."));
+            }
+        }
+        assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn earnings_shorthand() {
+        check(&[
+            ("Revenue grew 12% Y/Y and 3% Q/Q.", "twelve percent year over year and three percent quarter over quarter."),
+            ("Core PCE rose 0.3% M/M in August.", "zero point three percent month over month in"),
+            ("up 21% YoY and 4% QoQ, with MoM flat", "year over year and four percent quarter over quarter, with month over month flat"),
+            ("The yield fell 7 bps to 4.12%.", "fell seven basis points to"),
+            ("Margins widened 50bp last year", "fifty basis points last"),
+            ("a 1 bp move", "one basis point move"),
+            ("Margin fell 2.1 pp to 18.4%.", "two point one percentage points to"),
+            ("raised its FY25 guidance", "raised its fiscal twenty five guidance"),
+            ("FY2024 revenue was flat", "fiscal twenty twenty four revenue"),
+            ("1H24 revenue came in", "first half twenty four revenue"),
+            ("ramping through 2H25.", "through second half twenty five."),
+            ("3Q24 sales rose", "third quarter twenty four sales"),
+            ("Q4 FY24 revenue", "fiscal twenty four revenue"),
+            ("Guidance implies +/-2% growth", "plus or minus two percent growth"),
+        ]);
+    }
+
+    #[test]
+    fn scale_suffixes_on_bare_numbers() {
+        check(&[
+            ("Netflix added 5.1M paid subscribers", "added five point one million paid"),
+            ("payrolls rose by 254K in September", "two hundred fifty four thousand in"),
+            ("now has 200M weekly users", "two hundred million weekly"),
+            ("serves 4M+ customers", "four million plus customers"),
+            ("costs $0.15 per 1M input tokens", "per one million input"),
+            ("passed 1.2B users", "one point two billion users"),
+            // not scales: a 4K screen, a model size
+            ("a 4K TV", "a four K TV"),
+            ("Llama 3.1 70B beats it", "seventy B"),
+        ]);
+    }
+
+    #[test]
+    fn tickers_with_exchanges() {
+        check(&[
+            ("Apple (NASDAQ:AAPL) slipped", "Nasdaq, A A P L"),
+            ("AT&T (NYSE:T) reports", "N Y S E, T"),
+            ("Snowflake (NYSE: SNOW) reports", "N Y S E, S N O W"),
+            ("Meta (NASDAQ: META) rose", "Nasdaq, M E T A"),
+        ]);
+    }
+
+    #[test]
+    fn product_model_numbers_read_in_pairs() {
+        check(&[
+            ("The RTX 4090 draws up to", "forty ninety"),
+            ("an RTX 5080 card", "fifty eighty"),
+            ("AMD's Ryzen 9 9950X boosts", "ninety nine fifty X"),
+            ("the RX 7900 XTX is", "seventy nine hundred"),
+            ("a GTX 1080 Ti", "ten eighty"),
+            ("Core i9-14900K support", "fourteen nine hundred K"),
+        ]);
+    }
+
+    #[test]
+    fn units_weather_and_recipes() {
+        check(&[
+            ("The pressure dropped to 897 mb.", "eight hundred ninety seven millibars."),
+            ("Makes 12 servings; 240 kcal per serving.", "two hundred forty calories per"),
+            ("a 200MP camera", "two hundred megapixels"),
+            ("Stir in 2 Tbsp honey", "two tablespoons honey"),
+            ("Season with 1 tbsp. kosher salt", "one tablespoon kosher"),
+            ("Expect 6-10 in. of snow", "six to ten inches of snow"),
+            ("Stir in 1/3 c. milk", "one third of a cup milk"),
+            ("Winds NW 15-25 mph", "Winds northwest fifteen to twenty five"),
+            ("Preheat the oven to 425 degrees F.", "degrees Fahrenheit."),
+            ("about 20 degrees C today", "degrees Celsius today"),
+            ("Milton is a Cat. 5 storm", "a category five storm"),
+            ("runs at ~30 tokens/s on a GPU", "tokens per second"),
+            ("Gold hit a record $2,685/oz on Friday", "dollars per ounce"),
+            ("Roast 45 min\u{2013}1 hr, until golden", "forty five minutes to one hour,"),
+            ("Rainfall totals of 1-3\" are likely", "one to three inches are"),
+            ("with locally 5\".", "five inches."),
+        ]);
+    }
+
+    #[test]
+    fn sports_shorthand() {
+        check(&[
+            ("Arsenal W 3-1 vs. Spurs", "Arsenal won three to one"),
+            ("Yankees L 7-6", "Yankees lost seven to six"),
+            ("Chelsea D 1-1 at Villa", "Chelsea drew one to one"),
+            ("Mahomes was 24/36 for 291 yds", "twenty four of thirty six for"),
+            ("took P1 by 0.214s ahead", "zero point two one four seconds ahead"),
+            ("jumped 12% in 24h.", "twenty four hours."),
+        ]);
+    }
+
+    #[test]
+    fn politics_and_legal() {
+        check(&[
+            ("Sen. Elizabeth Warren (D-Mass.) called", "Democrat of Massachusetts"),
+            ("Rep. Jim Jordan (R-OH) chairs", "Republican of Ohio"),
+            ("Sen. Ted Cruz (R-Texas) said", "Republican of Texas"),
+            ("Gov. Josh Shapiro (D) signed", "Democrat"),
+            ("The court cited Fed. R. Civ. P. 12(b)(6).", "Federal Rule of Civil Procedure"),
+            ("employees in a 401(k) plan", "four oh one K plan"),
+            ("Under 26 U.S.C. § 401(k), employees", "four oh one K"),
+        ]);
+    }
+
+    #[test]
+    fn urls_emails_and_years_in_brackets() {
+        check(&[
+            ("Read the post (https://blog.example.org/2024/ai-update) for details.", "example dot org"),
+            ("Contact sandra.p.jones@nasa.gov/ today", "nasa dot gov"),
+            ("basis (2017 reference year) are shown", "twenty seventeen"),
+        ]);
+    }
+
+    /// Review fix round 1: the new rules must not fire outside their context.
+    fn check_not(cases: &[(&str, &str)]) {
+        let mut bad = Vec::new();
+        for (src, never) in cases {
+            let got = render(src);
+            if got.contains(never) {
+                bad.push(format!("{src:?}\n   got  {got:?}\n   must not contain {never:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} wrong:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn slash_before_for_is_a_score_only_in_sports_context() {
+        check(&[
+            ("Taxes are due 4/15 for most filers.", "April fifteenth for"),
+            ("I give it 9/10 for effort.", "nine out of ten for"),
+            ("Mahomes was 24/36 for 291 yds", "twenty four of thirty six for"),
+        ]);
+    }
+
+    #[test]
+    fn result_letters_need_a_team() {
+        check(&[("Arsenal W 3-1 vs. Spurs", "Arsenal won three to one"), ("The Yankees L 7-6", "Yankees lost")]);
+        check_not(&[
+            ("Take vitamin D 1-2 times a day.", "drew"),
+            ("Boarding at Gate L 1-10 now.", "lost"),
+            ("Seats in Row W 10-12 are open.", "won"),
+            ("See Appendix D 1-3 for details.", "drew"),
+        ]);
+    }
+
+    #[test]
+    fn party_letters_only_after_a_person() {
+        check(&[("Gov. Josh Shapiro (D) signed it", "Shapiro Democrat signed")]);
+        check(&[("Sen. Ted Cruz (R) spoke", "Cruz Republican spoke")]);
+        check_not(&[("See Appendix (D) for the data.", "Democrat"), ("Plan (R) was chosen", "Republican")]);
+        assert_eq!(prepare("Intel(R)"), "Intel");
+        assert_eq!(prepare("Windows\u{ae}"), "Windows");
+        assert_eq!(prepare("iPhone\u{2122}"), "iPhone");
+        assert_eq!(prepare("Office(TM)"), "Office");
+        assert_eq!(prepare("(R)"), "(R)", "a lone (R) is left to the context rules");
+    }
+
+    #[test]
+    fn pp_is_pages_unless_it_is_about_percent() {
+        check(&[
+            ("The book runs 352 pp. and has an index.", "three hundred fifty two pages"),
+            ("See pp 12-15 for the table.", "pages"),
+            ("Margin fell 2.1 pp to 18.4%.", "percentage points"),
+            ("The rate rose 0.5 pp this year.", "percentage points"),
+            ("The spread widened 30 pp", "percentage points"),
+        ]);
+        check_not(&[("The book runs 352 pp. and has an index.", "percentage")]);
+    }
+
+    #[test]
+    fn mb_is_millibars_only_for_weather() {
+        check(&[
+            ("a 500 mb file", "five hundred megabytes file"),
+            ("The pressure dropped to 897 mb.", "millibars"),
+            ("A 990 mb low moves in", "millibars"),
+            ("central pressure 960 mb, per the hPa chart", "millibars"),
+        ]);
+    }
+
+    #[test]
+    fn in_and_c_at_a_sentence_end_stay_words() {
+        check(&[("He scored 3 in. Then he left.", "three in."), ("Expect 6-10 in. of snow", "inches of snow")]);
+        check_not(&[("He scored 3 in.", "inches"), ("She got a 3 c. That was it.", "cup")]);
+    }
+
+    #[test]
+    fn prepare_folds_bullets_okina_and_transliteration_marks() {
+        assert_eq!(prepare("flat\u{2022}"), "flat,");
+        assert_eq!(prepare("\u{2022}"), ",");
+        assert_eq!(prepare("points:\u{2022}"), "points:,");
+        assert_eq!(prepare("Hawai\u{02BB}i"), "Hawaii");
+        assert_eq!(prepare("Devgh\u{0101}\u{1E6D}"), "Devghat");
+        assert_eq!(prepare("caf\u{e9}"), "caf\u{e9}", "everyday accents are left to the dictionary");
+        assert_eq!(prepare("+/-2%"), "\u{b1}2%");
+        assert_eq!(prepare("market\u{2014}already"), "market,already");
+        assert_eq!(prepare("\u{2014}"), ",");
+        assert_eq!(prepare("-"), ",");
+        assert_eq!(prepare("\u{2013}"), ",");
+        assert_eq!(prepare("2019\u{2013}2021"), "2019\u{2013}2021", "a range keeps its dash");
+    }
+}
+

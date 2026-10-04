@@ -227,6 +227,12 @@ struct Ctx {
     pressure: bool,
     /// The word before is exactly one ("1", "one"): a unit here is singular (`1 km2`).
     after_one: bool,
+    /// "for" follows: `24/36 for 291 yards` is "twenty four of thirty six".
+    of_next: bool,
+    /// "per" before: `per 1M tokens` is a quantity ("one million").
+    per_prev: bool,
+    /// "percentage", "point", "percent" or "of" follows: `1/4` is a fraction.
+    frac_next: bool,
 }
 
 fn plain() -> Ctx {
@@ -251,7 +257,12 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
     let after_month_day = month_of(prev2_core).is_some() && day_of(prev_core).is_some();
     let range_tail = matches!(prev.as_str(), "to" | "and" | "through" | "until" | "-" | "–")
         && is_year_num(prev2_core);
-    let parens = lead.contains('(') && trail.contains(')');
+    let modern_now = words.get(i).is_some_and(|w| {
+        let c = split_punct(w).1;
+        is_year_num(c) && c.parse::<u32>().is_ok_and(|n| (1900..=2099).contains(&n))
+    });
+    // "(2017 reference year)": an opening bracket before a modern year is enough
+    let parens = lead.contains('(') && (trail.contains(')') || modern_now);
     let modern = words.get(i).is_some_and(|w| {
         let c = split_punct(w).1;
         is_year_num(c) && c.parse::<u32>().is_ok_and(|n| (1900..=2099).contains(&n))
@@ -268,8 +279,11 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
     // "since about 2019", "in around 1990"
     let about_year = matches!(prev.as_str(), "about" | "around" | "circa" | "approximately")
         && in_sorted(&YEAR_PREV, &prev2_core.to_lowercase());
-    let modern_cue = modern && (prev_is_name || in_sorted(&YEAR_DET, &prev) || prev == "of");
+    // round 2: "for 2026", "September of 1814" (a month, then "of")
+    let month_of_year = prev == "of" && month_of(prev2_core).is_some() && is_year_num(split_punct(words[i]).1);
+    let modern_cue = modern && (prev_is_name || in_sorted(&YEAR_DET, &prev) || prev == "of" || prev == "for");
     let year_hint = in_sorted(&YEAR_PREV, &prev)
+        || month_of_year
         || after_month
         || after_month_day
         || range_tail
@@ -322,7 +336,11 @@ fn build_ctx(words: &[&str], i: usize, lead: &str, trail: &str) -> Ctx {
         || (next == "blood" && next2 == "pressure")
         || (i.saturating_sub(3)..i).any(|k| matches!(lc_core(words[k]).as_str(), "pressure" | "bp"));
     let after_one = i >= 1 && matches!(prev.as_str(), "1" | "one") && split_punct(words[i - 1]).2.is_empty();
-    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure, after_one }
+    let of_next = next == "for" && words.get(i + 2).is_some_and(|w| split_punct(w).1.starts_with(|c: char| c.is_ascii_digit()));
+    // "by 1/4 percentage point": a fraction, not a date
+    let frac_next = matches!(next.as_str(), "percentage" | "point" | "points" | "percent" | "of");
+    let per_prev = prev == "per";
+    Ctx { allow_year: true, year_hint, card_hint, other_digits, date_hint, ai_scale, near_date, pressure, after_one, of_next, per_prev, frac_next }
 }
 
 // ---- currency ----
@@ -582,6 +600,103 @@ fn fraction_words(num: u64, den: u64) -> String {
     format!("{} {den_word}", cardinal(num))
 }
 
+/// A day-month date (`25/12` -> "the twenty fifth of December"): only when the
+/// day is above 12, so it cannot be a US month/day.
+fn day_month_words(d: u64, m: u64, y: Option<&str>) -> Option<String> {
+    if !(13..=31).contains(&d) || !(1..=12).contains(&m) {
+        return None;
+    }
+    let base = format!("the {} of {}", ordinal(d), MONTHS[(m - 1) as usize]);
+    Some(match y {
+        None => base,
+        Some(y) if y.len() == 4 => format!("{base}, {}", year(y.parse().ok()?)),
+        Some(y) if y.len() == 2 => format!("{base}, {}", two_digit_year(y)),
+        Some(_) => return None,
+    })
+}
+
+/// Units a fraction can measure, as written after it (lowercase key, sorted) ->
+/// the singular said ("3/4 cup" -> "three quarters of a cup").
+static FRACTION_UNITS: [(&str, &str); 53] = [
+    ("acre", "acre"), ("acres", "acre"), ("c", "cup"), ("cm", "centimeter"), ("cup", "cup"), ("cups", "cup"),
+    ("feet", "foot"), ("foot", "foot"), ("ft", "foot"), ("gal", "gallon"), ("gallon", "gallon"),
+    ("gallons", "gallon"), ("hour", "hour"), ("hours", "hour"), ("hr", "hour"), ("in", "inch"),
+    ("inch", "inch"), ("inches", "inch"), ("kg", "kilogram"), ("lb", "pound"), ("lbs", "pound"),
+    ("liter", "liter"), ("liters", "liter"), ("litre", "liter"), ("litres", "liter"), ("mi", "mile"),
+    ("mile", "mile"), ("miles", "mile"), ("min", "minute"), ("minute", "minute"), ("minutes", "minute"),
+    ("mm", "millimeter"), ("ounce", "ounce"), ("ounces", "ounce"), ("oz", "ounce"), ("pint", "pint"),
+    ("pints", "pint"), ("pound", "pound"), ("pounds", "pound"), ("qt", "quart"), ("quart", "quart"),
+    ("quarts", "quart"), ("second", "second"), ("stick", "stick"), ("sticks", "stick"),
+    ("tablespoon", "tablespoon"), ("tablespoons", "tablespoon"), ("tbsp", "tablespoon"),
+    ("teaspoon", "teaspoon"), ("teaspoons", "teaspoon"), ("tsp", "teaspoon"), ("yard", "yard"),
+    ("yards", "yard"),
+];
+
+/// A vulgar fraction character as (a, b).
+fn vulgar(core: &str) -> Option<(u64, u64)> {
+    let mut cs = core.chars();
+    let c = cs.next()?;
+    if cs.next().is_some() {
+        return None;
+    }
+    Some(match c {
+        '½' => (1, 2),
+        '⅓' => (1, 3),
+        '⅔' => (2, 3),
+        '¼' => (1, 4),
+        '¾' => (3, 4),
+        '⅕' => (1, 5),
+        '⅖' => (2, 5),
+        '⅗' => (3, 5),
+        '⅘' => (4, 5),
+        '⅙' => (1, 6),
+        '⅚' => (5, 6),
+        '⅛' => (1, 8),
+        '⅜' => (3, 8),
+        '⅝' => (5, 8),
+        '⅞' => (7, 8),
+        _ => return None,
+    })
+}
+
+/// The fraction after a whole number: "a half", "an eighth", "three quarters".
+fn mixed_tail(a: u64, b: u64) -> String {
+    if a != 1 {
+        return fraction_words(a, b);
+    }
+    let w = match b {
+        2 => "half".to_string(),
+        4 => "quarter".to_string(),
+        _ => ordinal(b),
+    };
+    let art = if w.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+    format!("{art} {w}")
+}
+
+/// `a/b` with 1 <= a < b <= 64 (a common fraction), as (a, b); a vulgar
+/// fraction character too.
+fn common_fraction(core: &str) -> Option<(u64, u64)> {
+    if let Some(f) = vulgar(core) {
+        return Some(f);
+    }
+    let (a, b) = core.split_once('/')?;
+    if a.is_empty() || b.is_empty() || a.len() > 2 || b.len() > 2 || !all_digits(a) || !all_digits(b) {
+        return None;
+    }
+    let (a, b) = (a.parse::<u64>().ok()?, b.parse::<u64>().ok()?);
+    (a >= 1 && a < b && b <= 64).then_some((a, b))
+}
+
+/// A fraction measuring a unit: "thirteen sixteenths of an inch", "half a cup".
+fn fraction_of_unit(a: u64, b: u64, unit: &str) -> String {
+    let art = if unit.starts_with(['a', 'e', 'i', 'o', 'u']) || unit == "hour" { "an" } else { "a" };
+    if (a, b) == (1, 2) {
+        format!("half {art} {unit}")
+    } else {
+        format!("{} of {art} {unit}", fraction_words(a, b))
+    }
+}
+
 /// `1/2`, `3/14`, `3/14/2025`, `24/7`; ratings (`9/10` -> "nine out of ten") and
 /// blood pressure (`120/80` -> "one hundred twenty over eighty").
 fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
@@ -598,6 +713,13 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         let over = || format!("{} over {}", integer(parts[0]), integer(parts[1]));
         if ctx.pressure && pressure_shape {
             return Some(over());
+        }
+        // completions: "24/36 for 291 yards"
+        if ctx.of_next && a <= b && parts[0].len() <= 3 && parts[1].len() <= 3 {
+            return Some(format!("{} of {}", integer(parts[0]), integer(parts[1])));
+        }
+        if ctx.frac_next && a >= 1 && a < b && b <= 64 {
+            return Some(fraction_words(a, b));
         }
         if ctx.date_hint && short {
             if let Some(d) = date_words(a, b, None) {
@@ -616,8 +738,11 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         if (2..=10).contains(&b) && a >= 1 && a < b {
             return Some(fraction_words(a, b));
         }
+        if a == 24 && b == 7 {
+            return Some("twenty four seven".into());
+        }
         if short {
-            if let Some(d) = date_words(a, b, None) {
+            if let Some(d) = date_words(a, b, None).or_else(|| day_month_words(a, b, None)) {
                 return Some(d);
             }
         }
@@ -632,7 +757,7 @@ fn slash_number(core: &str, ctx: &Ctx) -> Option<String> {
         }
     }
     if parts.len() == 3 && parts[0].len() <= 2 && parts[1].len() <= 2 {
-        if let Some(d) = date_words(n[0], n[1], Some(parts[2])) {
+        if let Some(d) = date_words(n[0], n[1], Some(parts[2])).or_else(|| day_month_words(n[0], n[1], Some(parts[2]))) {
             return Some(d);
         }
     }
@@ -729,7 +854,13 @@ fn number_unit(core: &str) -> Option<String> {
         .iter()
         .find(|(s, _, _)| *s == suf)
         .map(|(_, o, m)| (*o, *m))
-        .or_else(|| crate::ra_norm_text::glued_unit(suf))?;
+        .or_else(|| crate::ra_norm_text::glued_unit(suf))
+        .or_else(|| match suf {
+            // "0.214s" (a lap time), "24h"; a whole number + s is a plural ("5s")
+            "s" if num.contains('.') => Some(("second", "seconds")),
+            "h" => Some(("hour", "hours")),
+            _ => None,
+        })?;
     let words = plain_number(num)?;
     Some(format!("{words} {}", if words == "one" { one } else { many }))
 }
@@ -973,6 +1104,13 @@ fn per_unit(u: &str) -> Option<&'static str> {
         "wk" | "wks" | "week" => "week",
         "day" | "d" => "day",
         "share" | "sh" => "share",
+        "oz" | "ounce" => "ounce",
+        "lb" | "lbs" | "pound" => "pound",
+        "kg" => "kilogram",
+        "bbl" | "barrel" => "barrel",
+        "gal" | "gallon" => "gallon",
+        "ton" | "tonne" | "t" => "ton",
+        "kwh" => "kilowatt hour",
         "unit" => "unit",
         "person" => "person",
         "night" => "night",
@@ -1041,6 +1179,100 @@ fn currency_with_tail(cur: &Currency, rest: &str) -> Option<String> {
     Some(format!("{money} {more}").trim_end().to_string())
 }
 
+/// Fiscal and half/quarter codes: "FY25" -> "fiscal twenty five", "1H24" -> "first
+/// half twenty four", "3Q24" -> "third quarter twenty four".
+fn period_code(core: &str) -> Option<String> {
+    let yr = |y: &str| -> Option<String> {
+        match y.len() {
+            2 if all_digits(y) => Some(two_digit_year(y)),
+            4 if all_digits(y) => Some(year(y.parse().ok()?)),
+            _ => None,
+        }
+    };
+    if let Some(y) = core.strip_prefix("FY") {
+        return Some(format!("fiscal {}", yr(y)?));
+    }
+    let b = core.as_bytes();
+    if b.len() >= 4 && b[0].is_ascii_digit() && matches!(b[1], b'H' | b'Q') {
+        let n = (b[0] - b'0') as u64;
+        let what = match (b[1], n) {
+            (b'H', 1..=2) => "half",
+            (b'Q', 1..=4) => "quarter",
+            _ => return None,
+        };
+        return Some(format!("{} {what} {}", ordinal(n), yr(&core[2..])?));
+    }
+    None
+}
+
+/// A bare number with a scale letter: "5.1M" -> "five point one million", "254K",
+/// "4M+". K and M from 10 up, with a decimal, a "+", after "per" or before a count
+/// noun (a 4K screen stays "four K", the 3M company "three M"); B only with a decimal
+/// or before a count noun (a 70B model stays "seventy B").
+fn bare_scale(core: &str, ctx: &Ctx) -> Option<String> {
+    let (body, plus) = match core.strip_suffix('+') {
+        Some(b) => (b, true),
+        None => (core, false),
+    };
+    let (amt, Some(sc)) = amount_and_scale(body)? else { return None };
+    let suf = &body[amt.len()..];
+    let dec = amt.contains('.');
+    let big = dec || plus || ctx.per_prev || ctx.card_hint || amt.replace(',', "").parse::<f64>().is_ok_and(|v| v >= 10.0);
+    let ok = match suf {
+        "M" | "mn" | "K" | "k" => big,
+        "B" | "bn" | "Bn" => dec || suf != "B" || ctx.card_hint,
+        _ => false,
+    };
+    if !ok {
+        return None;
+    }
+    let (ip, fp) = number_parts(amt)?;
+    Some(format!("{} {sc}{}", decimal(ip, fp), if plus { " plus" } else { "" }))
+}
+
+/// A product model number read in pairs, as people say it: "4090" -> "forty ninety",
+/// "7900" -> "seventy nine hundred", "14900K" -> "fourteen nine hundred K",
+/// "9950X3D" -> "ninety nine fifty X three D".
+fn model_pairs(core: &str) -> Option<String> {
+    let end = core.find(|c: char| !c.is_ascii_digit()).unwrap_or(core.len());
+    let (num, suf) = core.split_at(end);
+    if !(4..=5).contains(&num.len()) || num.starts_with('0') || !suf.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let (hi, lo) = num.split_at(num.len() - 2);
+    let lo_n: u64 = lo.parse().ok()?;
+    let mut out = if num.len() == 5 {
+        format!("{} {}", integer(&num[..2]), integer(&num[2..]))
+    } else if lo_n == 0 {
+        format!("{} hundred", integer(hi))
+    } else if lo_n < 10 {
+        format!("{} oh {}", integer(hi), cardinal(lo_n))
+    } else {
+        format!("{} {}", integer(hi), cardinal(lo_n))
+    };
+    for c in suf.chars() {
+        out.push(' ');
+        out.push_str(&if c.is_ascii_digit() { cardinal(c as u64 - '0' as u64) } else { c.to_ascii_uppercase().to_string() });
+    }
+    Some(out)
+}
+
+/// "401(k)" -> "four oh one K"; "529" plans and "457(b)" alike.
+fn plan_name(w: &str) -> Option<String> {
+    let w = w.trim_end_matches([',', '.', ';', ':']);
+    let (num, rest) = w.split_once('(')?;
+    let letter = rest.strip_suffix(')')?;
+    if num.len() != 3 || !all_digits(num) || letter.len() != 1 || !letter.chars().all(|c| c.is_ascii_lowercase()) {
+        return None;
+    }
+    let d: Vec<u64> = num.bytes().map(|b| (b - b'0') as u64).collect();
+    let tail = if d[1] == 0 { format!("oh {}", cardinal(d[2])) } else { cardinal(d[1] * 10 + d[2]) };
+    Some(format!("{} {tail} {}", cardinal(d[0]), letter.to_ascii_uppercase()))
+}
+
+/// Brands whose model numbers are read in pairs (`model_pairs`).
+static MODEL_PREFIX: [&str; 6] = ["GT", "GTX", "MX", "RTX", "RX", "Threadripper"];
+
 /// `read_core` after the sign and percent handling.
 fn read_body(core: &str, ctx: &Ctx) -> String {
     if !has_digit(core) {
@@ -1088,6 +1320,12 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
     if let Some(s) = model_size(core, ctx) {
         return s;
     }
+    if let Some(s) = period_code(core) {
+        return s;
+    }
+    if let Some(s) = bare_scale(core, ctx) {
+        return s;
+    }
     if core.contains('/') {
         // `GeV/c2`, `MeV/c²`: a mass unit
         if let Some((unit, "c2" | "c²")) = core.split_once('/') {
@@ -1098,6 +1336,19 @@ fn read_body(core: &str, ctx: &Ctx) -> String {
         if let Some(s) = slash_number(core, ctx) {
             return s;
         }
+    }
+    // "3-3/4" (a whole number and a fraction joined by a hyphen)
+    if let Some((w, f)) = core.split_once('-') {
+        if let (true, Some((a, b))) = ((1..=3).contains(&w.len()) && all_digits(w), common_fraction(f)) {
+            if f.contains('/') {
+                return format!("{} and {}", integer(w), mixed_tail(a, b));
+            }
+        }
+    }
+    // "49ers", "76ers": the team names
+    if let Some(n) = core.strip_suffix("ers").filter(|n| !n.is_empty() && all_digits(n) && n.len() <= 3) {
+        let words = integer(n);
+        return if words.ends_with('e') { format!("{words}rs") } else { format!("{words}ers") };
     }
     if let Some(s) = dash_number(core, ctx) {
         return s;
@@ -1149,10 +1400,53 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
         }
         return None;
     }
-    if !has_digit(core) {
+    if !has_digit(core) && vulgar(core).is_none() {
         return None;
     }
+    // "45 min\u{2013}1 hr": "minutes to one"
+    if let Some(s) = crate::ra_norm_text::unit_range(core) {
+        return Some((i + 1, format!("{lead}{s}{trail}")));
+    }
+    // inches written as a double quote after a number ("1-3\"", "5\".") when no quote
+    // opened earlier in the chunk
+    if trail.starts_with('"') && core.ends_with(|c: char| c.is_ascii_digit()) && !lead.contains('"') {
+        let opened = words[..i].iter().any(|w| w.contains(['"', '\u{201C}']));
+        if !opened {
+            let ctx = build_ctx(words, i, lead, "");
+            let body = read_core(core, &ctx);
+            let unit = if core == "1" { "inch" } else { "inches" };
+            return Some((i + 1, format!("{lead}{body} {unit}{}", &trail[1..])));
+        }
+    }
+    // "401(k)", "457(b)"
+    if let Some(p) = plan_name(words.get(i)?) {
+        let (_, _, t) = split_punct(words.get(i)?);
+        let t = t.trim_start_matches(')');
+        return Some((i + 1, format!("{lead}{p}{t}")));
+    }
+    // product model numbers: "RTX 4090", "Ryzen 9 9950X", "Core i9-14900K"
+    let prev = if i >= 1 { split_punct(words[i - 1]).1 } else { "" };
+    let prev2 = if i >= 2 { split_punct(words[i - 2]).1 } else { "" };
+    let after_brand = MODEL_PREFIX.contains(&prev) || (prev2 == "Ryzen" && prev.len() == 1 && all_digits(prev));
+    if after_brand {
+        if let Some(m) = model_pairs(core) {
+            return Some((i + 1, format!("{lead}{m}{trail}")));
+        }
+    }
+    if let Some((cpu, num)) = core.split_once('-') {
+        if cpu.len() == 2 && cpu.starts_with('i') && cpu[1..].bytes().all(|b| b.is_ascii_digit()) {
+            if let Some(m) = model_pairs(num) {
+                return Some((i + 1, format!("{lead}I {} {m}{trail}", cardinal((cpu.as_bytes()[1] - b'0') as u64))));
+            }
+        }
+    }
     if let Some((l2, c2, t2)) = next {
+        // A whole number and a fraction: "2 1/2", "1 ½" -> "two and a half".
+        let whole = (1..=3).contains(&core.len()) && all_digits(core) && trail.is_empty() && l2.is_empty();
+        if let (true, Some((a, b))) = (whole, common_fraction(c2).filter(|_| whole)) {
+            let n = core.parse::<u64>().unwrap_or(0);
+            return Some((i + 2, format!("{lead}{} and {}{t2}", cardinal(n), mixed_tail(a, b))));
+        }
         // An area code + a local number: "(555) 123-4567".
         let local = c2.split_once('-').filter(|(a, b)| {
             a.len() == 3 && b.len() == 4 && all_digits(a) && all_digits(b)
@@ -1167,6 +1461,32 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
         // Day + full month name: "5 March" -> "the fifth of" (the month stays a word).
         if let (Some(d), true) = (day_of(core), glued && c2.len() > 3 && month_of(c2).is_some()) {
             return Some((i + 1, format!("{lead}the {} of", ordinal(d))));
+        }
+        // A fraction before a unit or "of": "13/16 inch", "3/4 cup", "2/3 of".
+        if let (Some((a, b)), true, true) = (common_fraction(core), glued, lead.is_empty()) {
+            let key = c2.to_ascii_lowercase();
+            if key == "of" {
+                return Some((i + 1, fraction_words(a, b)));
+            }
+            // a bare "in" is a unit only before a lowercase word ("3/8 in thick", not "5/10 in 2024")
+            let bare_in = (key == "in" && t2.is_empty()) || (key == "c" && !t2.starts_with('.'));
+            let in_ok = !bare_in
+                || words.get(i + 2).is_some_and(|w| {
+                    let c = split_punct(w).1;
+                    c.chars().next().is_some_and(char::is_lowercase)
+                        && !matches!(c, "the" | "a" | "an" | "my" | "his" | "her" | "its" | "our" | "their" | "this" | "that")
+                });
+            if let (Ok(k), true) = (FRACTION_UNITS.binary_search_by(|e| e.0.cmp(key.as_str())), in_ok) {
+                let unit = FRACTION_UNITS[k].1;
+                // an abbreviation's period ("in.") ends the sentence only before a capital or nothing
+                let abbr = !c2.eq_ignore_ascii_case(unit) && !key.starts_with(unit);
+                let next_lower = words
+                    .get(i + 2)
+                    .and_then(|w| split_punct(w).1.chars().next())
+                    .is_some_and(|c| !c.is_uppercase());
+                let t2 = if abbr && next_lower { t2.strip_prefix('.').unwrap_or(t2) } else { t2 };
+                return Some((i + 2, format!("{}{t2}", fraction_of_unit(a, b, unit))));
+            }
         }
         // Currency amount + a scale word: "$5 billion", "€18.5 million".
         if let (Some((cur, rest)), true) = (currency_prefix(core), glued) {
@@ -1193,6 +1513,9 @@ fn span_at(words: &[&str], i: usize) -> Option<(usize, String)> {
             }
         }
     }
+    if !has_digit(core) {
+        return None; // a lone vulgar fraction: the text pass says it
+    }
     let ctx = build_ctx(words, i, lead, trail);
     let body = read_core(core, &ctx);
     Some((i + 1, format!("{lead}{body}{trail}")))
@@ -1204,6 +1527,11 @@ pub fn num_spans(words: &[&str]) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < words.len() {
+        // a URL or email with digits is the text pass's ("example.org/2024/ai-update")
+        if words[i].contains("://") || words[i].contains("www.") || words[i].contains('@') {
+            i += 1;
+            continue;
+        }
         match span_at(words, i) {
             Some((end, spoken)) if end > i && end <= words.len() && !spoken.trim().is_empty() => {
                 out.push((i, end, spoken));
@@ -1436,6 +1764,61 @@ mod tests {
         assert_eq!(one("1/2"), "one half");
         assert_eq!(one("3/4"), "three quarters");
         assert_eq!(one("2/3"), "two thirds");
+    }
+
+    /// Round 2: a fraction before a unit or "of" reads as a fraction, with
+    /// "of a/an <unit>" for a unit; any denominator up to 64.
+    #[test]
+    fn fractions_before_a_unit_or_of() {
+        let t = |s: &str, start: usize| at(s, start);
+        assert_eq!(t("a 13/16 inch bolt", 1), (3, "thirteen sixteenths of an inch".to_string()));
+        assert_eq!(t("cut 3/8 in. thick", 1), (3, "three eighths of an inch".to_string()));
+        assert_eq!(t("add 3/4 cup sugar", 1), (3, "three quarters of a cup".to_string()));
+        assert_eq!(t("add 3/4 cups sugar", 1), (3, "three quarters of a cup".to_string()));
+        assert_eq!(t("add 1/2 tsp salt", 1), (3, "half a teaspoon".to_string()));
+        assert_eq!(t("about 1/2 inch.", 1), (3, "half an inch.".to_string()));
+        assert_eq!(t("a 5/32 mile stretch", 1), (3, "five thirty seconds of a mile".to_string()));
+        assert_eq!(t("only 7/64 oz", 1), (3, "seven sixty fourths of an ounce".to_string()));
+        assert_eq!(t("won 2/3 of the vote", 1), (2, "two thirds".to_string()));
+        assert_eq!(t("about 11/16 of it", 1), (2, "eleven sixteenths".to_string()));
+        assert!(FRACTION_UNITS.windows(2).all(|p| p[0].0 < p[1].0), "FRACTION_UNITS sorted");
+        // a bare "in" before a year or a name is the preposition
+        assert_eq!(t("due 5/10 in 2024", 1), (2, "May tenth".to_string()));
+        // without a unit or "of", unchanged
+        assert_eq!(one("13/16"), "thirteen sixteen");
+        assert_eq!(one("3/4"), "three quarters");
+    }
+
+    /// Round 2: a whole number and a fraction ("2 1/2 cups", "1 ½ cups") is one
+    /// mixed number; a lone vulgar fraction before a unit is "half a cup".
+    #[test]
+    fn mixed_numbers_and_vulgar_fractions() {
+        assert_eq!(at("and 2 1/2 cups of milk", 1), (3, "two and a half".to_string()));
+        assert_eq!(at("add 1 ½ cups flour", 1), (3, "one and a half".to_string()));
+        assert_eq!(at("a 2 3/4 inch gap", 1), (3, "two and three quarters".to_string()));
+        assert_eq!(at("about 3 1/3 miles", 1), (3, "three and a third".to_string()));
+        assert_eq!(at("then 1 ⅛ tsp salt", 1), (3, "one and an eighth".to_string()));
+        assert_eq!(at("Pour in ½ cup of milk.", 2), (4, "half a cup".to_string()));
+        assert_eq!(at("add ¾ cup sugar", 1), (3, "three quarters of a cup".to_string()));
+        // not a mixed number
+        assert_eq!(at("won 3 1/2 of", 1), (3, "three and a half".to_string()));
+        assert_eq!(at("in 2024 1/2 the votes", 1), (2, "twenty twenty four".to_string()));
+    }
+
+    /// Round 2: a day above 12 reads as a day-month date (UK); US month/day stays the default.
+    #[test]
+    fn day_month_dates_when_the_day_is_above_twelve() {
+        assert_eq!(one("25/12"), "the twenty fifth of December");
+        assert_eq!(one("31/1"), "the thirty first of January");
+        assert_eq!(one("25/12/2025"), "the twenty fifth of December, twenty twenty five");
+        assert_eq!(one("13/04/24"), "the thirteenth of April, twenty four");
+        // US default
+        assert_eq!(one("12/10"), "December tenth");
+        assert_eq!(one("3/14"), "March fourteenth");
+        assert_eq!(one("3/14/2025"), "March fourteenth, twenty twenty five");
+        // not dates
+        assert_eq!(one("60/40"), "sixty forty");
+        assert_eq!(one("20/20"), "twenty twenty");
     }
 
     #[test]
@@ -1747,6 +2130,29 @@ mod tests {
         assert_eq!(at("Room 1204, Floor 12", 1).1, "one thousand two hundred four,");
         assert_eq!(at("Dial 1200 then 3 more.", 1).1, "one thousand two hundred");
         assert_eq!(at("Four of these are federal, 1261 are local, and 53 are private.", 5).1, "one thousand two hundred sixty one");
+    }
+
+    /// Round 2 (round-trip audit): FOMC statements say "by 1/4 percentage point" and
+    /// "3-3/4 to 4 percent"; sports say "49ers".
+    #[test]
+    fn fed_fractions_and_team_numbers() {
+        assert_eq!(at("raise the range by 1/4 percentage point", 4).1, "one quarter");
+        assert_eq!(at("lower it by 1/2 point today", 3).1, "one half");
+        assert_eq!(at("by 1/4 of a point", 1).1, "one quarter");
+        assert_eq!(at("on 1/4 we met", 1).1, "January fourth", "a date stays a date");
+        assert_eq!(at("to 3-3/4 to 4 percent", 1).1, "three and three quarters");
+        assert_eq!(at("to 4-1/2 percent", 1).1, "four and a half");
+        assert_eq!(one("49ers"), "forty niners");
+        assert_eq!(one("76ers"), "seventy sixers");
+    }
+
+    /// Round 2: year cues that beat another number in the sentence.
+    #[test]
+    fn years_after_for_and_month_of() {
+        assert_eq!(at("remain at 2 percent for 2026.", 5).1, "twenty twenty six.");
+        assert_eq!(at("In September of 1814, 1,000 patriots", 3).1, "eighteen fourteen,");
+        // a count stays a count
+        assert_eq!(at("enough for 2026 people and 3 dogs", 2).1, "two thousand twenty six");
     }
 
     #[test]

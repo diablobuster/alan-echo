@@ -51,6 +51,7 @@ static ABBREVS: &[(&str, &str, Rule)] = &[
     ("Blvd.", "boulevard", Rule::Always),
     ("Bros.", "brothers", Rule::Always),
     ("Capt.", "captain", Rule::Title),
+    ("Cat.", "category", Rule::Number),
     ("Ch.", "chapter", Rule::Number),
     ("Cmdr.", "commander", Rule::Title),
     ("Co.", "company", Rule::Always),
@@ -173,6 +174,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("L", "liter", "liters", false),
     ("MB", "megabyte", "megabytes", true),
     ("MHz", "megahertz", "megahertz", true),
+    ("MP", "megapixel", "megapixels", true),
     ("MW", "megawatt", "megawatts", true),
     ("MWh", "megawatt hour", "megawatt hours", true),
     ("Mb", "megabit", "megabits", true),
@@ -181,8 +183,11 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("PB", "petabyte", "petabytes", true),
     ("TB", "terabyte", "terabytes", true),
     ("TWh", "terawatt hour", "terawatt hours", true),
+    ("Tbsp", "tablespoon", "tablespoons", true),
     ("V", "volt", "volts", true),
     ("W", "watt", "watts", true),
+    ("bp", "basis point", "basis points", true),
+    ("bps", "basis points", "basis points", true),
     ("cc", "cubic centimeter", "cubic centimeters", true),
     ("cm", "centimeter", "centimeters", true),
     ("dB", "decibel", "decibels", true),
@@ -200,6 +205,7 @@ static UNITS: &[(&str, &str, &str, bool)] = &[
     ("kb", "kilobit", "kilobits", true),
     ("kbit", "kilobit", "kilobits", true),
     ("kbps", "kilobit per second", "kilobits per second", true),
+    ("kcal", "calorie", "calories", true),
     ("kg", "kilogram", "kilograms", true),
     ("km", "kilometer", "kilometers", true),
     ("km²", "square kilometer", "square kilometers", true),
@@ -246,9 +252,15 @@ static PER: &[(&str, &str)] = &[
     ("d", "day"),
     ("day", "day"),
     ("h", "hour"),
+    ("hr", "hour"),
+    ("kg", "kilogram"),
     ("l", "liter"),
+    ("lb", "pound"),
+    ("min", "minute"),
     ("mo", "month"),
+    ("oz", "ounce"),
     ("s", "second"),
+    ("sec", "second"),
     ("wk", "week"),
     ("yr", "year"),
     // END SORTED
@@ -475,6 +487,39 @@ static STARTERS: &[&str] = &[
     // END SORTED
 ];
 
+/// US state codes (and DC), read as the name after "City," (`state_after_city`).
+/// Sorted by code.
+static STATES: &[(&str, &str)] = &[
+    ("AK", "Alaska"), ("AL", "Alabama"), ("AR", "Arkansas"), ("AZ", "Arizona"), ("CA", "California"),
+    ("CO", "Colorado"), ("CT", "Connecticut"), ("DC", "D C"), ("DE", "Delaware"), ("FL", "Florida"),
+    ("GA", "Georgia"), ("HI", "Hawaii"), ("IA", "Iowa"), ("ID", "Idaho"), ("IL", "Illinois"),
+    ("IN", "Indiana"), ("KS", "Kansas"), ("KY", "Kentucky"), ("LA", "Louisiana"), ("MA", "Massachusetts"),
+    ("MD", "Maryland"), ("ME", "Maine"), ("MI", "Michigan"), ("MN", "Minnesota"), ("MO", "Missouri"),
+    ("MS", "Mississippi"), ("MT", "Montana"), ("NC", "North Carolina"), ("ND", "North Dakota"),
+    ("NE", "Nebraska"), ("NH", "New Hampshire"), ("NJ", "New Jersey"), ("NM", "New Mexico"),
+    ("NV", "Nevada"), ("NY", "New York"), ("OH", "Ohio"), ("OK", "Oklahoma"), ("OR", "Oregon"),
+    ("PA", "Pennsylvania"), ("RI", "Rhode Island"), ("SC", "South Carolina"), ("SD", "South Dakota"),
+    ("TN", "Tennessee"), ("TX", "Texas"), ("UT", "Utah"), ("VA", "Virginia"), ("VT", "Vermont"),
+    ("WA", "Washington"), ("WI", "Wisconsin"), ("WV", "West Virginia"), ("WY", "Wyoming"),
+];
+
+/// State codes that are also credentials after a name ("Jane Doe, MD", "PA", "MA"):
+/// read as the state only with a place word before the city or a ZIP after it.
+static CREDENTIAL_STATES: &[&str] = &["MA", "MD", "PA"];
+
+/// Capitalised words before a comma that are not a city ("Yes, OK", "Well, OR").
+static NOT_CITIES: &[&str] = &[
+    // BEGIN SORTED
+    "Again", "Alright", "Also", "Anyway", "Besides", "Finally", "Fine", "First", "Hello", "Here",
+    "Hey", "Hi", "Indeed", "Instead", "Last", "Look", "Next", "No", "Now", "Oh", "Ok", "Okay",
+    "Please", "Plus", "Right", "Second", "Sorry", "Still", "Sure", "Thanks", "Third", "Today",
+    "Well", "Yeah", "Yes",
+    // END SORTED
+];
+
+/// Words that put a place after them ("in Baltimore, MD").
+static PLACE_WORDS: &[&str] = &["at", "from", "in", "near", "of", "outside", "to"];
+
 /// Number words that can precede a unit (`five km`).
 static NUMBER_WORDS: &[&str] = &[
     // BEGIN SORTED
@@ -504,6 +549,134 @@ const CLOSERS: &[char] = &[
     ',', ';', ':', '!', '?', ')', ']', '}', '"', '\u{201D}', '\u{00BB}',
 ];
 const PAUSES: &[char] = &[',', ';', ':', '!', '?'];
+
+/// Period-over-period shorthand in earnings text. Sorted.
+static OVER: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("M/M", "month over month"),
+    ("MoM", "month over month"),
+    ("Q/Q", "quarter over quarter"),
+    ("QoQ", "quarter over quarter"),
+    ("Y/Y", "year over year"),
+    ("YoY", "year over year"),
+    ("m/m", "month over month"),
+    ("q/q", "quarter over quarter"),
+    ("y/y", "year over year"),
+    ("yoy", "year over year"),
+    // END SORTED
+];
+
+/// Stock exchanges before a ticker ("NASDAQ:AAPL", "NYSE: T"). Sorted.
+static EXCHANGES: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("AMEX", "Amex"),
+    ("LSE", "L S E"),
+    ("NASDAQ", "Nasdaq"),
+    ("NYSE", "N Y S E"),
+    ("Nasdaq", "Nasdaq"),
+    ("OTC", "O T C"),
+    ("TSX", "T S X"),
+    // END SORTED
+];
+
+/// Compass points (wind directions). Sorted.
+static COMPASS: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("E", "east"),
+    ("ENE", "east northeast"),
+    ("ESE", "east southeast"),
+    ("N", "north"),
+    ("NE", "northeast"),
+    ("NNE", "north northeast"),
+    ("NNW", "north northwest"),
+    ("NW", "northwest"),
+    ("S", "south"),
+    ("SE", "southeast"),
+    ("SSE", "south southeast"),
+    ("SSW", "south southwest"),
+    ("SW", "southwest"),
+    ("W", "west"),
+    ("WNW", "west northwest"),
+    ("WSW", "west southwest"),
+    // END SORTED
+];
+
+/// AP-style state abbreviations in party tags ("D-Mass."). Sorted.
+static AP_STATES: &[(&str, &str)] = &[
+    // BEGIN SORTED
+    ("Ala.", "Alabama"), ("Ariz.", "Arizona"), ("Ark.", "Arkansas"), ("Calif.", "California"),
+    ("Colo.", "Colorado"), ("Conn.", "Connecticut"), ("Del.", "Delaware"), ("Fla.", "Florida"),
+    ("Ga.", "Georgia"), ("Ill.", "Illinois"), ("Ind.", "Indiana"), ("Kan.", "Kansas"), ("Ky.", "Kentucky"),
+    ("La.", "Louisiana"), ("Mass.", "Massachusetts"), ("Md.", "Maryland"), ("Mich.", "Michigan"),
+    ("Minn.", "Minnesota"), ("Miss.", "Mississippi"), ("Mo.", "Missouri"), ("Mont.", "Montana"),
+    ("N.C.", "North Carolina"), ("N.D.", "North Dakota"), ("N.H.", "New Hampshire"), ("N.J.", "New Jersey"),
+    ("N.M.", "New Mexico"), ("N.Y.", "New York"), ("Neb.", "Nebraska"), ("Nev.", "Nevada"),
+    ("Okla.", "Oklahoma"), ("Ore.", "Oregon"), ("Pa.", "Pennsylvania"), ("R.I.", "Rhode Island"),
+    ("S.C.", "South Carolina"), ("S.D.", "South Dakota"), ("Tenn.", "Tennessee"), ("Va.", "Virginia"),
+    ("Vt.", "Vermont"), ("W.Va.", "West Virginia"), ("Wash.", "Washington"), ("Wis.", "Wisconsin"),
+    ("Wyo.", "Wyoming"),
+    // END SORTED
+];
+
+/// "D-Mass." / "R-OH" / "I-Vt." / "R-Texas": party and state.
+fn party_tag(core: &str) -> Option<String> {
+    let (p, st) = core.split_once('-')?;
+    let party = match p {
+        "D" => "Democrat",
+        "R" => "Republican",
+        "I" => "Independent",
+        _ => return None,
+    };
+    let state = find(AP_STATES, st)
+        .copied()
+        .or_else(|| find(STATES, st).copied())
+        .or_else(|| STATES.iter().map(|e| e.1).find(|n| *n == st))?;
+    Some(format!("{party} of {state}"))
+}
+
+/// A ticker read letter by letter ("AAPL" -> "A A P L", "BRK.B" -> "B R K B").
+fn spell_ticker(t: &str) -> Option<String> {
+    let letters: Vec<char> = t.chars().filter(|c| *c != '.').collect();
+    if letters.is_empty() || letters.len() > 6 || !letters.iter().all(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    Some(letters.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "))
+}
+
+/// Any of `keys` (lowercase, punctuation stripped) within `span` words of `i`.
+fn near(w: &[&str], i: usize, span: usize, keys: &[&str]) -> bool {
+    let lo = i.saturating_sub(span);
+    let hi = (i + span + 1).min(w.len());
+    (lo..hi).filter(|&k| k != i).any(|k| {
+        let c = split(w[k]).core.trim_end_matches('.').to_ascii_lowercase();
+        keys.contains(&c.as_str())
+    })
+}
+
+/// A percent figure within `span` words of `i` ("18.4%").
+fn near_percent(w: &[&str], i: usize, span: usize) -> bool {
+    let lo = i.saturating_sub(span);
+    let hi = (i + span + 1).min(w.len());
+    (lo..hi).any(|k| w[k].contains('%'))
+}
+
+/// Location labels before a letter and a range ("Gate L 1-10", "Row W 10-12"):
+/// never a team with a result. Sorted.
+static NOT_TEAMS: &[&str] = &[
+    // BEGIN SORTED
+    "Aisle", "Appendix", "Bay", "Block", "Box", "Building", "Bus", "Car", "Coach", "Concourse", "Deck",
+    "Exhibit", "Exit", "Figure", "Floor", "Gate", "Grade", "Group", "Hall", "Lane", "Level", "Line", "Lot",
+    "Part", "Pier", "Platform", "Pool", "Route", "Row", "Schedule", "Seat", "Section", "Stand", "Suite",
+    "Table", "Terminal", "Tier", "Type", "Unit", "Vitamin", "Wing", "Zone",
+    // END SORTED
+];
+
+/// A sports score ("3-1", "108-102,").
+fn is_score(s: &str) -> bool {
+    let s = s.trim_end_matches([',', '.', ';']);
+    let Some((a, b)) = s.split_once(['-', '\u{2013}']) else { return false };
+    (1..=3).contains(&a.len()) && (1..=3).contains(&b.len()) && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())
+}
 
 fn find<'t, T>(table: &'t [(&'static str, T)], key: &str) -> Option<&'t T> {
     table
@@ -651,7 +824,23 @@ fn ends_in_number(core: &str) -> bool {
 /// The word before `i` is exactly one ("1", "one"): its unit is singular. Every
 /// other number (0, 1.5, "1.0", 1/2, 59,000) takes the plural.
 fn prev_is_one(w: &[&str], i: usize) -> bool {
-    i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| p.core == "1" || p.core.eq_ignore_ascii_case("one"))
+    i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| {
+        p.core == "1"
+            || p.core.eq_ignore_ascii_case("one")
+            // the top of a range written "min\u{2013}1": "to one hour"
+            || p.core.strip_suffix('1').is_some_and(|r| r.ends_with(['-', '\u{2013}']) && r.chars().next().is_some_and(char::is_alphabetic))
+    })
+}
+
+/// "min\u{2013}1" in "45 min\u{2013}1 hr": the unit of a range's low end, then the
+/// range's top number ("minutes to one").
+pub fn unit_range(core: &str) -> Option<String> {
+    let (u, n) = core.split_once(['-', '\u{2013}'])?;
+    let (_, many, _) = unit(u)?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) || u.chars().count() < 2 {
+        return None;
+    }
+    Some(format!("{many} to {}", crate::ra_numwords::integer(n)))
 }
 
 /// The word before `i` looks like a street name (`Main`, `5th`), no pause after it.
@@ -662,6 +851,34 @@ fn prev_is_street_name(w: &[&str], i: usize) -> bool {
     p.trail.is_empty()
         && !has(STARTERS, p.core)
         && (is_proper(p.core) || first_char(p.core).is_some_and(|c| c.is_ascii_digit()))
+}
+
+/// A two-letter state code right after "City," (`Columbus, OH`, `Salt Lake City,
+/// UT`): the state's name. The city is a capitalised word that is not a
+/// sentence starter, an interjection or a state name itself; a credential-like
+/// code (MD, PA, MA) also needs a place word before the city or a ZIP after it.
+fn state_after_city(w: &[&str], i: usize, body: &str) -> Option<&'static str> {
+    let name = *find(STATES, body)?;
+    let p = tok(w, i.checked_sub(1)?)?;
+    if p.trail != "," || !is_proper(p.core) || has(STARTERS, p.core) || has(NOT_CITIES, p.core) {
+        return None;
+    }
+    if body != "DC" && STATES.iter().any(|(_, n)| *n == p.core) {
+        return None; // "In Ohio, IN fact"
+    }
+    if has(CREDENTIAL_STATES, body) {
+        let zip = next_core(w, i).is_some_and(|c| {
+            let c = strip_period(c).0;
+            c.len() == 5 && c.bytes().all(|b| b.is_ascii_digit())
+        });
+        let place = (i.saturating_sub(4)..i - 1).any(|j| {
+            tok(w, j).is_some_and(|t| PLACE_WORDS.contains(&t.core.to_ascii_lowercase().as_str()))
+        });
+        if !zip && !place {
+            return None;
+        }
+    }
+    Some(name)
 }
 
 /// Appends the pause of the source word (`,;:!?`) or, failing that, a period.
@@ -1115,6 +1332,10 @@ fn slash_words(s: &str) -> Option<String> {
             return Some(format!("{many} per {per}"));
         }
     }
+    // "tokens/s", "requests/sec": a lowercase word per a unit
+    if let (Some(per), true) = (find(PER, b), a.len() >= 3 && a.chars().all(|c| c.is_ascii_lowercase())) {
+        return Some(format!("{a} per {per}"));
+    }
     Some(format!("{} {}", caps_piece(a), caps_piece(b)))
 }
 
@@ -1231,6 +1452,92 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         return one(said, strip_period(core).1 && sentence_end(w, i));
     }
 
+    // ---- round 2 ----
+    // Earnings shorthand: "Y/Y", "QoQ", "M/M".
+    if let Some(said) = find(OVER, strip_period(core).0) {
+        return one((*said).to_string(), strip_period(core).1 && sentence_end(w, i));
+    }
+    // An exchange and its ticker, glued ("NASDAQ:AAPL") or spaced ("NYSE: SNOW").
+    if let Some((ex, tk)) = core.split_once(':') {
+        if let (Some(ex), Some(tk)) = (find(EXCHANGES, ex), spell_ticker(tk)) {
+            return one(format!("{ex}, {tk}"), false);
+        }
+    }
+    if let (Some(ex), true) = (find(EXCHANGES, core), t.trail.starts_with(':')) {
+        if let Some(n) = tok(w, i + 1) {
+            if let Some(tk) = spell_ticker(strip_period(n.core).0) {
+                return Some((i + 2, finish(format!("{ex}, {tk}"), n.trail, false)));
+            }
+        }
+    }
+    // Party tags: "(D-Mass.)", "(R-OH)"; "(D)" after a name.
+    if let Some(said) = party_tag(core) {
+        return one(said, false);
+    }
+    let person_before = i >= 2
+        && tok(w, i - 1).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core))
+        && tok(w, i - 2).is_some_and(|p| is_proper(p.core) && p.trail.is_empty() && !has(NOT_TEAMS, p.core));
+    if matches!(w[i].trim_end_matches([',', '.', ';']), "(D)" | "(R)") && person_before {
+        return one((if core == "D" { "Democrat" } else { "Republican" }).to_string(), false);
+    }
+    // A result letter before a score: "Arsenal W 3-1" -> "won".
+    let team_before = i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| {
+        (is_cap(p.core) && !has(NOT_TEAMS, p.core) && !has(STARTERS, p.core) && p.core.chars().count() >= 3)
+            || matches!(p.core.to_ascii_lowercase().as_str(), "won" | "lost" | "result" | "final")
+    });
+    if matches!(core, "W" | "L" | "D") && team_before && w.get(i + 1).is_some_and(|n| is_score(n)) {
+        let said = match core {
+            "W" => "won",
+            "L" => "lost",
+            _ => "drew",
+        };
+        return one(said.to_string(), false);
+    }
+    // Wind directions: "Winds NW 15-25 mph".
+    if let Some(said) = find(COMPASS, strip_period(core).0) {
+        let after_wind = i
+            .checked_sub(1)
+            .and_then(|j| tok(w, j))
+            .is_some_and(|p| matches!(p.core.to_ascii_lowercase().as_str(), "winds" | "wind" | "gusts" | "from" | "blowing"));
+        let multi = strip_period(core).0.len() >= 2;
+        if after_wind && (multi || next_is_number(w, i)) {
+            return one((*said).to_string(), strip_period(core).1 && sentence_end(w, i));
+        }
+    }
+    // "degrees F", "degrees C"
+    if matches!(strip_period(core).0, "F" | "C")
+        && i.checked_sub(1).and_then(|j| tok(w, j)).is_some_and(|p| p.trail.is_empty() && matches!(p.core, "degrees" | "degree"))
+    {
+        let said = if strip_period(core).0 == "F" { "Fahrenheit" } else { "Celsius" };
+        return one(said.to_string(), strip_period(core).1 && sentence_end(w, i));
+    }
+    // "Fed. R. Civ. P." and kin
+    if core == "Fed." && tok(w, i + 1).is_some_and(|n| n.core == "R.") {
+        let c2 = tok(w, i + 2).map(|n| n.core);
+        let c3 = tok(w, i + 3).map(|n| n.core);
+        let (said, end) = match (c2, c3) {
+            (Some("Civ."), Some("P." | "P")) => ("Federal Rule of Civil Procedure", i + 4),
+            (Some("Crim."), Some("P." | "P")) => ("Federal Rule of Criminal Procedure", i + 4),
+            (Some("App."), Some("P." | "P")) => ("Federal Rule of Appellate Procedure", i + 4),
+            (Some("Evid." | "Evid"), _) => ("Federal Rule of Evidence", i + 3),
+            _ => ("", i),
+        };
+        if end > i {
+            let last = tok(w, end - 1).map_or("", |n| n.trail);
+            return Some((end, finish(said.to_string(), last, sentence_end(w, end - 1) && end == w.len())));
+        }
+    }
+
+    // "pp 12-15": pages
+    if core == "pp" && next_is_number(w, i) && !prev_is_number(w, i) {
+        return one("pages".to_string(), false);
+    }
+
+    // A state code after "City," (`Columbus, OH`).
+    if let Some(name) = state_after_city(w, i, strip_period(core).0) {
+        return one(name.to_string(), strip_period(core).1);
+    }
+
     // Abbreviations (the period is part of the abbreviation).
     // `Sec. Blinken` is the Secretary (`Sec. 12` stays a section); `est. 1967` is
     // "established" before a year, "estimated" otherwise.
@@ -1296,6 +1603,8 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
         return None;
     }
 
+    // "jones@nasa.gov/" (contact lists separated by slashes)
+    let body = if body.contains('@') { body.trim_end_matches('/') } else { body };
     if let Some(said) = tag_words(body)
         .or_else(|| {
             if body.contains('@') {
@@ -1371,6 +1680,31 @@ fn at(w: &[&str], i: usize) -> Option<(usize, String)> {
             && !(single && after_name)
             && !has(ROMAN_NEVER, body)
             && !(body == "m" && prev_money);
+        // a unit abbreviation's period before a lowercase word is not a sentence end
+        let lower_next = next_core(w, i).and_then(first_char).is_some_and(char::is_lowercase);
+        let period = period && !lower_next;
+        // "352 pp." pages; "2.1 pp to 18.4%" percentage points (a percent nearby, or
+        // point / rate / spread)
+        if body == "pp" && prev_digits {
+            let pct = near_percent(w, i, 4) || near(w, i, 4, &["point", "points", "rate", "rates", "spread", "spreads"]);
+            return one((if pct { "percentage points" } else { "pages" }).to_string(), period);
+        }
+        // "897 mb" millibars in weather; "500 mb file" megabytes
+        if body == "mb" && prev_digits {
+            let weather = near(w, i, 6, &["pressure", "hpa", "low", "high", "storm", "hurricane", "barometric", "inhg", "cyclone", "typhoon"]);
+            let (o, m) = if weather { ("millibar", "millibars") } else { ("megabyte", "megabytes") };
+            return one((if prev_is_one(w, i) { o } else { m }).to_string(), period);
+        }
+        // "6-10 in. of snow", "3 c. flour": only with the period (and digits), and not
+        // at a sentence end ("He scored 3 in.")
+        let continues = next_core(w, i).and_then(first_char).is_some_and(|c| c.is_lowercase());
+        if let (true, Some((o, m))) = (prev_digits && t.core.ends_with('.') && continues, match body {
+            "in" => Some(("inch", "inches")),
+            "c" => Some(("cup", "cups")),
+            _ => None,
+        }) {
+            return one((if prev_is_one(w, i) { o } else { m }).to_string(), period);
+        }
         if let Some((one_u, many, _)) = unit(body).filter(|_| ok) {
             return one((if prev_is_one(w, i) { one_u } else { many }).to_string(), period);
         }
@@ -1433,6 +1767,14 @@ fn check_tables_sorted() {
     sorted("IMPERATIVES", IMPERATIVES.iter());
     sorted("UNITS_DIGITS_ONLY", UNITS_DIGITS_ONLY.iter());
     sorted("NUMBER_WORDS", NUMBER_WORDS.iter());
+    sorted("STATES", STATES.iter().map(|e| e.0));
+    sorted("OVER", OVER.iter().map(|e| e.0));
+    sorted("EXCHANGES", EXCHANGES.iter().map(|e| e.0));
+    sorted("COMPASS", COMPASS.iter().map(|e| e.0));
+    sorted("AP_STATES", AP_STATES.iter().map(|e| e.0));
+    sorted("NOT_TEAMS", NOT_TEAMS.iter());
+    sorted("NOT_CITIES", NOT_CITIES.iter());
+    sorted("CREDENTIAL_STATES", CREDENTIAL_STATES.iter());
     assert!(ABBREVS.len() >= 80, "{} abbreviations", ABBREVS.len());
     assert!(UNITS.len() >= 60, "{} units", UNITS.len());
 }
@@ -1940,7 +2282,9 @@ mod tests {
                     continue; // a lone letter after a number word is not a unit ("two V")
                 }
                 let got = last(&[n, u]);
-                if got != *many {
+                // round 2: "1/2 cup" -> "half a cup" for a measuring unit
+                let half = (n == "1/2" || n == "½") && got.starts_with("half a") && got.ends_with(one_u.trim_end_matches('s'));
+                if got != *many && !half {
                     bad.push(format!("{n} {u}: {got:?} (want {many:?})"));
                 }
             }
@@ -2007,6 +2351,48 @@ mod tests {
         assert_eq!(render("both cited ML data"), "both cited ML data");
         assert_eq!(render("on the Amazon Console and CLI."), "on the Amazon Console and CLI.");
         assert_eq!(render("Jacob II"), "Jacob two");
+    }
+
+    /// Round 2: a state code after "City," reads the state's name.
+    #[test]
+    fn state_codes_after_a_city_and_comma() {
+        for (src, want) in [
+            ("in Columbus, OH today", "in Columbus, Ohio today"),
+            ("Portland, OR 97201", "Portland, Oregon 97201"),
+            ("from Boise, ID.", "from Boise, Idaho."),
+            ("in Augusta, ME, where", "in Augusta, Maine, where"),
+            ("Honolulu, HI", "Honolulu, Hawaii"),
+            ("Austin, TX", "Austin, Texas"),
+            ("Salt Lake City, UT", "Salt Lake City, Utah"),
+            ("Tulsa, OK, said", "Tulsa, Oklahoma, said"),
+            ("Gary, IN residents", "Gary, Indiana residents"),
+            ("Mobile, AL", "Mobile, Alabama"),
+            ("in Baltimore, MD", "in Baltimore, Maryland"),
+            ("from Pittsburgh, PA.", "from Pittsburgh, Pennsylvania."),
+            ("Boston, MA 02108", "Boston, Massachusetts 02108"),
+            ("Cheyenne, WY", "Cheyenne, Wyoming"),
+            ("Washington, DC", "Washington, D C"),
+            ("Bethesda, Md.", "Bethesda, Md."), // dotted forms are left alone
+        ] {
+            assert_eq!(render(src), want, "{src}");
+        }
+        // every state and DC is in the table
+        assert_eq!(STATES.len(), 51);
+        // not after a city: no change
+        for src in [
+            "Yes, OK",
+            "Well, OK then",
+            "Fine, OR not",
+            "the ER, OR the ICU",
+            "Columbus OH",
+            "Jane Doe, MD",
+            "John Smith, PA said",
+            "Ann Lee, MA",
+            "hi, ME",
+            "In Ohio, IN fact",
+        ] {
+            assert_eq!(render(src), src, "{src}");
+        }
     }
 
     #[test]

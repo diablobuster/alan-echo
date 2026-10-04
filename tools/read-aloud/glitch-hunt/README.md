@@ -35,6 +35,25 @@ cached in `cache/`, so later builds are offline and identical).
 | `roundtrip.py` | Aligns reference vs Whisper transcript and scores mismatches |
 | `cluster.py` | Groups glitches by cause, writes `current.json`, compares with `baseline.json` |
 
+## Round 2 corpus and checks
+
+- `build_round2.py` builds `corpus_round2.tsv`: public-domain US-government text
+  (Federal Reserve, BEA, NASA, White House, Federal Register abstracts; SEC, BLS and
+  Treasury pages refuse unnamed tools and are skipped) fetched into `cache_r2/`, plus
+  our own 700 lines from `stress_round2.txt` (`gen_stress_round2.py` writes them:
+  finance, earnings calls, tech, crypto, politics, sports, weather, recipes). Run the
+  hunt on it with `GH_CORPUS=<frozen copy of corpus_round2.tsv>`.
+- `static_flags.py` also flags `SHORTHAND_UNEXPANDED` (bps, Y/Y, FY25, 1H24,
+  NASDAQ:AAPL, (D-Mass.), 5.1M, W 3-1, ...) and `FALSE_SENTENCE_BREAK` (a chunk cut
+  right after an abbreviation's period: `tbsp. | kosher`, `U.S.C. | §`).
+- Gapless playback: `src-tauri/src/ra_gapless_bench.rs` (`cargo test --release
+  gapless_bench -- --ignored --nocapture --test-threads=1`) drives the real `Session`
+  queue with the real CPU model on a virtual clock: first audio, underruns and the
+  silence at every chunk boundary, at 2.2x / 3x / 3.5x, for a start, a click-jump and
+  a skip.
+- `glitch_synth` takes `GH_RATE` (default 1.0) and `GH_GAP_MS` (default 100); the
+  round-2 board lines use `GH_RATE=2.2 GH_GAP_MS=0` (chunks back to back).
+
 ## Licences
 
 - **Corpus:** Wikipedia text is CC BY-SA and Wikinews is CC BY 2.5. Neither is ever

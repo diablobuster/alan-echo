@@ -239,6 +239,87 @@ fn starts_upper_or_digit(w: &str) -> bool {
     w.chars().find(|c| c.is_alphanumeric()).is_some_and(|c| c.is_uppercase() || c.is_ascii_digit())
 }
 
+/// The word opens a list item: a bullet glyph (alone or glued on) or an item number.
+fn opens_item(w: &str) -> bool {
+    is_bullet(w) || strip_glued_bullet(w).is_some() || is_item_number(w)
+}
+
+/// The word surely opens a list item, even after a soft wrap: a real bullet glyph
+/// (not a dash or `*`, alone or glued on) or a digit item number ("1." "12)" "3.Go").
+/// A letter ("F." "v." "p."), a roman number or a dash may be part of a sentence.
+fn opens_item_surely(w: &str) -> bool {
+    let glyph = w.chars().next().is_some_and(|c| !matches!(c, '-' | '\u{2013}' | '*'));
+    let digits = w.bytes().next().is_some_and(|b| b.is_ascii_digit());
+    (glyph && (is_bullet(w) || strip_glued_bullet(w).is_some())) || (digits && is_item_number(w))
+}
+
+/// The line ends a sentence or a clause (`.!?:;`, also inside closing quotes /
+/// brackets): an item opened by a letter, roman number or dash may follow it.
+fn ends_terminal(w: &str) -> bool {
+    let core = w.trim_end_matches(['"', '\'', ')', ']', '\u{201D}', '\u{2019}', '\u{BB}']);
+    core.ends_with(['.', '!', '?', ':', ';', '\u{2026}'])
+}
+
+/// A word split at the line end ("coun-" / "cil"): the line never ends a block.
+fn ends_split_word(w: &str) -> bool {
+    let core = w.trim_end_matches(['-', '\u{AD}']);
+    core.len() < w.len() && core.chars().last().is_some_and(char::is_alphabetic)
+}
+
+/// Untagged PDF text (one block of `\n`-separated lines, as Acrobat gives a page): for
+/// each line, whether a block ends after it. Soft-wrapped lines inside a paragraph
+/// never break, nor does a line ending in a split word ("coun-"); a line breaks when it
+/// is the last or blank, or the next is blank, or the next surely opens a list item
+/// (bullet glyph, digit number), or the next opens one with a letter, roman number or
+/// dash and this line ends with `.!?:;` or is an item itself, or it is short (< 3/4 of
+/// the upper-quartile line) and ends a
+/// sentence (`.!?:`) before a line starting with a capital or digit, or it or the next
+/// line is a heading: short, at most 12 words, no end punctuation, after a sentence
+/// end (or first), before a capital or digit. Pure; never panics.
+pub(crate) fn line_breaks(text: &str) -> Vec<bool> {
+    let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r').trim()).collect();
+    let mut lens: Vec<usize> = lines.iter().filter(|l| !l.is_empty()).map(|l| l.chars().count()).collect();
+    lens.sort_unstable();
+    // the upper quartile: body-text width, not skewed by short list or heading lines
+    let typical = lens.get(lens.len().saturating_mul(3) / 4).copied().unwrap_or(0);
+    let short = |l: &str| l.chars().count().saturating_mul(4) < typical.saturating_mul(3);
+    let first = |i: usize| lines.get(i).and_then(|l| l.split_whitespace().next());
+    let last = |i: usize| lines.get(i).and_then(|l| l.split_whitespace().last());
+    let next_capital = |i: usize| first(i + 1).is_some_and(starts_upper_or_digit);
+    let heading: Vec<bool> = (0..lines.len())
+        .map(|i| {
+            let l = lines.get(i).copied().unwrap_or("");
+            let after_stop = i == 0 || last(i - 1).is_some_and(ends_stop);
+            !l.is_empty()
+                && !first(i).is_some_and(opens_item)
+                && !last(i).is_some_and(ends_with_punct)
+                && !last(i).is_some_and(ends_split_word)
+                && l.split_whitespace().count() <= HEADING_WORDS
+                && short(l)
+                && after_stop
+                && next_capital(i)
+        })
+        .collect();
+    (0..lines.len())
+        .map(|i| {
+            let l = lines.get(i).copied().unwrap_or("");
+            let Some(next) = lines.get(i + 1) else { return true };
+            if last(i).is_some_and(ends_split_word) && !next.is_empty() {
+                return false;
+            }
+            let item_next = first(i + 1).is_some_and(opens_item_surely)
+                || (first(i + 1).is_some_and(opens_item)
+                    && (last(i).is_some_and(ends_terminal) || first(i).is_some_and(opens_item)));
+            l.is_empty()
+                || next.is_empty()
+                || item_next
+                || (short(l) && last(i).is_some_and(ends_stop) && next_capital(i))
+                || heading.get(i).copied().unwrap_or(false)
+                || heading.get(i + 1).copied().unwrap_or(false)
+        })
+        .collect()
+}
+
 /// Raw-text structure fallback (spec §1) for words whose `brk` the source did not mark
 /// (`marked[i]` false: `Paragraph` from a line break, or `None` on the first word).
 /// `read_start`: word 0 opens the read (a block start with no break before it); false
@@ -1560,5 +1641,101 @@ mod tests {
         // the date exclusion still holds
         let w = words("a b c d e f g on September 2, 2021 the x y z.");
         assert_eq!(chunk(&w, 12, 50)[0], 0..7);
+    }
+}
+
+#[cfg(test)]
+mod pdf_line_tests {
+    use super::line_breaks;
+
+    /// The lines after which `line_breaks` ends a block.
+    fn breaks(text: &str) -> Vec<usize> {
+        line_breaks(text).iter().enumerate().filter(|(_, b)| **b).map(|(i, _)| i).collect()
+    }
+
+    #[test]
+    fn a_hard_wrapped_paragraph_never_breaks_inside() {
+        // full-width lines, one ending a sentence and the next starting with a capital
+        let t = "The committee met on Tuesday to discuss the budget for the coming\r\n\
+                 year and agreed that spending on roads should rise by ten percent.\r\n\
+                 Members also asked the treasurer to report on the new parking fees\r\n\
+                 before the end of the month, which she agreed to do in writing.";
+        assert_eq!(breaks(t), [3], "only the block's last line");
+    }
+
+    #[test]
+    fn a_short_line_ending_a_sentence_ends_its_paragraph() {
+        let t = "The committee met on Tuesday to discuss the budget for the coming\r\n\
+                 year and agreed on a rise.\r\n\
+                 Members also asked the treasurer to report on the new parking fees\r\n\
+                 before the end of the month, which she agreed to do in writing.";
+        assert_eq!(breaks(t), [1, 3]);
+        // a short line that does not end a sentence is a wrap (next starts lower case)
+        let t = "The committee met on Tuesday to discuss the budget for the coming\r\n\
+                 year and\r\n\
+                 agreed on a rise in spending on roads and bridges across the city.";
+        assert_eq!(breaks(t), [2]);
+    }
+
+    #[test]
+    fn a_heading_line_ends_its_block() {
+        let t = "Budget Report 2026\r\n\
+                 The committee met on Tuesday to discuss the budget for the coming\r\n\
+                 year and agreed that spending on roads should rise by ten percent.\r\n\
+                 Next Steps\r\n\
+                 Members also asked the treasurer to report on the new parking fees\r\n\
+                 before the end of the month, which she agreed to do in writing.";
+        assert_eq!(breaks(t), [0, 2, 3, 5]);
+    }
+
+    #[test]
+    fn bullet_and_numbered_lists_break_before_each_item() {
+        let t = "Bring these items:\r\n\u{2022} Milk\r\n\u{2022} Eggs and a long item that wraps onto\r\nthe next line\r\n\u{2022}Bread";
+        assert_eq!(breaks(t), [0, 1, 3, 4]);
+        let t = "Steps to follow:\r\n1. Open the box\r\n2) Read the guide\r\niv. Done";
+        assert_eq!(breaks(t), [0, 1, 2, 3]);
+        // a year or a decimal at a line start is not an item number
+        let t = "The plan was first proposed by the mayor in the spring of\r\n2024. It passed the council in a narrow vote late that year.";
+        assert_eq!(breaks(t), [1]);
+    }
+
+    #[test]
+    fn letters_dashes_and_romans_open_an_item_only_after_a_sentence_end() {
+        // a soft wrap before an initial, "v.", "p.", a roman-looking word or a spaced dash
+        let wraps = [
+            "The treaty was signed in the oval office by President John\r\nF. Kennedy and witnessed by the full cabinet in the afternoon.",
+            "The case that settled the question was decided as Smith\r\nv. Jones in the supreme court of the state many years ago.",
+            "The full figures for each of the districts can be found, see\r\np. 12 of the annual report that was published in the spring.",
+            "Most of the money went to the schools and to the budget\r\n\u{2013} and the roads \u{2013} which pleased the voters across the city.",
+            "The council voted on the third amendment to chapter\r\niv. The mayor then closed the meeting and went straight home.",
+            "Members of the board asked for more time to review the\r\n- figures before they would agree to anything at all today.",
+        ];
+        for t in wraps {
+            assert_eq!(breaks(t), [1], "{t:?}");
+        }
+        // after a sentence end (or a ; or :) they do open an item
+        assert_eq!(breaks("Choose one:\r\na. Tea\r\nb. Coffee"), [0, 1, 2]);
+        assert_eq!(breaks("First the cost of the work.\r\n- Roads\r\n- Schools;\r\niv. Parks"), [0, 1, 2, 3]);
+        // real bullet glyphs and digit numbers always do
+        assert_eq!(breaks("We need\r\n\u{2022} Milk\r\n\u{25E6} Eggs"), [0, 1, 2]);
+        assert_eq!(breaks("The steps are\r\n1. Open\r\n12) Close"), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_hyphenated_line_end_never_breaks() {
+        // a short line ending "coun-" before a capital is a split word, not a heading
+        let t = "The members met on Tuesday and all of them took part in the vote.\r\nCoun-\r\nCil was unanimous and the plan went ahead without delay.";
+        assert_eq!(breaks(t), [2]);
+        let t = "The members of the city coun-\r\ncil voted. Then they all went home again.";
+        assert_eq!(breaks(t), [1]);
+    }
+
+    #[test]
+    fn blank_lines_odd_input_and_line_endings_are_safe() {
+        assert_eq!(breaks("one\n\ntwo"), [0, 1, 2]);
+        assert_eq!(breaks(""), [0]);
+        assert_eq!(breaks("only line"), [0]);
+        assert_eq!(breaks("a\rb"), [0], "a lone CR is not a line break");
+        assert_eq!(line_breaks("x\r\ny\n").len(), 3);
     }
 }

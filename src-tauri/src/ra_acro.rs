@@ -15,6 +15,7 @@
 //! - `GetLocation` is (0,0,0,0) off screen, and a container's box is the union of its
 //!   on-screen parts, so an off-screen container has no on-screen descendants.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, BSTR, GUID, HRESULT, VARIANT};
@@ -207,9 +208,12 @@ pub(crate) trait Node: Sized {
     /// `None` on an error (that child is skipped).
     fn child(&self, i: usize) -> Option<Self>;
     fn text(&self) -> String;
-    /// A structure element's type (`GetName`: "P", "H1", "LI", ...); "" otherwise or
-    /// on an error.
+    /// A structure element's type ("P", "H1", "LI", ...: `IPDDomElement::GetStdName`,
+    /// not `GetName`); "" otherwise or on an error.
     fn name(&self) -> String;
+    /// A Text node's whole text, lines separated by "\r\n" (`GetTextContent`); "" on an
+    /// error.
+    fn content(&self) -> String;
     /// `None` = off screen ((0,0,0,0) or an empty box) or an error.
     fn location(&self) -> Option<Rect>;
 }
@@ -225,7 +229,46 @@ struct Level<N> {
     name: Option<String>,
     /// No word inside it has been passed yet.
     fresh: bool,
+    /// An untagged page's Text node: its line breaks, read on first need (`token`).
+    /// `Some(None)`: not an untagged page.
+    lines: Option<Option<Arc<Lines>>>,
+    /// Where the next word is looked for in `lines.text`, and the line it is on.
+    cursor: usize,
+    line: usize,
 }
+
+/// Byte offset of the first whole-word `w` in `text` that starts within `ahead` bytes:
+/// whitespace (or the text's edge) on both sides, so "a" never matches inside "Data".
+pub(crate) fn whole_word_at(text: &str, w: &str, ahead: usize) -> Option<usize> {
+    if w.is_empty() {
+        return None;
+    }
+    let mut from: usize = 0;
+    loop {
+        let pos = from.checked_add(text.get(from..)?.find(w)?)?;
+        if pos > ahead {
+            return None;
+        }
+        let end = pos.checked_add(w.len())?;
+        let before = text.get(..pos)?.chars().next_back().is_none_or(char::is_whitespace);
+        let after = text.get(end..)?.chars().next().is_none_or(char::is_whitespace);
+        if before && after {
+            return Some(pos);
+        }
+        // the next char boundary after `pos`
+        from = pos.checked_add(text.get(pos..)?.chars().next()?.len_utf8())?;
+    }
+}
+
+/// An untagged page's text and, per line, whether a block ends after it.
+struct Lines {
+    text: String,
+    ends: Vec<bool>,
+}
+
+/// How far ahead (bytes) a word is looked for in the page text before the match is
+/// given up for that word (text and words disagree: no extra break, never a panic).
+const LINE_LOOKAHEAD: usize = 256;
 
 /// Depth-first document-order iterator over Word leaves; stops after `cap` words.
 #[derive(Clone)]
@@ -259,7 +302,6 @@ pub(crate) fn brk_of(name: &str) -> Brk {
         "TD" | "TH" => Brk::TableCell,
         "CAPTION" => Brk::Caption,
         "BLOCKQUOTE" => Brk::Quote,
-        "CODE" => Brk::Code,
         _ => match n.strip_prefix('H').and_then(|d| d.parse::<u8>().ok()) {
             Some(l @ 1..=6) if n.len() == 2 => Brk::Heading(l),
             _ => Brk::None,
@@ -268,7 +310,7 @@ pub(crate) fn brk_of(name: &str) -> Brk {
 }
 
 /// When two elements start at the same word: the outer row beats its cell, a heading
-/// beats everything.
+/// beats everything. (PDF `Code` is inline in most PDFs: no marker.)
 fn brk_rank(b: Brk) -> u8 {
     match b {
         b if b.is_heading() => 7,
@@ -277,7 +319,6 @@ fn brk_rank(b: Brk) -> u8 {
         Brk::ListItem => 4,
         Brk::Caption => 3,
         Brk::Quote => 2,
-        Brk::Code => 1,
         _ => 0,
     }
 }
@@ -286,9 +327,9 @@ fn brk_rank(b: Brk) -> u8 {
 /// (and a name that could not be read) is a block. A list label is inline so "1." is
 /// read with its item.
 pub(crate) fn is_inline(name: &str) -> bool {
-    const INLINE: [&str; 18] = [
+    const INLINE: [&str; 19] = [
         "Span", "Link", "Annot", "Quote", "Note", "Reference", "BibEntry", "Lbl", "Ruby", "RB",
-        "RT", "RP", "Warichu", "WT", "WP", "Form", "Em", "Strong",
+        "RT", "RP", "Warichu", "WT", "WP", "Form", "Em", "Strong", "Code",
     ];
     INLINE.iter().any(|i| i.eq_ignore_ascii_case(name))
 }
@@ -333,7 +374,7 @@ impl<N: Node> Words<N> {
     fn open(&mut self, n: N, kind: i32) {
         let count = n.child_count();
         if count > 0 {
-            self.stack.push(Level { node: n, next: 0, count, kind, name: None, fresh: true });
+            self.stack.push(Level { node: n, next: 0, count, kind, name: None, fresh: true, lines: None, cursor: 0, line: 0 });
         }
     }
 
@@ -364,7 +405,7 @@ impl<N: Node> Words<N> {
 
     /// The token for `n`, the word this walk passed last (call it before walking on):
     /// its text, prefixed with the marker of the structure it starts (heading, list
-    /// item, table row or cell, caption, quote, code), and ending in "\n" instead of its
+    /// item, table row or cell, caption, quote), and ending in "\n" instead of its
     /// trailing space when it is the last word of a block (natural-reading spec §5).
     pub(crate) fn token(&mut self, n: &N) -> String {
         let mut brk = Brk::None;
@@ -375,7 +416,13 @@ impl<N: Node> Words<N> {
             }
         }
         let mut t = n.text();
-        if self.ends_block() {
+        let line_end = self.ends_untagged_line(&t);
+        if line_end == Some(false) && !t.ends_with(char::is_whitespace) && !t.ends_with(['-', '\u{AD}']) {
+            // a soft wrap: Acrobat gives the line's last word no trailing space (a split
+            // word "coun-" keeps none, so normalize still joins it to "cil")
+            t.push(' ');
+        }
+        if self.ends_block() || line_end == Some(true) {
             let keep = t.trim_end().len();
             t.truncate(keep);
             t.push('\n');
@@ -384,6 +431,53 @@ impl<N: Node> Words<N> {
             t.insert_str(0, &mark(brk));
         }
         t
+    }
+
+    /// Untagged PDFs (task 5b): `Some(true)` when the word passed last, with text `word`,
+    /// ends a line of its page that `ra_text::line_breaks` ends a block after,
+    /// `Some(false)` when it ends a soft-wrapped line, `None` otherwise. Only for a Text
+    /// node right under an untagged page group (named "StructTreeRoot"); its text is read
+    /// once, and words are matched to it in order. A word not found close ahead: `None`.
+    fn ends_untagged_line(&mut self, word: &str) -> Option<bool> {
+        let top = self.stack.len().checked_sub(1)?;
+        let untagged_page = |s: &mut Self| {
+            s.stack.get(top).is_some_and(|l| l.kind == TEXT_NODE)
+                && top.checked_sub(1).is_some_and(|p| s.level_name(p) == "StructTreeRoot")
+        };
+        let known = self.stack.get(top).and_then(|l| l.lines.clone());
+        let lines = match known {
+            Some(v) => v,
+            None => {
+                let v = untagged_page(self).then(|| {
+                    let text = self.stack.get(top).map(|l| l.node.content()).unwrap_or_default();
+                    let ends = crate::ra_text::line_breaks(&text);
+                    Arc::new(Lines { text, ends })
+                });
+                if let Some(l) = self.stack.get_mut(top) {
+                    l.lines = Some(v.clone());
+                }
+                v
+            }
+        };
+        let (Some(lines), Some(l)) = (lines, self.stack.get_mut(top)) else { return None };
+        let w = word.trim();
+        let rest = lines.text.get(l.cursor..)?;
+        if w.is_empty() {
+            return None;
+        }
+        let pos = whole_word_at(rest, w, LINE_LOOKAHEAD)?;
+        let skipped = rest.get(..pos).unwrap_or("");
+        l.line = l.line.saturating_add(skipped.matches('\n').count());
+        let end = l.cursor.saturating_add(pos).saturating_add(w.len());
+        l.cursor = end;
+        if !skipped.trim().is_empty() {
+            // found past text the walk never gave: resync, but trust no line end here
+            return None;
+        }
+        let tail = lines.text.get(end..).unwrap_or("");
+        let gap: &str = tail.get(..tail.len() - tail.trim_start().len()).unwrap_or("");
+        let line_ends = gap.contains('\n') || tail.is_empty();
+        line_ends.then(|| lines.ends.get(l.line).copied().unwrap_or(false))
     }
 
     /// The word passed last ends a block: every container from its parent out to the
@@ -698,6 +792,10 @@ impl Node for IPDDomNode {
                 String::new()
             }
         }
+    }
+
+    fn content(&self) -> String {
+        self.text()
     }
 
     /// `IPDDomElement::GetStdName` (the standard type after the role map), else
@@ -1093,10 +1191,14 @@ mod tests {
         fn text(&self) -> String {
             self.1.to_string()
         }
-        /// A container's text field holds its structure name (tests only).
+        /// A container's text field is "name" or "name|content" (tests only).
         fn name(&self) -> String {
             NAMES.with(|c| c.set(c.get() + 1));
-            if self.0 == WORD { String::new() } else { self.1.to_string() }
+            if self.0 == WORD { String::new() } else { self.1.split('|').next().unwrap_or("").to_string() }
+        }
+        fn content(&self) -> String {
+            CONTENTS.with(|c| c.set(c.get() + 1));
+            self.1.split_once('|').map_or("", |(_, c)| c).to_string()
         }
         fn location(&self) -> Option<Rect> {
             self.2.map(|(x, y, w, h)| Rect { x, y, w, h })
@@ -1108,6 +1210,11 @@ mod tests {
         static FETCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         /// Structure-name reads made by the fake DOM on this test thread.
         static NAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Whole-text reads of Text nodes made by the fake DOM on this test thread.
+        static CONTENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn contents() -> usize {
+        CONTENTS.with(|c| c.get())
     }
     fn names() -> usize {
         NAMES.with(|c| c.get())
@@ -1513,7 +1620,8 @@ mod tests {
             F(STRUCT, "Table", None, vec![row("a ", "b "), row("c ", "d ")]),
             F(TEXT, "Caption", None, vec![w("Fig ", None), w("one", None)]),
             F(TEXT, "BlockQuote", None, vec![w("Said ", None)]),
-            F(TEXT, "Code", None, vec![w("x=1", None)]),
+            F(TEXT, "Code", None, vec![w("x=1 ", None)]),
+            F(TEXT, "P", None, vec![w("end", None)]),
         ]);
         assert_eq!(
             read_all(doc),
@@ -1523,7 +1631,9 @@ mod tests {
                 m(Brk::TableRow, "a\n"), m(Brk::TableCell, "b\n"), m(Brk::TableRow, "c\n"), m(Brk::TableCell, "d\n"),
                 m(Brk::Caption, "Fig "), "one\n".into(),
                 m(Brk::Quote, "Said\n"),
-                m(Brk::Code, "x=1\n"),
+                // Code is inline in most PDFs: no marker; here it still ends with its parent
+                "x=1 ".into(),
+                "end\n".into(),
             ]
         );
     }
@@ -1626,12 +1736,176 @@ mod tests {
         assert_eq!(brk_of("TH"), Brk::TableCell);
         assert_eq!(brk_of("Caption"), Brk::Caption);
         assert_eq!(brk_of("BlockQuote"), Brk::Quote);
-        assert_eq!(brk_of("Code"), Brk::Code);
+        assert_eq!(brk_of("Code"), Brk::None, "inline in most PDFs");
         for n in ["P", "", "Document", "StructTreeRoot", "L", "Table", "Span", "Lbl", "LBody", "Hx", "H10", "\u{E0F0}"] {
             assert_eq!(brk_of(n), Brk::None, "{n:?}");
         }
         assert!(is_inline("Span") && is_inline("link") && is_inline("Lbl") && is_inline("Quote"));
-        assert!(!is_inline("P") && !is_inline("") && !is_inline("Code") && !is_inline("BlockQuote"));
+        assert!(!is_inline("P") && !is_inline("") && is_inline("Code") && !is_inline("BlockQuote"));
+    }
+
+    // ---- untagged PDFs: line ends from the page text (task 5b) ----
+
+    /// Words of `lines`, Acrobat-style: a space after each word except a line's last.
+    fn line_words(lines: &[&str]) -> Vec<F> {
+        let mut out = Vec::new();
+        for l in lines {
+            let ws: Vec<&str> = l.split_whitespace().collect();
+            for (i, t) in ws.iter().enumerate() {
+                let t: &'static str = Box::leak(if i + 1 == ws.len() { t.to_string() } else { format!("{t} ") }.into_boxed_str());
+                out.push(w(t, None));
+            }
+        }
+        out
+    }
+
+    /// An untagged page as Acrobat gives it: Doc > nameless group > Text "P".
+    fn untagged(lines: &[&str]) -> F {
+        let content: &'static str = Box::leak(format!("P|{}", lines.join("\r\n")).into_boxed_str());
+        F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, content, None, line_words(lines))])])
+    }
+
+    const PAGE: [&str; 7] = [
+        "Budget Report 2026",
+        "The committee met on Tuesday to discuss the budget for the coming",
+        "year and agreed that spending on roads should rise by ten percent.",
+        "Members also asked the treasurer to report on the new parking fees",
+        "before the end of the month.",
+        "\u{2022} Milk",
+        "\u{2022} Eggs",
+    ];
+
+    #[test]
+    fn an_untagged_page_breaks_at_paragraph_like_line_ends_only() {
+        let toks = read_all(untagged(&PAGE));
+        let ends: Vec<&str> = toks.iter().filter(|t| t.ends_with('\n')).map(|t| t.as_str()).collect();
+        assert_eq!(ends, ["2026\n", "month.\n", "Milk\n", "Eggs\n"]);
+        // the soft-wrapped lines stay running text
+        // (and get the space Acrobat leaves off a line's last word)
+        assert!(toks.iter().any(|t| t == "coming "), "{toks:?}");
+        assert!(toks.iter().any(|t| t == "percent. "), "{toks:?}");
+        assert!(toks.iter().any(|t| t == "fees "), "{toks:?}");
+        assert_eq!(toks.len(), PAGE.iter().map(|l| l.split_whitespace().count()).sum::<usize>(), "one token per word");
+    }
+
+    #[test]
+    fn untagged_line_ends_feed_the_raw_text_rules() {
+        let ws = crate::ra_text::normalize(&read_all(untagged(&PAGE)));
+        let brk = |t: &str| ws.iter().find(|w| w.text == t).map(|w| w.brk);
+        assert_eq!(brk("The"), Some(Brk::AfterHeading));
+        assert_eq!(brk("year"), Some(Brk::None), "a soft wrap is no break");
+        assert_eq!(brk("Members"), Some(Brk::None), "a full-width sentence end is no paragraph");
+        assert_eq!(brk("Milk"), Some(Brk::ListItem));
+        assert_eq!(brk("Eggs"), Some(Brk::ListItem));
+        let src: Vec<usize> = ws.iter().flat_map(|w| w.src.clone()).collect();
+        assert_eq!(src, (0..src.len()).collect::<Vec<_>>(), "every token kept, in order");
+    }
+
+    #[test]
+    fn tagged_text_is_never_split_at_its_lines() {
+        let content: &'static str = Box::leak(format!("P|{}", PAGE.join("\r\n")).into_boxed_str());
+        let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "Document", None, vec![F(TEXT, content, None, line_words(&PAGE))])]);
+        let before = contents();
+        let toks = read_all(doc);
+        assert_eq!(toks.iter().filter(|t| t.ends_with('\n')).count(), 1, "only the block's end");
+        assert_eq!(contents(), before, "a tagged block's text is never fetched");
+    }
+
+    #[test]
+    fn untagged_text_that_does_not_match_the_words_adds_no_breaks() {
+        // page text that has nothing to do with the words (or is empty): no extra breaks
+        for content in ["P|Totally\r\ndifferent\r\nwords here", "P|", "P"] {
+            let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, content, None, line_words(&PAGE))])]);
+            let toks = read_all(doc);
+            assert_eq!(toks.iter().filter(|t| t.ends_with('\n')).count(), 1, "{content:?}");
+        }
+    }
+
+    #[test]
+    fn untagged_lines_cost_one_text_read_per_page_and_none_on_hover() {
+        let page = || {
+            let mut d = untagged(&PAGE);
+            // give it boxes so hover walks it
+            fn boxed(f: &mut F) {
+                f.2 = Some((0.0, 0.0, 10.0, 10.0));
+                f.3.iter_mut().for_each(boxed);
+            }
+            boxed(&mut d);
+            d
+        };
+        let before = contents();
+        let mut rd = Walk::new(words(page(), MAX_WORDS), Vec::new());
+        let past = Instant::now();
+        while !rd.more_sliced(past, far()).unwrap_or_default().is_empty() {}
+        assert_eq!(contents() - before, 1, "one read for the page, kept across slices");
+        let before = contents();
+        assert!(hover_rects(&mut words(page(), MAX_WORDS), 5.0, 5.0, far()).is_some());
+        let mut seen = Vec::new();
+        assert!(hover_seen(&mut seen, page(), 5.0, 5.0, far()).is_some());
+        assert_eq!(contents(), before, "hover reads no page text");
+    }
+
+    #[test]
+    fn a_word_matches_the_page_text_only_as_a_whole_word_where_expected() {
+        // the page text lacks "a" ("Read a book" -> "Read book"): "a" must not match inside
+        // "Data" at the end of the heading line below and break there
+        let lines = ["Final Data", "The committee met on Tuesday to discuss the budget for the coming", "year and agreed that spending should rise."];
+        let content = "P|Final Data\r\nThe committee met on Tuesday to discuss the budget for the coming\r\nyear and agreed that spending should rise.";
+        let words = vec![w("Read ", None), w("a ", None), w("book ", None)];
+        let mut ws = words;
+        ws.extend(line_words(&lines));
+        let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, content, None, ws)])]);
+        let toks = read_all(doc);
+        assert_eq!(toks[1], "a ", "no break inside a later word");
+        assert_eq!(toks.iter().filter(|t| t.ends_with('\n')).map(|t| t.as_str()).collect::<Vec<_>>(), ["Data\n", "rise.\n"], "{toks:?}");
+    }
+
+    #[test]
+    fn whole_word_matches_skip_parts_of_words_and_respect_the_lookahead() {
+        assert_eq!(whole_word_at("Data a b", "a", 64), Some(5));
+        assert_eq!(whole_word_at("Data\r\nmore", "a", 64), None);
+        assert_eq!(whole_word_at("x vote.\r\n", "vote.", 64), Some(2));
+        assert_eq!(whole_word_at("caf\u{e9} \u{e9}t\u{e9} \u{e9}", "\u{e9}", 64), Some(12));
+        assert_eq!(whole_word_at("far away a", "a", 3), None, "beyond the lookahead");
+        assert_eq!(whole_word_at("", "a", 64), None);
+        assert_eq!(whole_word_at("a", "", 64), None);
+    }
+
+    #[test]
+    fn a_word_found_past_skipped_text_adds_no_break_but_resyncs() {
+        // "Report" is missing from the words: "2026" is found past skipped text, so its
+        // line end gives no break; the next lines still match and break as usual
+        let content = "P|Budget Report 2026\r\nThe committee met on Tuesday to discuss the budget for the coming\r\nyear and they agreed.\r\nMembers also asked the treasurer to report on the new parking fees.";
+        let ws = vec![w("Budget ", None), w("2026", None)]
+            .into_iter()
+            .chain(line_words(&["The committee met on Tuesday to discuss the budget for the coming", "year and they agreed.", "Members also asked the treasurer to report on the new parking fees."]))
+            .collect();
+        let doc = F(DOC, "StructTreeRoot", None, vec![F(STRUCT, "StructTreeRoot", None, vec![F(TEXT, content, None, ws)])]);
+        let toks = read_all(doc);
+        assert_eq!(toks[1], "2026", "found past skipped text: untouched");
+        assert_eq!(toks.iter().filter(|t| t.ends_with('\n')).map(|t| t.as_str()).collect::<Vec<_>>(), ["agreed.\n", "fees.\n"], "{toks:?}");
+    }
+
+    #[test]
+    fn a_hyphenated_line_end_keeps_no_space_so_it_still_joins() {
+        let lines = ["The members of the city voted for the plan and the coun-", "cil agreed to fund the new roads before the end of the year."];
+        let toks = read_all(untagged(&lines));
+        assert!(toks.iter().any(|t| t == "coun-"), "{toks:?}");
+        let ws = crate::ra_text::normalize(&toks);
+        // ra_text's PDF hyphen join: one word over both tokens (it keeps the hyphen)
+        let joined = ws.iter().find(|w| w.text.starts_with("coun"));
+        assert_eq!(joined.map(|w| (w.text.as_str(), w.src.len())), Some(("coun-cil", 2)), "{:?}", ws.iter().map(|w| &w.text).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn untagged_line_ends_survive_a_rollback() {
+        let mut rd = Walk::new(words(untagged(&PAGE), MAX_WORDS), Vec::new());
+        let a = rd.take(5, far());
+        let mk = rd.mark();
+        let b = rd.take(MAX_WORDS, far());
+        rd.rollback(mk);
+        assert_eq!(rd.take(MAX_WORDS, far()), b);
+        assert_eq!(a[2], "2026\n");
     }
 
     #[test]
@@ -1663,6 +1937,14 @@ mod tests {
         }
         assert_eq!(IPDDOMNODE_METHODS.len(), 14);
         assert_eq!(size_of::<com::IPDDomNode_Vtbl>(), base + 14 * ptr);
+        // IPDDomElement : IPDDomNode adds 4 (type library order)
+        let node = size_of::<com::IPDDomNode_Vtbl>();
+        assert_eq!(offset_of!(com::IPDDomElement_Vtbl, GetTagName), node);
+        assert_eq!(offset_of!(com::IPDDomElement_Vtbl, GetStdName), node + ptr);
+        assert_eq!(offset_of!(com::IPDDomElement_Vtbl, GetID), node + 2 * ptr);
+        assert_eq!(offset_of!(com::IPDDomElement_Vtbl, GetAttribute), node + 3 * ptr);
+        assert_eq!(size_of::<com::IPDDomElement_Vtbl>(), node + 4 * ptr);
+        assert_eq!(format!("{:?}", com::IPDDomElement::IID), "198F17AE-B921-4308-9543-288D426A5C2B");
         // IUnknown-based ones
         let unk = size_of::<IUnknown_Vtbl>();
         assert_eq!(offset_of!(com::IGetPDDomNode_Vtbl, get_PDDomNode), unk);
@@ -1911,8 +2193,8 @@ mod live {
     /// Structure markers against a real Acrobat (natural-reading spec §5): prints the
     /// DOM's containers (type, `GetStdName`) and the tokens of a full read of a PDF
     /// tagged H1, P, list, then checks the markers and paragraph ends. Same launch and
-    /// cleanup rules as `acro_live`. RA_ACRO_UNTAGGED=1 checks the untagged fallback
-    /// (paragraph ends only, no markers).
+    /// cleanup rules as `acro_live`. RA_ACRO_UNTAGGED=1 checks the untagged fallback on
+    /// `mkpdf.py --prose` (task 5b): no markers, a break only at paragraph-like line ends.
     /// cargo test acro_struct_live -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -1930,9 +2212,10 @@ mod live {
         let pdf = std::env::temp_dir().join(format!("ra_acro_struct_{}.pdf", std::process::id()));
         let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("tools").join("read-aloud").join("mkpdf.py");
         let mut py = Command::new("py");
-        py.arg(&tool).arg(&pdf).arg("--struct");
         if untagged {
-            py.arg("--untagged");
+            py.arg(&tool).arg(&pdf).arg("--prose").arg("--untagged");
+        } else {
+            py.arg(&tool).arg(&pdf).arg("--struct");
         }
         let made = py.output().expect("run py mkpdf.py");
         assert!(made.status.success() && pdf.exists(), "mkpdf failed: {made:?}");
@@ -1969,6 +2252,12 @@ mod live {
             }
         }
         dump(&root, 0);
+        // the cost of the one extra call per untagged page: its whole text
+        if let Some(text) = root.child(0).and_then(|g| g.child(0)).filter(|_| untagged) {
+            let t = Instant::now();
+            let c = text.content();
+            println!("page text read in {:.1} ms: {c:?}", t.elapsed().as_secs_f64() * 1000.0);
+        }
         let mut rd = Walk::new(words(root, MAX_WORDS), Vec::new());
         let t = Instant::now();
         let toks = rd.take(MAX_WORDS, Instant::now() + CALL_BUDGET);
@@ -1982,8 +2271,13 @@ mod live {
         assert!(rd.ended, "the whole test document was read");
         assert_eq!(rd.nodes.len(), toks.len(), "one token per word");
         if untagged {
-            assert!(marked.is_empty(), "no markers on an untagged PDF");
-            assert_eq!(ends.len(), 3, "one block per page");
+            // Acrobat infers list items on an untagged page (LI > Lbl "•" / "1.", LBody)
+            assert!(marked.iter().all(|(b, _)| *b == Brk::ListItem), "only inferred list items");
+            let items: Vec<&str> = marked.iter().map(|(_, t)| *t).collect();
+            assert_eq!(items, ["\u{2022}", "\u{2022}", "1.", "2."]);
+            let ends: Vec<&str> = ends.iter().map(|s| s.as_str()).collect();
+            assert_eq!(ends, ["2026\n", "agreed.\n", "ends.\n", "bread\n", "Eggs\n", "box\n", "guide\n", "tango.\n", "time.\n"]);
+            assert!(toks.iter().any(|t| t == "for "), "the soft wrap stays running text: {toks:?}");
         } else {
             assert_eq!(marked, [(Brk::Heading(1), "Page "), (Brk::ListItem, "The "), (Brk::ListItem, "Alpha ")]);
             assert_eq!(ends.len(), 12, "every line of the test PDF is its own block");

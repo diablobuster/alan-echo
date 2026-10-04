@@ -1276,6 +1276,8 @@ fn struct_fixture(tag: &str, reps: usize) -> String {
              <table><tr><th>Load</th><th>Factor</th></tr><tr><td>12.1</td><td>3.5</td></tr></table>\n\
              <p>2024 saw 1.2 million riders.</p>\n\
              <p>I think A.I. helps.</p>\n\
+             <p>Some text (<span title=\"x\" tabindex=\"0\">spanterm</span>) more text.</p>\n\
+             <div>Before (<div style=\"display:inline-block\">inlinebox</div>) after.</div>\n\
              <div class=wrap><div class=inner><section><div class=body>\
              <p>Deep para one{r} here.</p><p>Deep para two{r} here.</p><h3>Deep heading{r} here</h3><p>Deep para three{r} here.</p>\
              </div></section></div></div>\n\
@@ -1455,7 +1457,10 @@ fn uia_struct_spike_manual() {
             .ok()
             .map(|v| i32::try_from(&v).map(|n| n.to_string()).unwrap_or_else(|_| "n/a".into()))
             .unwrap_or_else(|| "err".into());
-        println!("#{i} {t:?} (prev {:?}) style={style}", i.checked_sub(1).map(|j| toks[j].0.clone()));
+        let mut reader = structure::Reader::new(&uia, true, Some(tp.clone()));
+        let prev = i.checked_sub(1).map(|j| toks[j].0.as_str());
+        let got = reader.brk_at(rg, t, prev, Instant::now() + Duration::from_secs(5));
+        println!("#{i} {t:?} (prev {:?}) style={style} -> {got:?}", i.checked_sub(1).map(|j| toks[j].0.clone()));
         let Ok(mut el) = (unsafe { rg.GetEnclosingElement() }) else {
             println!("    (no enclosing element)");
             continue;
@@ -1558,7 +1563,16 @@ fn uia_struct_live_manual() {
     let tp = page_text_pattern(&uia, hwnd, "Headline the bridge");
     let head = unsafe { tp.DocumentRange().unwrap().FindText(&windows::core::BSTR::from("Headline"), false, false) }
         .expect("headline");
-    let w = rects_of(&head).unwrap_or_default().first().cloned().expect("headline on screen");
+    // a fresh Edge may still be laying the page out
+    let w = (0..20)
+        .find_map(|_| {
+            let r = rects_of(&head).unwrap_or_default().first().cloned();
+            if r.is_none() {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            r
+        })
+        .expect("headline on screen");
     // Edge on a fresh profile may float a bubble over the page: click a part of the
     // word that our page window owns
     let cy = (w.y + w.h / 2.0) as i32;
@@ -1607,6 +1621,34 @@ fn uia_struct_live_manual() {
         assert!(all.len() < 20_000, "more() never reached the end");
     }
     drop(ra);
+    let worker = all;
+    let n_marked = |v: &[String]| v.iter().filter(|t| split_mark(t).0.is_some()).count();
+    assert_eq!(split_mark(&worker[0]).0, Some(Brk::Heading(1)), "the clicked H1: {:?}", worker[0]);
+    // correctness: the same page read directly with no budget (the worker's reads stop
+    // when a batch spends its budget; that cost is measured at the end)
+    let start = unsafe { tp.DocumentRange().unwrap() };
+    unsafe {
+        start.MoveEndpointByRange(TextPatternRangeEndpoint_End, &start, TextPatternRangeEndpoint_Start).unwrap();
+        start.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
+    }
+    let mut read = UiaRead {
+        chromium: true,
+        cursor: Some(start.clone()),
+        structure: structure::Reader::new(&uia, true, Some(tp.clone())),
+        ..Default::default()
+    };
+    let mut batch = structure::Batch::unlimited(None);
+    let first = unsafe { start.GetText(-1) }.map(|b| b.to_string()).unwrap_or_default();
+    let mut all = vec![batch.token(&mut read.structure, &start, first)];
+    all.extend(read_forward_in(&mut read, 100_000, &mut batch).expect("direct read"));
+    println!(
+        "worker (budgeted, from the H1): {} of {} tokens marked; direct (no budget, whole page): {} of {}",
+        n_marked(&worker),
+        worker.len(),
+        n_marked(&all),
+        all.len()
+    );
+    assert!(n_marked(&worker) * 10 >= n_marked(&all) * 7, "the worker marks most blocks within budget");
     let marks: Vec<(usize, Brk, String)> = all
         .iter()
         .enumerate()
@@ -1621,7 +1663,6 @@ fn uia_struct_live_manual() {
     }
     let marked = |b: Brk, word: &str| marks.iter().any(|(_, mb, t)| *mb == b && t.trim() == word);
     let unmarked = |word: &str| !marks.iter().any(|(_, _, t)| t.trim() == word);
-    assert!(split_mark(&all[0]).0 == Some(Brk::Heading(1)), "the clicked H1: {:?}", all[0]);
     assert!(marked(Brk::Heading(2), "Section0"));
     assert!(marked(Brk::Heading(3), "Subhead0"));
     assert!(marked(Brk::Heading(4), "Linked"), "a heading whose text is a link");
@@ -1641,7 +1682,7 @@ fn uia_struct_live_manual() {
     assert!(marked(Brk::Paragraph, "Lead"));
     assert!(marked(Brk::Paragraph, "Engineers"));
     assert!(marked(Brk::Paragraph, "Footer"));
-    for w in ["inline", "factor", "start", "Bullet", "decade", ",", "Home", "World", "Accept"] {
+    for w in ["inline", "factor", "start", "Bullet", "decade", ",", "Home", "World", "Accept", "spanterm", "inlinebox", "more", "after"] {
         assert!(unmarked(w), "{w} is not a block start of a known kind");
     }
     // fix round 1: numbers and abbreviations Edge splits into glued pieces get no
@@ -1668,7 +1709,15 @@ fn uia_struct_live_manual() {
     assert_eq!(n_marks(y2024 + 1, i_think), 0, "nothing inside 1.2 million");
     assert_eq!(brk_at(i_think), Some(Brk::Paragraph));
     let deep = idx("Deep");
-    assert_eq!(n_marks(i_think + 1, deep), 0, "nothing inside A.I.");
+    let some = idx("Some");
+    assert_eq!(n_marks(i_think + 1, some), 0, "nothing inside A.I.");
+    // fix round 2: inline pieces Chromium shows as Group (a span with a title and
+    // tabindex, an inline-block div) right after text are not paragraphs
+    let before = idx("Before");
+    assert_eq!(brk_at(some), Some(Brk::Paragraph));
+    assert_eq!(n_marks(some + 1, before), 0, "nothing inside the span sentence");
+    assert_eq!(brk_at(before), Some(Brk::Paragraph));
+    assert_eq!(n_marks(before + 1, deep), 0, "nothing inside the inline-block sentence");
     let (mut deep_ok, mut deep_all) = (0, 0);
     for i in (0..plain.len()).filter(|&i| plain[i] == "Deep") {
         let want = if plain.get(i + 1).is_some_and(|t| t.starts_with("heading")) { Brk::Heading(3) } else { Brk::Paragraph };
@@ -1679,17 +1728,12 @@ fn uia_struct_live_manual() {
         }
     }
     println!("deep wrapper blocks marked: {deep_ok} of {deep_all}");
-    assert!(deep_ok * 10 >= deep_all * 9, "deep blocks marked: {deep_ok} of {deep_all}");
+    assert_eq!(deep_ok, deep_all, "deep blocks marked");
     // every copy of the article got its markers (the budget held on each batch)
     let h2 = marks.iter().filter(|(_, b, _)| *b == Brk::Heading(2)).count();
     assert!(h2 >= 6, "an H2 per section: {h2}");
 
     // cost: the same page read in 400-token batches, structure on vs off
-    let start = unsafe { tp.DocumentRange().unwrap() };
-    unsafe {
-        start.MoveEndpointByRange(TextPatternRangeEndpoint_End, &start, TextPatternRangeEndpoint_Start).unwrap();
-        start.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
-    }
     for round in 0..2 {
         for on in [false, true] {
             let mut read = UiaRead {

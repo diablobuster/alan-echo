@@ -152,6 +152,20 @@ pub(super) fn leaf_starts_with(name: &str, tok: &str) -> bool {
     t == "\u{FFFC}" || name.trim_start().starts_with(t)
 }
 
+/// Whether the token's position must be read to know it starts its enclosing element
+/// (`leaf_starts_with` already passed). A text leaf's Name is its text: when the
+/// previous token (glued to this one) followed by this token does not occur in it,
+/// the token cannot be in its middle, so the two position reads are saved. Other
+/// leaves (a link's Name may be an aria-label) and the read's first token are always
+/// checked.
+pub(super) fn needs_position_check(text_leaf: bool, name: &str, prev: Option<&str>, tok: &str) -> bool {
+    let Some(prev) = prev else {
+        return true;
+    };
+    // a line break in the text is not in the tokens (`<pre>` lines): always check
+    !text_leaf || name.contains(['\r', '\n']) || name.contains(&format!("{}{}", prev.trim_start(), tok.trim()))
+}
+
 /// Extra time allowed for structure reads in a batch of `n` tokens (spec §5: 150 ms
 /// per 400-token batch).
 pub(super) fn budget(n: usize) -> Duration {
@@ -166,32 +180,49 @@ pub(super) trait Tree {
     type El;
     /// The parent of `el` and its properties (`None`: no parent, or an error).
     fn parent(&mut self, el: &Self::El) -> Option<(Self::El, ElInfo)>;
-    /// `Some(true)` when `el` has no previous sibling, `Some(false)` when it has one,
-    /// `None` on an error (no marker: never guess).
-    fn is_first(&mut self, el: &Self::El) -> Option<bool>;
+    /// `el`'s previous sibling: `Some(None)` when `el` is the first child,
+    /// `Some(Some(info))` when it has one, `None` on an error (no marker: never guess).
+    fn prev_sibling(&mut self, el: &Self::El) -> Option<Option<ElInfo>>;
     /// The batch's structure budget is spent: stop before the next read.
     fn out_of_time(&self) -> bool;
+}
+
+/// True for an element that is laid out as a block (it ends the text before the next
+/// sibling): generic groups, headings, lists, tables, separators. Text leaves, links
+/// and images are inline.
+pub(super) fn is_block(el: &ElInfo) -> bool {
+    [
+        UIA_GroupControlTypeId.0,
+        UIA_ListControlTypeId.0,
+        UIA_TableControlTypeId.0,
+        UIA_DataGridControlTypeId.0,
+        UIA_SeparatorControlTypeId.0,
+    ]
+    .contains(&el.ct)
+        || (HeadingLevel1.0..=HeadingLevel9.0).contains(&el.heading)
+        || matches!(el.role.as_str(), "heading" | "list" | "table" | "grid" | "figure" | "blockquote" | "separator")
 }
 
 /// The block kind that starts at a token, walking up from its enclosing element
 /// `leaf` (already known to start at the token). Each step up needs the element to be
 /// its parent's first child (then the token starts the parent too). The first block
-/// kind found wins; if the walk leaves the blocks the token starts before finding
-/// one, a generic block (`Group`: Chromium's `<p>`, `<div>`, `<section>`) that the
-/// token does start makes it a `Paragraph` (Chromium word ranges carry no line breaks,
-/// so the raw-text rules cannot see paragraphs). Errors and an empty budget give no
-/// marker.
+/// kind found wins. If the walk leaves the elements the token starts before finding
+/// one, and it passed a generic block (`Group`: Chromium's `<p>`, `<div>`,
+/// `<section>`), the token starts a `Paragraph` (Chromium word ranges carry no line
+/// breaks, so the raw-text rules cannot see paragraphs), but only when the text before
+/// it is a block of its own: Chromium also shows inline pieces (`<span title>`, a
+/// focusable span, an inline-block div) as `Group`, and those sit after a text leaf.
+/// Errors and an empty budget give no marker.
 pub(super) fn walk<T: Tree>(t: &mut T, leaf: T::El, leaf_info: ElInfo) -> Option<Brk> {
     let group = UIA_GroupControlTypeId.0;
     let mut para = leaf_info.ct == group;
-    let para_brk = |p: bool| p.then_some(Brk::Paragraph);
     let (mut el, mut info) = (leaf, leaf_info);
     // the enclosing element itself (Chromium: almost always a text leaf)
     match classify(&info, &ElInfo::default()) {
         Step::Mark(b) => return Some(b),
         Step::Stop => return None,
-        Step::Block(b) => return t.is_first(&el)?.then_some(b),
-        Step::Cell => return Some(if t.is_first(&el)? { Brk::TableRow } else { Brk::TableCell }),
+        Step::Block(b) => return first(t, &el)?.then_some(b),
+        Step::Cell => return Some(if first(t, &el)? { Brk::TableRow } else { Brk::TableCell }),
         Step::Up => {}
     }
     for _ in 0..MAX_UP {
@@ -199,23 +230,23 @@ pub(super) fn walk<T: Tree>(t: &mut T, leaf: T::El, leaf_info: ElInfo) -> Option
             return None;
         }
         let Some((parent, pinfo)) = t.parent(&el) else {
-            return para_brk(para);
+            return paragraph(t, &el, para);
         };
         let step = classify(&pinfo, &info);
         if step == Step::Stop {
-            return para_brk(para);
+            return paragraph(t, &el, para);
         }
         if t.out_of_time() {
             return None;
         }
-        if !t.is_first(&el)? {
+        if let Some(prev) = t.prev_sibling(&el)? {
             // the token starts `el` but not its parent: nothing above starts here
-            return para_brk(para);
+            return (para && is_block(&prev)).then_some(Brk::Paragraph);
         }
         match step {
             Step::Mark(b) => return Some(b),
-            Step::Block(b) => return if t.is_first(&parent)? { Some(b) } else { para_brk(para) },
-            Step::Cell => return Some(if t.is_first(&parent)? { Brk::TableRow } else { Brk::TableCell }),
+            Step::Block(b) => return if first(t, &parent)? { Some(b) } else { paragraph(t, &el, para) },
+            Step::Cell => return Some(if first(t, &parent)? { Brk::TableRow } else { Brk::TableCell }),
             Step::Up | Step::Stop => {}
         }
         para |= pinfo.ct == group;
@@ -223,10 +254,31 @@ pub(super) fn walk<T: Tree>(t: &mut T, leaf: T::El, leaf_info: ElInfo) -> Option
         info = pinfo;
     }
     // deeper than MAX_UP: the token still starts every block passed
-    para_brk(para)
+    paragraph(t, &el, para)
 }
 
-/// The live element tree: one cached parent read and one sibling read per step.
+/// `Some(true)` when `el` is its parent's first child (`None` on an error or when out
+/// of time).
+fn first<T: Tree>(t: &mut T, el: &T::El) -> Option<bool> {
+    if t.out_of_time() {
+        return None;
+    }
+    t.prev_sibling(el).map(|p| p.is_none())
+}
+
+/// The walk ends at `el`, the outermost element the token starts: a `Paragraph` when
+/// it passed a generic block and the element before `el` (if any) is a block.
+fn paragraph<T: Tree>(t: &mut T, el: &T::El, para: bool) -> Option<Brk> {
+    if !para || t.out_of_time() {
+        return None;
+    }
+    match t.prev_sibling(el)? {
+        None => Some(Brk::Paragraph),
+        Some(prev) => is_block(&prev).then_some(Brk::Paragraph),
+    }
+}
+
+/// The live element tree: cached parent and sibling reads.
 struct UiaTree<'a> {
     walker: &'a IUIAutomationTreeWalker,
     cache: &'a IUIAutomationCacheRequest,
@@ -242,11 +294,11 @@ impl Tree for UiaTree<'_> {
         Some((p, info))
     }
 
-    fn is_first(&mut self, el: &IUIAutomationElement) -> Option<bool> {
-        match unsafe { self.walker.GetPreviousSiblingElement(el) } {
-            Ok(_) => Some(false),
+    fn prev_sibling(&mut self, el: &IUIAutomationElement) -> Option<Option<ElInfo>> {
+        match unsafe { self.walker.GetPreviousSiblingElementBuildCache(el, self.cache) } {
+            Ok(p) => Some(Some(cached_info(&p))),
             // windows-rs reports a null result ("no sibling") as an error with S_OK
-            Err(e) if e.code().is_ok() => Some(true),
+            Err(e) if e.code().is_ok() => Some(None),
             Err(_) => None,
         }
     }
@@ -314,7 +366,13 @@ impl Reader {
     /// The block kind starting at word range `r` (text `tok`), already known to be a
     /// block-start candidate. `None` when unknown, on any UIA error, or when `deadline`
     /// passes (checked before each read).
-    pub fn brk_at(&mut self, r: &IUIAutomationTextRange, tok: &str, deadline: Instant) -> Option<Brk> {
+    pub fn brk_at(
+        &mut self,
+        r: &IUIAutomationTextRange,
+        tok: &str,
+        prev: Option<&str>,
+        deadline: Instant,
+    ) -> Option<Brk> {
         if Instant::now() >= deadline {
             return None;
         }
@@ -332,13 +390,13 @@ impl Reader {
                 }
                 None
             }
-            Mode::Elements => self.elements(r, tok, deadline),
+            Mode::Elements => self.elements(r, tok, prev, deadline),
         }
     }
 
     /// Chromium: the token's enclosing element must start exactly at the token (its
     /// position, not just its text: "1.1" is `1` `.` `1` in one element), then `walk`.
-    fn elements(&self, r: &IUIAutomationTextRange, tok: &str, deadline: Instant) -> Option<Brk> {
+    fn elements(&self, r: &IUIAutomationTextRange, tok: &str, prev: Option<&str>, deadline: Instant) -> Option<Brk> {
         let (walker, cache, pattern) = (self.walker.as_ref()?, self.cache.as_ref()?, self.pattern.as_ref()?);
         let r3 = r.cast::<IUIAutomationTextRange3>().ok()?;
         let leaf = unsafe { r3.GetEnclosingElementBuildCache(cache) }.ok()?;
@@ -347,13 +405,18 @@ impl Reader {
         if !leaf_starts_with(&name, tok) || Instant::now() >= deadline {
             return None;
         }
-        let lr = unsafe { pattern.RangeFromChild(&leaf) }.ok()?;
-        let at = unsafe { lr.CompareEndpoints(TextPatternRangeEndpoint_Start, r, TextPatternRangeEndpoint_Start) }
-            .ok()?;
-        if at != 0 {
-            return None;
-        }
         let info = cached_info(&leaf);
+        if needs_position_check(info.ct == UIA_TextControlTypeId.0, &name, prev, tok) {
+            let lr = unsafe { pattern.RangeFromChild(&leaf) }.ok()?;
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let at = unsafe { lr.CompareEndpoints(TextPatternRangeEndpoint_Start, r, TextPatternRangeEndpoint_Start) }
+                .ok()?;
+            if at != 0 {
+                return None;
+            }
+        }
         walk(&mut UiaTree { walker, cache, deadline }, leaf, info)
     }
 }
@@ -393,6 +456,12 @@ impl Batch {
         Batch { spent: Duration::ZERO, limit: budget(n), prev, marked: 0, checked: 0, over: false }
     }
 
+    /// A batch with no budget (manual tests: what the reads find, cost aside).
+    #[cfg(test)]
+    pub fn unlimited(prev: Option<String>) -> Batch {
+        Batch { limit: Duration::from_secs(3600), ..Batch::new(0, prev) }
+    }
+
     /// Counts `d` (a structure-only read outside `token`) against the budget.
     pub fn charge(&mut self, d: Duration) {
         self.spent += d;
@@ -408,7 +477,7 @@ impl Batch {
         if candidate && !self.over {
             let t = Instant::now();
             let deadline = t + self.limit.saturating_sub(self.spent);
-            let b = reader.brk_at(r, &tok, deadline);
+            let b = reader.brk_at(r, &tok, self.prev.as_deref(), deadline);
             self.charge(t.elapsed());
             self.checked += 1;
             if let Some(b) = b {
@@ -509,11 +578,11 @@ mod tests {
         assert_eq!(classify(&ElInfo::default(), &ElInfo::default()), Step::Up, "unknown: look higher");
     }
 
-    /// A fake element tree: node i = (parent, properties, has a previous sibling);
-    /// `None` sibling = the sibling query fails. `reads` counts tree reads, and the
-    /// budget runs out after `budget` reads.
+    /// A fake element tree: node i = (parent, properties, is the first child, the
+    /// previous sibling's properties); `None` first = the sibling query fails.
+    /// `reads` counts tree reads, and the budget runs out after `budget` reads.
     struct Fake {
-        nodes: Vec<(Option<usize>, ElInfo, Option<bool>)>,
+        nodes: Vec<(Option<usize>, ElInfo, Option<bool>, ElInfo)>,
         reads: usize,
         budget: usize,
     }
@@ -524,7 +593,12 @@ mod tests {
         }
         /// Adds a node under `parent`; `first` = no previous sibling (None: query fails).
         fn add(&mut self, parent: Option<usize>, info: ElInfo, first: Option<bool>) -> usize {
-            self.nodes.push((parent, info, first));
+            self.nodes.push((parent, info, first, group()));
+            self.nodes.len() - 1
+        }
+        /// Adds a node right after a text leaf (inline content).
+        fn add_after_text(&mut self, parent: usize, info: ElInfo) -> usize {
+            self.nodes.push((Some(parent), info, Some(false), text_leaf()));
             self.nodes.len() - 1
         }
         fn run(&mut self, leaf: usize) -> Option<Brk> {
@@ -540,9 +614,10 @@ mod tests {
             let p = self.nodes.get(*el)?.0?;
             Some((p, self.nodes.get(p)?.1.clone()))
         }
-        fn is_first(&mut self, el: &usize) -> Option<bool> {
+        fn prev_sibling(&mut self, el: &usize) -> Option<Option<ElInfo>> {
             self.reads += 1;
-            self.nodes.get(*el)?.2
+            let n = self.nodes.get(*el)?;
+            Some(if n.2? { None } else { Some(n.3.clone()) })
         }
         fn out_of_time(&self) -> bool {
             self.reads >= self.budget
@@ -641,6 +716,35 @@ mod tests {
     }
 
     #[test]
+    fn inline_groups_after_text_are_not_paragraphs() {
+        let (mut t, _, _) = news_page();
+        let p = 6;
+        // `text (<span title tabindex>term</span>) more`: Chromium shows the span as a Group
+        let span = t.add_after_text(p, group());
+        let term = t.add(Some(span), text_leaf(), Some(true));
+        assert_eq!(t.run(term), None, "a span mid-sentence");
+        // an inline-block div after text
+        let ib = t.add_after_text(p, group());
+        let ibp = t.add(Some(ib), group(), Some(true));
+        let ibl = t.add(Some(ibp), text_leaf(), Some(true));
+        assert_eq!(t.run(ibl), None, "an inline-block div mid-sentence");
+        // a block after a heading, a list or a separator is a paragraph
+        let d3 = 5;
+        for prev in [el(UIA_TextControlTypeId, "heading"), el(UIA_ListControlTypeId, "list"), el(UIA_SeparatorControlTypeId, "")] {
+            t.nodes.push((Some(d3), group(), Some(false), prev.clone()));
+            let blk = t.nodes.len() - 1;
+            let l = t.add(Some(blk), text_leaf(), Some(true));
+            assert_eq!(t.run(l), Some(Brk::Paragraph), "after {prev:?}");
+        }
+        // under a container (the walk stops): same rule
+        let art = 1;
+        let loose = t.add_after_text(art, group());
+        let ll = t.add(Some(loose), text_leaf(), Some(true));
+        assert_eq!(t.run(ll), None, "an inline group right in the article");
+        assert!(is_block(&group()) && !is_block(&text_leaf()) && !is_block(&el(UIA_HyperlinkControlTypeId, "link")));
+    }
+
+    #[test]
     fn an_empty_budget_stops_the_walk() {
         let (mut t, l1, _) = news_page();
         t.budget = 3;
@@ -673,6 +777,19 @@ mod tests {
         assert!(leaf_starts_with("A cracked arch", "\u{FFFC}"), "embedded object");
         assert!(!leaf_starts_with("", "x"));
         assert!(!leaf_starts_with("x", "  "));
+    }
+
+    #[test]
+    fn the_position_is_read_only_when_the_text_cannot_rule_it_out() {
+        // "I think A.I. helps.": the second `I` follows `.` inside the leaf
+        assert!(needs_position_check(true, "I think A.I. helps.", Some("."), "I"));
+        assert!(needs_position_check(true, "1.1 Introduction", Some("."), "1 "));
+        // "held" ends the heading; ".Lead" / "heldLead" is not in the paragraph
+        assert!(!needs_position_check(true, "Lead paragraph a city.", Some("held"), "Lead "));
+        assert!(!needs_position_check(true, "Deep para one here.", Some("."), "Deep "));
+        assert!(needs_position_check(false, "Linked heading", Some("gamma"), "Linked "), "not a text leaf");
+        assert!(needs_position_check(true, "Lead paragraph", None, "Lead "), "the read's first token");
+        assert!(needs_position_check(true, "plain line one\nplain line two", Some("one"), "plain "), "pre lines");
     }
 
     #[test]
